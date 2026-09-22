@@ -327,6 +327,12 @@ func migrateDB() error {
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
 	}
+	// Add concurrency_limit / concurrency_limit_by_model columns for new tables
+	// (AutoMigrate adds them on fresh databases; the migration helper covers
+	// existing databases where AutoMigrate has already done its pass once).
+	if err := migrateTokenConcurrencyLimits(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -617,6 +623,41 @@ func migrateTokenModelLimitsToText() error {
 		common.SysLog(fmt.Sprintf("Successfully migrated %s.%s to text", tableName, columnName))
 	}
 	return nil
+}
+
+// migrateTokenConcurrencyLimits idempotently adds concurrency_limit and
+// concurrency_limit_by_model columns to the tokens table on every supported
+// dialect. Safe to run on every startup: each branch checks HasColumn first.
+//
+// SQLite: type-affinity treats INTEGER as int — single ALTER TABLE ADD COLUMN.
+// MySQL: ADD COLUMN with explicit DEFAULT and NULL handling.
+func migrateTokenConcurrencyLimits() error {
+	if !DB.Migrator().HasTable("tokens") {
+		return nil
+	}
+	if err := addTokenConcurrencyColumn("concurrency_limit", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := addTokenConcurrencyColumn("concurrency_limit_by_model", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func addTokenConcurrencyColumn(columnName, sqliteDef string) error {
+	if DB.Migrator().HasColumn(&Token{}, columnName) {
+		return nil
+	}
+	switch {
+	case common.UsingMainDatabase(common.DatabaseTypeSQLite):
+		return DB.Exec(fmt.Sprintf("ALTER TABLE tokens ADD COLUMN %s %s", columnName, sqliteDef)).Error
+	case common.UsingMainDatabase(common.DatabaseTypeMySQL):
+		return DB.Exec(fmt.Sprintf("ALTER TABLE tokens ADD COLUMN %s %s DEFAULT NULL", columnName, sqliteDef)).Error
+	case common.UsingMainDatabase(common.DatabaseTypePostgreSQL):
+		return DB.Exec(fmt.Sprintf(`ALTER TABLE tokens ADD COLUMN %s %s DEFAULT NULL`, columnName, sqliteDef)).Error
+	default:
+		return fmt.Errorf("unsupported database dialect for concurrency migration")
+	}
 }
 
 // migrateSubscriptionPlanPriceAmount migrates price_amount column from float/double to decimal(10,6)
