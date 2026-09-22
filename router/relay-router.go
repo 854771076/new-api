@@ -63,6 +63,7 @@ func SetRelayRouter(router *gin.Engine) {
 	playgroundRouter.Use(middleware.RouteTag("relay"))
 	playgroundRouter.Use(middleware.SystemPerformanceCheck())
 	playgroundRouter.Use(middleware.UserAuth(), middleware.Distribute())
+	playgroundRouter.Use(middleware.ConcurrencyMiddleware())
 	{
 		playgroundRouter.POST("/chat/completions", controller.Playground)
 	}
@@ -75,6 +76,7 @@ func SetRelayRouter(router *gin.Engine) {
 		// WebSocket 路由（统一到 Relay）
 		wsRouter := relayV1Router.Group("")
 		wsRouter.Use(middleware.Distribute())
+		wsRouter.Use(middleware.ConcurrencyMiddleware())
 		wsRouter.GET("/realtime", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIRealtime)
 		})
@@ -83,6 +85,7 @@ func SetRelayRouter(router *gin.Engine) {
 		//http router
 		httpRouter := relayV1Router.Group("")
 		httpRouter.Use(middleware.Distribute())
+		httpRouter.Use(middleware.ConcurrencyMiddleware())
 
 		// claude related routes
 		// TODO: /messages/count_tokens is disabled. The current controller.CountClaudeTokens
