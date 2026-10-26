@@ -376,15 +376,20 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		if openErr != nil {
 			return nil, openErr
 		}
-		data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+		// The size is known and bounded here, so grow the buffer once instead of
+		// letting the read double it repeatedly: the bytes are already buffered
+		// twice (request storage plus this body), and concurrent near-limit
+		// submissions would multiply that peak.
+		body := bytes.NewBuffer(make([]byte, 0, min(files[index].Size+1, limit+1)))
+		_, readErr := io.Copy(body, io.LimitReader(file, limit+1))
 		file.Close()
 		if readErr != nil {
 			return nil, readErr
 		}
-		if int64(len(data)) > limit {
+		if int64(body.Len()) > limit {
 			return nil, fmt.Errorf("file %q exceeds the %d byte limit", fileRef, limit)
 		}
-		return bytes.NewReader(data), nil
+		return bytes.NewReader(body.Bytes()), nil
 	}
 	if descriptor.BodyType == "multipart" {
 		form, parseErr := common.ParseMultipartFormReusable(c)
@@ -556,7 +561,7 @@ func encodeFilePlaceholder(placeholder map[string]any, form *multipart.Form, lim
 	header := files[index]
 	maxBytes := limit
 	if raw, exists := placeholder["maxBytes"]; exists {
-		n, ok := usageNumber(raw)
+		n, ok := usageNumber(raw, false)
 		if !ok || n <= 0 || n != math.Trunc(n) {
 			return "", fmt.Errorf("invalid file placeholder")
 		}
@@ -1879,9 +1884,27 @@ func (a *TaskAdaptor) submitContext(c *gin.Context, info *relaycommon.RelayInfo)
 			if strings.Contains(c.GetHeader("Content-Type"), "multipart/form-data") {
 				if form, err := common.ParseMultipartFormReusable(c); err == nil {
 					defer form.RemoveAll()
+					// The route request already carries the host-measured billable
+					// duration for media-duration@1 plugins; key it by ref so the
+					// rebuilt file list keeps the same contract the decoder saw.
+					measured := make(map[string]any, len(routeRequest.Files))
+					for _, prepared := range routeRequest.Files {
+						ref, _ := prepared["ref"].(string)
+						if ref == "" {
+							continue
+						}
+						if seconds, present := prepared["durationSeconds"]; present {
+							measured[ref] = seconds
+						}
+					}
 					for field, headers := range form.File {
 						for index, header := range headers {
-							files = append(files, map[string]any{"ref": pluginruntime.FileReference(field, index), "field": field, "filename": header.Filename, "mimeType": header.Header.Get("Content-Type"), "size": header.Size})
+							ref := pluginruntime.FileReference(field, index)
+							file := map[string]any{"ref": ref, "field": field, "filename": header.Filename, "mimeType": header.Header.Get("Content-Type"), "size": header.Size}
+							if seconds, present := measured[ref]; present {
+								file["durationSeconds"] = seconds
+							}
+							files = append(files, file)
 						}
 					}
 				}
@@ -2004,7 +2027,7 @@ func (a *TaskAdaptor) validatedUsageRatios(facts map[string]any, models ...strin
 			}
 			continue
 		}
-		number, numeric := usageNumber(value)
+		number, numeric := usageNumber(value, false)
 		if !numeric {
 			continue
 		}
@@ -2037,11 +2060,18 @@ func (a *TaskAdaptor) validatedCompletionUsageFacts(facts any, models ...string)
 	if !ok {
 		return nil, fmt.Errorf("plugin usage hook must return an object")
 	}
+	// A plugin that declares media-duration@1 priced the request from the media
+	// the client uploaded, so the upstream's measurement is a better reading of
+	// the same quantity and is clamped at the ceiling. Without that capability
+	// the submitted figure is a *requested* quantity (a video's requested
+	// seconds), and an upstream number far above it is untrustworthy, so the
+	// reservation stays.
+	measuredMedia := slices.Contains(a.plugin.Meta.RequiredCapabilities, pluginruntime.CapabilityMediaDuration)
 	validated := make(map[string]any, len(values))
 	for key, value := range values {
 		validated[key] = value
 		if schema, declared := usageSchema[key]; declared {
-			number, err := validateUsageValue(value, schema)
+			number, err := usageFactValue(key, value, schema, false, measuredMedia)
 			if err != nil {
 				return nil, err
 			}
@@ -2050,12 +2080,20 @@ func (a *TaskAdaptor) validatedCompletionUsageFacts(facts any, models ...string)
 			}
 			continue
 		}
-		if limit, canonical := canonicalUsageLimit(key); canonical {
-			number, numeric := usageNumber(value)
+		if bound, canonical := canonicalUsageBound(key); canonical {
+			number, numeric := usageNumber(value, false)
 			if !numeric {
 				return nil, fmt.Errorf("plugin usage value must be a number")
 			}
-			if err := validateUsageNumberLimit(number, limit); err != nil {
+			if bound.clampOnCompletion && measuredMedia {
+				clamped, err := clampCompletionUsageCeiling(key, number, bound.limit)
+				if err != nil {
+					return nil, err
+				}
+				validated[key] = clamped
+				continue
+			}
+			if err := validateUsageNumberLimit(number, bound.limit); err != nil {
 				return nil, err
 			}
 			validated[key] = number
@@ -2063,13 +2101,13 @@ func (a *TaskAdaptor) validatedCompletionUsageFacts(facts any, models ...string)
 		}
 		switch key {
 		case "upstreamUnits", "completionTokens", "totalTokens":
-			number, numeric := usageNumber(value)
+			number, numeric := usageNumber(value, false)
 			if !numeric || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
 				return nil, fmt.Errorf("plugin usage value must be a finite non-negative number")
 			}
 			validated[key] = float64(common.QuotaFromFloat(number))
 		default:
-			if number, numeric := usageNumber(value); numeric {
+			if number, numeric := usageNumber(value, false); numeric {
 				validated[key] = number
 			}
 		}
@@ -2078,6 +2116,10 @@ func (a *TaskAdaptor) validatedCompletionUsageFacts(facts any, models ...string)
 }
 
 func validateUsageValue(value any, schema pluginruntime.UsageFieldSchema) (float64, error) {
+	return usageFactValue("", value, schema, false, false)
+}
+
+func usageFactValue(key string, value any, schema pluginruntime.UsageFieldSchema, allowNumericString, clampCeiling bool) (float64, error) {
 	if len(schema.Enum) > 0 {
 		text, ok := value.(string)
 		if !ok {
@@ -2094,7 +2136,7 @@ func validateUsageValue(value any, schema pluginruntime.UsageFieldSchema) (float
 		}
 		return 0, nil
 	}
-	number, ok := usageNumber(value)
+	number, ok := usageNumber(value, false)
 	if !ok {
 		return 0, fmt.Errorf("plugin usage value must be a number")
 	}
@@ -2111,12 +2153,40 @@ func validateUsageValue(value any, schema pluginruntime.UsageFieldSchema) (float
 	}
 	limit := relaycommon.MaxTaskDurationSeconds
 	if schema.Unit == "count" {
+		// An out-of-range image count keeps the reserved request quantity, so it
+		// is never clamped upward.
 		limit = kitdto.MaxImageN
+		clampCeiling = false
+	}
+	if clampCeiling {
+		return clampCompletionUsageCeiling(key, number, limit)
 	}
 	if err := validateUsageNumberLimit(number, limit); err != nil {
 		return 0, err
 	}
 	return number, nil
+}
+
+// clampCompletionUsageCeiling bounds a measured completion fact by the host
+// ceiling and reports the clamp, so an oversized upstream measurement stays
+// auditable instead of silently changing what the task is charged.
+func clampCompletionUsageCeiling(key string, number float64, limit int) (float64, error) {
+	if math.IsNaN(number) || math.IsInf(number, 0) || number < 0 {
+		return 0, fmt.Errorf("plugin usage value must be a finite non-negative number")
+	}
+	if number <= float64(limit) {
+		return number, nil
+	}
+	common.SysError(fmt.Sprintf("task plugin completion usage fact %q clamped from %v to the host limit %d", key, number, limit))
+	return float64(limit), nil
+}
+
+func validateUsageLimit(value any, limit int, allowNumericString bool) error {
+	number, ok := usageNumber(value, allowNumericString)
+	if !ok {
+		return fmt.Errorf("plugin usage value must be a number")
+	}
+	return validateUsageNumberLimit(number, limit)
 }
 
 func validateUsageNumberLimit(number float64, limit int) error {
@@ -2129,7 +2199,7 @@ func validateUsageNumberLimit(number float64, limit int) error {
 	return nil
 }
 
-func usageNumber(value any) (float64, bool) {
+func usageNumber(value any, allowNumericString bool) (float64, bool) {
 	switch number := value.(type) {
 	case float64:
 		return number, true
@@ -2137,23 +2207,41 @@ func usageNumber(value any) (float64, bool) {
 		return float64(number), true
 	case int:
 		return float64(number), true
+	case string:
+		if !allowNumericString {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(number), 64)
+		return parsed, err == nil
 	default:
 		return 0, false
 	}
 }
 
-var usageKeySeparators = strings.NewReplacer("_", "", "-", "")
+// usageFactBound is the host ceiling for one canonical usage-fact name.
+type usageFactBound struct {
+	limit int
+	// clampOnCompletion marks bounds where a measured value above the ceiling is
+	// clamped instead of rejected. It is set for duration facts, whose submit-time
+	// value is the host's own reading of the uploaded media.
+	clampOnCompletion bool
+}
 
-func canonicalUsageLimit(key string) (int, bool) {
-	normalized := usageKeySeparators.Replace(strings.ToLower(key))
+func canonicalUsageBound(key string) (usageFactBound, bool) {
+	normalized := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
 	switch normalized {
 	case "duration", "durationseconds", "second", "seconds":
-		return relaycommon.MaxTaskDurationSeconds, true
+		return usageFactBound{limit: relaycommon.MaxTaskDurationSeconds, clampOnCompletion: true}, true
 	case "n", "count", "imagecount", "samplecount", "batchcount", "numimages":
-		return kitdto.MaxImageN, true
+		return usageFactBound{limit: kitdto.MaxImageN}, true
 	default:
-		return 0, false
+		return usageFactBound{}, false
 	}
+}
+
+func canonicalUsageLimit(key string) (int, bool) {
+	bound, ok := canonicalUsageBound(key)
+	return bound.limit, ok
 }
 
 func (a *TaskAdaptor) logRejectedUsage(hook string, _ error) {

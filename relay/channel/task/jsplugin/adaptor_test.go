@@ -1444,22 +1444,46 @@ export function extractUsageOnComplete(task, result, body) { return (body || {})
 		assert.NotContains(t, err.Error(), "secret")
 	})
 
+	// A plugin that measured the uploaded media gets its oversized duration
+	// clamped to the ceiling instead of dropped: the submit-time reservation is
+	// a reading of the very same media, so dropping the fact would settle at a
+	// value the client controls through the file header.
+	measuredSource := strings.Replace(source,
+		`fetchMode: "per_task",`,
+		`fetchMode: "per_task", requiredCapabilities: ["media-duration@1"],`, 1)
+	measuredPlugin, err := pluginruntime.NewRegistry().Register(measuredSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	completionFacts := func(t *testing.T, plugin *pluginruntime.LoadedPlugin, usage map[string]any) map[string]any {
+		t.Helper()
+		body, marshalErr := common.Marshal(map[string]any{"completionUsage": usage})
+		require.NoError(t, marshalErr)
+		result, parseErr := New(plugin).ParseTaskResult(&model.Task{}, &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, body)
+		require.NoError(t, parseErr)
+		return result.UsageFacts
+	}
+	t.Run("measured oversized duration is clamped to the ceiling", func(t *testing.T) {
+		facts := completionFacts(t, measuredPlugin, map[string]any{"duration": relaycommon.MaxTaskDurationSeconds + 1})
+		assert.EqualValues(t, relaycommon.MaxTaskDurationSeconds, facts["duration"])
+	})
+	// An image count above the ceiling keeps the reserved request quantity, per
+	// the upstream image-quantity rule, so it is never raised by clamping.
+	t.Run("measured oversized count is discarded", func(t *testing.T) {
+		assert.Nil(t, completionFacts(t, measuredPlugin, map[string]any{"count": dto.MaxImageN + 1}))
+	})
+	// Without media-duration@1 the submitted duration is a requested quantity,
+	// and an upstream number far above it must not raise the charge.
+	t.Run("requested oversized duration is discarded", func(t *testing.T) {
+		assert.Nil(t, completionFacts(t, plugin, map[string]any{"duration": relaycommon.MaxTaskDurationSeconds + 1}))
+	})
+
+	// A completion fact that is not a usable number stays rejected: clamping
+	// must not turn invalid input into a charge.
 	for _, testCase := range []struct {
 		name  string
 		usage map[string]any
 	}{
-		{
-			name:  "oversized completion duration is discarded",
-			usage: map[string]any{"duration": relaycommon.MaxTaskDurationSeconds + 1},
-		},
-		{
-			name:  "oversized completion count is discarded",
-			usage: map[string]any{"count": dto.MaxImageN + 1},
-		},
-		{
-			name:  "completion hook numeric string is discarded",
-			usage: map[string]any{"duration": "5"},
-		},
+		{name: "completion hook numeric string is discarded", usage: map[string]any{"duration": "5"}},
+		{name: "negative completion duration is discarded", usage: map[string]any{"duration": -1}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			adaptor, _, _ := newRequest(t, map[string]any{})
