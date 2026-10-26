@@ -234,6 +234,7 @@ export const STATIC_I18N_KEYS = [
   'Image',
   'Embeddings',
   'Video',
+  'Audio Transcription',
   'Sort',
   'All',
   'All Vendors',

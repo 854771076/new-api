@@ -40,7 +40,16 @@ type testResult struct {
 	context     *gin.Context
 	localErr    error
 	newAPIError *types.NewAPIError
+	// responseBody 是音频转写渠道测试需要回传给前端的上游响应预览，
+	// 其它端点类型保持为空，避免把完整响应体暴露到管理接口。
+	responseBody string
 }
+
+// channelTestResponseMaxRunes 限制渠道测试回传的响应体长度。
+const channelTestResponseMaxRunes = 4000
+
+// channelTestResponseTruncatedMarker 标注回传的响应体已被截断。
+const channelTestResponseTruncatedMarker = "\n...[truncated]"
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
@@ -570,9 +579,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	})
 	common.SysLog(common.LogText("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
 	return testResult{
-		context:     c,
-		localErr:    nil,
-		newAPIError: nil,
+		context:      c,
+		localErr:     nil,
+		newAPIError:  nil,
+		responseBody: channelTestResponsePreview(endpointType, respBody),
 	}
 }
 
@@ -655,6 +665,21 @@ func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
 		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
 	}
 	return io.ReadAll(body)
+}
+
+// channelTestResponsePreview 生成渠道测试回传给前端的响应体预览。
+// 只有音频转写端点会回传，因为转写结果本身就是用户需要核对的内容；
+// 其它端点的响应体可能很大，不进入管理接口。超长内容按字符截断并追加标记。
+func channelTestResponsePreview(endpointType string, respBody []byte) string {
+	if constant.EndpointType(endpointType) != constant.EndpointTypeAudioTranscription {
+		return ""
+	}
+	body := string(respBody)
+	runes := []rune(body)
+	if len(runes) <= channelTestResponseMaxRunes {
+		return body
+	}
+	return string(runes[:channelTestResponseMaxRunes]) + channelTestResponseTruncatedMarker
 }
 
 func detectErrorFromTestResponseBody(respBody []byte) error {
@@ -959,11 +984,21 @@ func TestChannel(c *gin.Context) {
 		})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, channelTestSuccessPayload(result, consumedTime))
+}
+
+// channelTestSuccessPayload 组装渠道测试成功响应。response 字段只在
+// testResult 带回响应预览时出现（目前仅音频转写端点），其它端点保持原结构。
+func channelTestSuccessPayload(result testResult, consumedTime float64) gin.H {
+	payload := gin.H{
 		"success": true,
 		"message": "",
 		"time":    consumedTime,
-	})
+	}
+	if result.responseBody != "" {
+		payload["response"] = result.responseBody
+	}
+	return payload
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the

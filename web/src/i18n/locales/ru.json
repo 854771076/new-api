@@ -693,6 +693,7 @@
     "Attach": "Прикрепить",
     "Attempt": "Попытка",
     "Audio": "Аудио",
+    "Audio Transcription": "Расшифровка аудио",
     "Audio Transcription (/v1/audio/transcriptions)": "Расшифровка аудио (/v1/audio/transcriptions)",
     "Audio and Realtime pricing must be converted manually.": "Тарифы аудио и Realtime необходимо преобразовать вручную.",
     "Audio and text-only requests keep their respective pricing.": "Для аудио и текстовых запросов сохраняются соответствующие правила расчёта.",

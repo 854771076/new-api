@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -398,4 +399,48 @@ func TestChannelTestAudioFixtureFormat(t *testing.T) {
 	seconds, err := common.GetAudioDuration(context.Background(), bytes.NewReader(data), ".wav")
 	require.NoError(t, err)
 	assert.InDelta(t, 2.0, seconds, 0.01)
+}
+
+// TestChannelTestTranscriptionResponse 校验渠道测试只对音频转写端点回传上游响应体，
+// 并对其长度限幅。
+func TestChannelTestTranscriptionResponse(t *testing.T) {
+	audioEndpoint := string(constant.EndpointTypeAudioTranscription)
+	transcript := `{"text":"今天天气不错","duration":2.0}`
+
+	t.Run("audio transcription returns upstream body", func(t *testing.T) {
+		preview := channelTestResponsePreview(audioEndpoint, []byte(transcript))
+		require.Equal(t, transcript, preview)
+
+		payload := channelTestSuccessPayload(testResult{responseBody: preview}, 1.25)
+		assert.Equal(t, true, payload["success"])
+		assert.Equal(t, transcript, payload["response"])
+	})
+
+	t.Run("other endpoints omit response", func(t *testing.T) {
+		for _, endpointType := range []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIResponse,
+			constant.EndpointTypeAnthropic,
+			constant.EndpointTypeGemini,
+			constant.EndpointTypeEmbeddings,
+			constant.EndpointTypeImageGeneration,
+			constant.EndpointType(""),
+		} {
+			assert.Empty(t, channelTestResponsePreview(string(endpointType), []byte(transcript)), "endpoint %q", endpointType)
+		}
+
+		payload := channelTestSuccessPayload(testResult{}, 1.25)
+		_, ok := payload["response"]
+		assert.False(t, ok)
+	})
+
+	t.Run("long transcription is truncated", func(t *testing.T) {
+		atLimit := strings.Repeat("转", channelTestResponseMaxRunes)
+		assert.Equal(t, atLimit, channelTestResponsePreview(audioEndpoint, []byte(atLimit)))
+
+		overLimit := atLimit + strings.Repeat("写", 10)
+		preview := channelTestResponsePreview(audioEndpoint, []byte(overLimit))
+		assert.Equal(t, atLimit+channelTestResponseTruncatedMarker, preview)
+		assert.True(t, utf8.ValidString(preview))
+	})
 }

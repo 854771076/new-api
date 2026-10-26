@@ -48,6 +48,7 @@ import {
   DataTableBulkActions as BulkActionsToolbar,
   DataTablePagination,
   DataTableView,
+  TruncatedCell,
   useDataTable,
 } from '@/components/data-table'
 import { Dialog } from '@/components/dialog'
@@ -115,6 +116,8 @@ type TestResult = {
   completedAt?: number
   error?: string
   errorCode?: string
+  /** Upstream response preview; only present for audio transcription tests. */
+  response?: string
 }
 
 type BatchProgress = {
@@ -559,7 +562,7 @@ function ChannelTestDialogContent({
             stream: effectiveStreamTest || undefined,
             silent,
           },
-          (success, responseTime, error, errorCode) => {
+          (success, responseTime, error, errorCode, response) => {
             const completedAt = Date.now()
             finalResult = {
               status: success ? 'success' : 'error',
@@ -567,6 +570,7 @@ function ChannelTestDialogContent({
               completedAt,
               error,
               errorCode,
+              response,
             }
             updateTestResult(model, finalResult)
           }
@@ -1209,12 +1213,32 @@ function TestResultCell({
   }
 
   if (result.status === 'success') {
-    return typeof result.responseTime === 'number' ? (
-      <span className='text-muted-foreground text-sm'>
-        {formatResponseTime(result.responseTime, t)}
-      </span>
-    ) : (
-      <span className='text-muted-foreground text-sm'>-</span>
+    const responseTimeLabel =
+      typeof result.responseTime === 'number'
+        ? formatResponseTime(result.responseTime, t)
+        : '-'
+
+    if (!result.response) {
+      return (
+        <span className='text-muted-foreground text-sm'>
+          {responseTimeLabel}
+        </span>
+      )
+    }
+
+    return (
+      <div className='flex min-w-0 flex-col gap-1'>
+        <span className='text-muted-foreground text-sm'>
+          {responseTimeLabel}
+        </span>
+        <TruncatedCell
+          tabIndex={0}
+          tooltipContent={result.response}
+          className='text-muted-foreground font-mono text-xs'
+        >
+          {result.response}
+        </TruncatedCell>
+      </div>
     )
   }
 

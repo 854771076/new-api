@@ -693,6 +693,7 @@
     "Attach": "Attach",
     "Attempt": "Attempt",
     "Audio": "Audio",
+    "Audio Transcription": "Audio Transcription",
     "Audio Transcription (/v1/audio/transcriptions)": "Audio Transcription (/v1/audio/transcriptions)",
     "Audio and Realtime pricing must be converted manually.": "Audio and Realtime pricing must be converted manually.",
     "Audio and text-only requests keep their respective pricing.": "Audio and text-only requests keep their respective pricing.",

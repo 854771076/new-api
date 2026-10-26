@@ -201,6 +201,8 @@ export interface ChannelTestResponse {
   message?: string
   error_code?: string
   time?: number
+  /** Upstream response preview; only present for audio transcription tests. */
+  response?: string
   data?: {
     response_time?: number
     error?: string

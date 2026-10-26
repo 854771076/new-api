@@ -731,9 +731,12 @@ func TestASRUploadLanguage(t *testing.T) {
 		want string
 	}{
 		{name: "缺失时为空", raw: "", want: ""},
-		{name: "JSON 字符串的中文语种映射为 cn", raw: `"zh"`, want: "cn"},
-		{name: "JSON 字符串的英文语种保持 en", raw: `"en"`, want: "en"},
+		// 讯飞 IFASR 的 language 参数只接受 autodialect 与 autominor，
+		// 通用语种代码一律映射到默认的 autodialect。
+		{name: "JSON 字符串的中文语种映射为 autodialect", raw: `"zh"`, want: "autodialect"},
+		{name: "JSON 字符串的英文语种映射为 autodialect", raw: `"en"`, want: "autodialect"},
 		{name: "讯飞自有取值原样透传", raw: `"autodialect"`, want: "autodialect"},
+		{name: "讯飞自有取值 autominor 原样透传", raw: `"autominor"`, want: "autominor"},
 		{name: "null 视为缺失", raw: "null", want: ""},
 	}
 

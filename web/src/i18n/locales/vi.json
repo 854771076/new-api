@@ -693,6 +693,7 @@
     "Attach": "Đính kèm",
     "Attempt": "Lần thử",
     "Audio": "Âm thanh",
+    "Audio Transcription": "Chép lời âm thanh",
     "Audio Transcription (/v1/audio/transcriptions)": "Chép lời âm thanh (/v1/audio/transcriptions)",
     "Audio and Realtime pricing must be converted manually.": "Cần chuyển đổi giá âm thanh và Realtime thủ công.",
     "Audio and text-only requests keep their respective pricing.": "Yêu cầu âm thanh và yêu cầu chỉ có văn bản giữ nguyên cách tính phí tương ứng.",

@@ -693,6 +693,7 @@
     "Attach": "添付",
     "Attempt": "試行",
     "Audio": "音声",
+    "Audio Transcription": "音声文字起こし",
     "Audio Transcription (/v1/audio/transcriptions)": "音声文字起こし（/v1/audio/transcriptions）",
     "Audio and Realtime pricing must be converted manually.": "音声と Realtime の料金は手動で変換してください。",
     "Audio and text-only requests keep their respective pricing.": "音声とテキストのみのリクエストには、それぞれ従来の料金を適用します。",
