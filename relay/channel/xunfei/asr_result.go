@@ -1,0 +1,328 @@
+package xunfei
+
+import (
+	"bytes"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/QuantumNous/new-api/common"
+)
+
+// ASRResultType 讯飞 IFASR 轮询查询的结果类型。
+type ASRResultType string
+
+const (
+	// ASRResultTypeTransfer 转写结果（默认结果类型）。
+	ASRResultTypeTransfer ASRResultType = "transfer"
+	// ASRResultTypeAnalysis 语音语种识别结果。
+	ASRResultTypeAnalysis ASRResultType = "analysis"
+)
+
+// 讯飞 IFASR 订单流程状态。
+const (
+	// ASROrderStatusCreated 订单已创建。
+	ASROrderStatusCreated = 0
+	// ASROrderStatusProcessing 订单处理中。
+	ASROrderStatusProcessing = 3
+	// ASROrderStatusCompleted 订单已完成。
+	ASROrderStatusCompleted = 4
+	// ASROrderStatusFailed 订单失败。
+	ASROrderStatusFailed = -1
+)
+
+// ASRSegment 转写结果的一个分段。
+type ASRSegment struct {
+	// Index 分段序号，从 0 开始。
+	Index int
+	// Speaker 说话人标识（上游 rl 字段）；上游未开启角色分离时为空字符串。
+	Speaker string
+	// StartMs 分段起始时间，单位毫秒。
+	StartMs int64
+	// EndMs 分段结束时间，单位毫秒。
+	EndMs int64
+	// Text 分段文本。
+	Text string
+}
+
+// ASROrderInfo 订单信息，对应上游 content.orderInfo 对象。
+type ASROrderInfo struct {
+	// OrderId 订单号。
+	OrderId string
+	// Status 订单流程状态：0 已创建 / 3 处理中 / 4 已完成 / -1 失败。
+	Status int
+	// FailType 订单异常状态码，0 表示正常。
+	FailType int
+	// ExpireTimeMs 订单结果过期时间，单位毫秒；上游未返回时为 0。
+	ExpireTimeMs int64
+}
+
+// ASRResult 讯飞 IFASR 转写订单的解析结果。
+type ASRResult struct {
+	// ResultType 本次查询使用的结果类型。
+	ResultType ASRResultType
+	// Code 上游业务返回码，成功为 "000000"。
+	Code string
+	// DescInfo 上游返回描述。
+	DescInfo string
+	// Text 全文转写文本，由各分段文本按顺序无分隔拼接。
+	Text string
+	// Segments 分段列表，说话人变化处切段。
+	Segments []ASRSegment
+	// OriginalDurationMs 原始音频时长，单位毫秒，来自上游订单信息，是计费的时长事实来源；上游未返回时为 0。
+	OriginalDurationMs int64
+	// Language 识别语种；上游仅在开启语种分析能力且以 analysis 结果类型查询时返回，缺失时为空字符串。
+	Language string
+	// Order 订单信息。
+	Order ASROrderInfo
+}
+
+// ParseASRResult 解析讯飞 IFASR 轮询响应体（/v2/getResult 的响应），返回转写结果。
+//
+// 上游把转写结果放在 content.orderResult 里，而该字段本身是一个 JSON 字符串；
+// 字符串内部每个分段单元的 json_1best 又是一个 JSON 字符串，因此需要逐层解码。
+//
+// 结果类型只决定上游是否返回语种字段：解析器在字段存在时取出，不存在时留空，不据结果类型臆造语种。
+//
+// 错误边界：响应体不是合法的 JSON 对象时返回错误；其余情况（转写载荷缺失、载荷畸形、
+// 没有可用分段）一律返回空结果与 nil 错误，由上层据此判定。
+func ParseASRResult(body []byte, resultType ASRResultType) (*ASRResult, error) {
+	var envelope asrPollEnvelope
+	if err := common.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("讯飞转写响应不是合法的 JSON: %w", err)
+	}
+
+	info := envelope.Content.OrderInfo
+	result := &ASRResult{
+		ResultType:         resultType,
+		Code:               envelope.Code,
+		DescInfo:           envelope.DescInfo,
+		OriginalDurationMs: info.OriginalDuration,
+		Language:           info.Language,
+		Order: ASROrderInfo{
+			OrderId:      info.OrderId,
+			Status:       info.Status,
+			FailType:     info.FailType,
+			ExpireTimeMs: info.ExpireTime,
+		},
+	}
+
+	orderResult, ok := decodeASROrderResult(envelope.Content.OrderResult)
+	if !ok {
+		return result, nil
+	}
+	// lattice 是做了顺滑的识别结果；缺失或为空时回退到未做顺滑的 lattice2，两者都不可用则没有结果。
+	units := orderResult.Lattice
+	if len(units) == 0 {
+		units = orderResult.Lattice2
+	}
+	result.Segments = buildASRSegments(units)
+
+	var builder strings.Builder
+	for _, segment := range result.Segments {
+		builder.WriteString(segment.Text)
+	}
+	result.Text = builder.String()
+	return result, nil
+}
+
+// asrPollEnvelope 讯飞 IFASR 轮询接口（/v2/getResult）的响应结构。
+type asrPollEnvelope struct {
+	Code     string `json:"code"`
+	DescInfo string `json:"descInfo"`
+	Content  struct {
+		OrderInfo asrOrderInfoPayload `json:"orderInfo"`
+		// OrderResult 上游该字段是一个 JSON 字符串（内含 lattice 列表），这里保留原始 JSON 以便区分字符串与对象。
+		OrderResult common.RawMessage `json:"orderResult"`
+	} `json:"content"`
+}
+
+// asrOrderInfoPayload 上游 content.orderInfo 对象。
+type asrOrderInfoPayload struct {
+	OrderId          string `json:"orderId"`
+	Status           int    `json:"status"`
+	FailType         int    `json:"failType"`
+	OriginalDuration int64  `json:"originalDuration"`
+	ExpireTime       int64  `json:"expireTime"`
+	Language         string `json:"language"`
+}
+
+// asrOrderResult 转写载荷的解码结果。
+type asrOrderResult struct {
+	Lattice  []asrLatticeUnit `json:"lattice"`
+	Lattice2 []asrLatticeUnit `json:"lattice2"`
+}
+
+// asrLatticeUnit 一个分段单元，装着单个 vad 的识别结果。
+type asrLatticeUnit struct {
+	Json1best string `json:"json_1best"`
+}
+
+// asrSentence 分段单元的识别结果（json_1best 字段解码后的形态）。
+type asrSentence struct {
+	ST asrSentenceST `json:"st"`
+}
+
+// asrSentenceST 单句的识别内容。
+type asrSentenceST struct {
+	// BG 单句开始时间，单位毫秒。
+	BG asrUpstreamValue `json:"bg"`
+	// ED 单句结束时间，单位毫秒。
+	ED asrUpstreamValue `json:"ed"`
+	// RL 分离的角色编号；未开启角色分离时上游不返回该字段。
+	RL asrUpstreamValue `json:"rl"`
+	RT []asrSentenceRT  `json:"rt"`
+}
+
+// asrSentenceRT 识别结果中的词序列分组。
+type asrSentenceRT struct {
+	WS []asrSentenceWS `json:"ws"`
+}
+
+// asrSentenceWS 一个词的候选识别结果。
+type asrSentenceWS struct {
+	CW []asrSentenceCW `json:"cw"`
+}
+
+// asrSentenceCW 词的候选字。
+type asrSentenceCW struct {
+	W string `json:"w"`
+}
+
+// asrUpstreamValue 上游以字符串承载的字段（起止时间毫秒、说话人标识）。
+// 这里同时容忍数字形态，避免上游偶发返回数字时整段识别结果无法解析。
+type asrUpstreamValue string
+
+// UnmarshalJSON 接受字符串与数字两种形态，其余形态按原始文本保留。
+func (v *asrUpstreamValue) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := common.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		*v = asrUpstreamValue(text)
+		return nil
+	}
+	*v = asrUpstreamValue(trimmed)
+	return nil
+}
+
+// millis 解析毫秒值；上游缺失或给出非数字形态时返回 0。
+func (v asrUpstreamValue) millis() int64 {
+	millis, err := strconv.ParseInt(strings.TrimSpace(string(v)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return millis
+}
+
+// speaker 说话人标识；上游未开启角色分离时该字段缺失，返回空字符串。
+func (v asrUpstreamValue) speaker() string {
+	return string(v)
+}
+
+// decodeASROrderResult 解析 content.orderResult 的转写载荷。
+//
+// 上游该字段正常是一个 JSON 字符串：字符串先做一次过度转义还原（连续两个反斜杠 → 一个，
+// 单次全局替换、不重复迭代），再做一次 JSON 解码得到 lattice 列表；上游直接给出 JSON 对象时直接解码。
+// 载荷缺失或畸形时返回 false，由调用方按「无可用结果」处理。
+func decodeASROrderResult(raw common.RawMessage) (asrOrderResult, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return asrOrderResult{}, false
+	}
+	if trimmed[0] == '"' {
+		var payload string
+		if err := common.Unmarshal(trimmed, &payload); err != nil {
+			return asrOrderResult{}, false
+		}
+		payload = strings.ReplaceAll(payload, `\\`, `\`)
+		var orderResult asrOrderResult
+		if err := common.UnmarshalJsonStr(payload, &orderResult); err != nil {
+			return asrOrderResult{}, false
+		}
+		return orderResult, true
+	}
+	var orderResult asrOrderResult
+	if err := common.Unmarshal(trimmed, &orderResult); err != nil {
+		return asrOrderResult{}, false
+	}
+	return orderResult, true
+}
+
+// decodeASRSentence 解析分段单元的识别结果（json_1best 字段本身是一段 JSON 字符串）。
+func decodeASRSentence(json1best string) (asrSentence, bool) {
+	if json1best == "" {
+		return asrSentence{}, false
+	}
+	var sentence asrSentence
+	if err := common.UnmarshalJsonStr(json1best, &sentence); err != nil {
+		return asrSentence{}, false
+	}
+	return sentence, true
+}
+
+// buildASRSegments 由分段单元构建分段列表。
+//
+// 相邻分段单元的说话人标识不同时切为新段；同一说话人内的时间范围取各单元的并集
+// （起始取最小、结束取最新）。
+func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
+	segments := make([]ASRSegment, 0, len(units))
+	for _, unit := range units {
+		sentence, ok := decodeASRSentence(unit.Json1best)
+		if !ok {
+			continue
+		}
+		speaker := sentence.ST.RL.speaker()
+		start := sentence.ST.BG.millis()
+		end := sentence.ST.ED.millis()
+		if len(segments) > 0 && segments[len(segments)-1].Speaker == speaker {
+			last := &segments[len(segments)-1]
+			if start > 0 && (last.StartMs == 0 || start < last.StartMs) {
+				last.StartMs = start
+			}
+			if end > last.EndMs {
+				last.EndMs = end
+			}
+			last.Text += sentence.text()
+			continue
+		}
+		segments = append(segments, ASRSegment{
+			Speaker: speaker,
+			StartMs: start,
+			EndMs:   end,
+			Text:    sentence.text(),
+		})
+	}
+
+	// 去掉没有文本的空段，并按最终顺序编号。
+	result := segments[:0]
+	for _, segment := range segments {
+		if segment.Text == "" {
+			continue
+		}
+		result = append(result, segment)
+	}
+	for i := range result {
+		result[i].Index = i
+	}
+	return result
+}
+
+// text 拼接该句的识别文本：每个词取候选字数组的第一个。
+func (s asrSentence) text() string {
+	var builder strings.Builder
+	for _, rt := range s.ST.RT {
+		for _, ws := range rt.WS {
+			if len(ws.CW) == 0 {
+				continue
+			}
+			builder.WriteString(ws.CW[0].W)
+		}
+	}
+	return builder.String()
+}
