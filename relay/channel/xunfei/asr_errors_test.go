@@ -69,6 +69,9 @@ func TestMapASRErrorUpstreamCodes(t *testing.T) {
 }
 
 // TestMapASRErrorOrderFailTypes 订单失败状态下的失败类型分类。
+//
+// 订单失败只可能发生在轮询阶段，此时上游订单已经存在，因此无论失败类型如何都跳过重试：
+// 重试会重新上传音频并在���游创建第二个订单。
 func TestMapASRErrorOrderFailTypes(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -76,19 +79,19 @@ func TestMapASRErrorOrderFailTypes(t *testing.T) {
 		wantStatus    int
 		wantSkipRetry bool
 	}{
-		{name: "上传失败", failType: 1, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
-		{name: "转码失败", failType: 2, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
-		{name: "识别失败", failType: 3, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
+		{name: "上传失败", failType: 1, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
+		{name: "转码失败", failType: 2, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
+		{name: "识别失败", failType: 3, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
 		{name: "时长超限", failType: 4, wantStatus: http.StatusBadRequest, wantSkipRetry: true},
 		{name: "时长校验失败", failType: 5, wantStatus: http.StatusBadRequest, wantSkipRetry: true},
 		{name: "静音文件", failType: 6, wantStatus: http.StatusBadRequest, wantSkipRetry: true},
-		{name: "翻译失败", failType: 7, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
+		{name: "翻译失败", failType: 7, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
 		{name: "账号无翻译权限", failType: 8, wantStatus: http.StatusForbidden, wantSkipRetry: true},
-		{name: "转写质检失败", failType: 9, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
+		{name: "转写质检失败", failType: 9, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
 		{name: "转写质检未匹配出关键词", failType: 10, wantStatus: http.StatusBadRequest, wantSkipRetry: true},
 		{name: "未开启质检或翻译能力", failType: 11, wantStatus: http.StatusForbidden, wantSkipRetry: true},
-		{name: "音频语种分析失败", failType: 12, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
-		{name: "其他", failType: 99, wantStatus: http.StatusBadGateway, wantSkipRetry: false},
+		{name: "音频语种分析失败", failType: 12, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
+		{name: "其他", failType: 99, wantStatus: http.StatusBadGateway, wantSkipRetry: true},
 	}
 
 	for _, tt := range tests {
@@ -100,6 +103,7 @@ func TestMapASRErrorOrderFailTypes(t *testing.T) {
 					FailType:     tt.failType,
 					Stage:        asrStagePoll,
 				},
+				OrderCreated: true,
 			}
 			status := MapASRError(err)
 
@@ -108,6 +112,49 @@ func TestMapASRErrorOrderFailTypes(t *testing.T) {
 			// 失败类型必须透传到错误信息里。
 			assert.Contains(t, status.Message, "失败类型")
 			assert.Contains(t, status.Message, asrFailTypeDescription(tt.failType))
+		})
+	}
+}
+
+// TestMapASRErrorOrderCreatedSkipsRetry 上游订单已创建后的失败一律跳过重试。
+//
+// 网关级重试会重新上传音频并在讯飞侧创建第二个订单，导致上游额度双扣与重复计费；
+// 因此订单创建之后的 5xx、429、订单失败与网络故障都不能重试。
+func TestMapASRErrorOrderCreatedSkipsRetry(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        *ASRUpstreamError
+		wantStatus int
+	}{
+		{
+			name:       "上游业务故障",
+			err:        &ASRUpstreamError{ASRErrorInfo: ASRErrorInfo{UpstreamCode: "100006", Description: "upload failed", Stage: asrStagePoll}},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "上游频率限制",
+			err:        &ASRUpstreamError{ASRErrorInfo: ASRErrorInfo{UpstreamCode: "100012", Description: "frequency limit", Stage: asrStagePoll}},
+			wantStatus: http.StatusTooManyRequests,
+		},
+		{
+			name:       "上游 HTTP 故障",
+			err:        &ASRUpstreamError{HTTPStatus: 503, ASRErrorInfo: ASRErrorInfo{Description: "service unavailable", Stage: asrStagePoll}},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "网络故障",
+			err:        &ASRUpstreamError{ASRErrorInfo: ASRErrorInfo{Description: "上游请求失败（网络或传输故障）", Stage: asrStagePoll}},
+			wantStatus: http.StatusBadGateway,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.err.OrderCreated = true
+			status := MapASRError(tt.err)
+
+			assert.Equal(t, tt.wantStatus, status.StatusCode)
+			assert.True(t, status.SkipRetry, "订单已创建后的失败必须跳过重试")
 		})
 	}
 }
@@ -213,14 +260,27 @@ func TestNewASRAPIError(t *testing.T) {
 		assert.Contains(t, apiErr.Error(), "签名校验不通过")
 	})
 
-	t.Run("限流错误", func(t *testing.T) {
+	t.Run("上传阶段的限流错误", func(t *testing.T) {
+		// 上传阶段失败时上游订单尚未创建，重试不会产生第二个订单，因此允许重试。
+		apiErr := NewASRAPIError(&ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{UpstreamCode: "100012", Description: "请求超过频率限制", Stage: asrStageUpload},
+		}, types.ErrorCodeDoRequestFailed)
+		require.NotNil(t, apiErr)
+
+		assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
+		assert.False(t, types.IsSkipRetryError(apiErr))
+		assert.Contains(t, apiErr.Error(), "100012")
+	})
+
+	t.Run("轮询阶段的限流错误", func(t *testing.T) {
+		// 轮询阶段失败时上游订单已经创建，重试会重复创建订单，必须跳过重试。
 		apiErr := NewASRAPIError(&ASRUpstreamError{
 			ASRErrorInfo: ASRErrorInfo{UpstreamCode: "100012", Description: "请求超过频率限制", Stage: asrStagePoll},
 		}, types.ErrorCodeDoRequestFailed)
 		require.NotNil(t, apiErr)
 
 		assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
-		assert.False(t, types.IsSkipRetryError(apiErr))
+		assert.True(t, types.IsSkipRetryError(apiErr))
 		assert.Contains(t, apiErr.Error(), "100012")
 	})
 
@@ -236,6 +296,51 @@ func TestNewASRAPIError(t *testing.T) {
 	t.Run("空错误返回 nil", func(t *testing.T) {
 		assert.Nil(t, NewASRAPIError(nil, types.ErrorCodeDoRequestFailed))
 	})
+}
+
+// TestNewASRAPIErrorUsesStandardClientCode 客户端可见的错误码始终是调用方传入的标准码，
+// 上游的业务码、描述、阶段与分类只出现在错误信息与管理员可见的说明里。
+func TestNewASRAPIErrorUsesStandardClientCode(t *testing.T) {
+	apiErr := NewASRAPIError(&ASRUpstreamError{
+		ASRErrorInfo: ASRErrorInfo{
+			UpstreamCode: "100012",
+			Description:  "请求超过频率限制",
+			Stage:        asrStagePoll,
+		},
+		HTTPStatus: http.StatusTooManyRequests,
+	}, types.ErrorCodeDoRequestFailed)
+	require.NotNil(t, apiErr)
+
+	// 客户端可见的错误码是调用方传入的标准码，不引入讯飞专有的错误码。
+	assert.Equal(t, types.ErrorCodeDoRequestFailed, apiErr.GetErrorCode())
+
+	// 错误信息带上阶段、分类、上游错误码与上游描述。
+	assert.Contains(t, apiErr.Error(), "查询")
+	assert.Contains(t, apiErr.Error(), "上游频率限制")
+	assert.Contains(t, apiErr.Error(), "100012")
+	assert.Contains(t, apiErr.Error(), "请求超过频率限制")
+
+	// 管理员可见的说明带上分类、阶段与上游信息，且经过既有的脱敏机制。
+	adminReason := apiErr.AdminReason()
+	assert.Contains(t, adminReason, "上游频率限制")
+	assert.Contains(t, adminReason, "阶段：查询")
+	assert.Contains(t, adminReason, "100012")
+}
+
+// TestASRAdminReasonMasksSensitiveInfo 管理员说明里的上游内容经过既有的脱敏机制处理。
+func TestASRAdminReasonMasksSensitiveInfo(t *testing.T) {
+	apiErr := NewASRAPIError(&ASRUpstreamError{
+		ASRErrorInfo: ASRErrorInfo{
+			UpstreamCode: "100006",
+			Description:  "上传失败：https://example.com/audio.wav",
+			Stage:        asrStageUpload,
+		},
+	}, types.ErrorCodeDoRequestFailed)
+	require.NotNil(t, apiErr)
+
+	adminReason := apiErr.AdminReason()
+	assert.Contains(t, adminReason, "100006")
+	assert.NotContains(t, adminReason, "example.com", "管理员说明里的地址应被既有脱敏机制处理")
 }
 
 // asrErrorFakeUpstream 是按路径返回预置响应体的假上游。
@@ -296,7 +401,8 @@ func TestASRTranscribeUploadStageError(t *testing.T) {
 	assert.Contains(t, err.Error(), "上传")
 }
 
-// TestASRTranscribePollStageRateLimited 轮询阶段的限流错误映射为 429 且允许重试。
+// TestASRTranscribePollStageRateLimited 轮询阶段的限流错误映射为 429，但订单已存在，
+// 不允许网关重试。
 func TestASRTranscribePollStageRateLimited(t *testing.T) {
 	fake := newASRErrorFakeUpstream(t,
 		`{"code":"000000","descInfo":"success","content":{"orderId":"`+testASROrderID+`","taskEstimateTime":100}}`,
@@ -311,7 +417,7 @@ func TestASRTranscribePollStageRateLimited(t *testing.T) {
 
 	status := MapASRError(err)
 	assert.Equal(t, http.StatusTooManyRequests, status.StatusCode)
-	assert.False(t, status.SkipRetry)
+	assert.True(t, status.SkipRetry, "订单已创建后的限流失败不能重试，否则会重复创建订单")
 	assert.Contains(t, err.Error(), "100012")
 	assert.Contains(t, err.Error(), "查询")
 }
@@ -349,7 +455,49 @@ func TestASRTranscribeUpstreamHTTPFailure(t *testing.T) {
 
 	status := MapASRError(err)
 	assert.GreaterOrEqual(t, status.StatusCode, 500)
-	assert.False(t, status.SkipRetry)
+	assert.False(t, status.SkipRetry, "上传阶段失败时上游订单尚未创建，允许重试")
+}
+
+// TestASRTranscribePollStageHTTPFailure 轮询阶段的上游 5xx 发生在订单创建之后，必须跳过重试。
+//
+// 重试会重新上传音频并在讯飞侧创建第二个订单，造成上游额度双扣与重复计费。
+func TestASRTranscribePollStageHTTPFailure(t *testing.T) {
+	fake := newASRErrorFakeUpstream(t,
+		`{"code":"000000","descInfo":"success","content":{"orderId":"`+testASROrderID+`","taskEstimateTime":100}}`,
+		`{"code":"100004","descInfo":"query order failed"}`)
+	fake.pollCode = http.StatusBadGateway
+
+	_, err := ASRTranscribe(context.Background(), asrTestCredentials(), asrTestAudio(), ASROptions{
+		PollInterval: time.Millisecond,
+		MaxWait:      5 * time.Second,
+		BaseURL:      fake.server.URL,
+	})
+	require.Error(t, err)
+
+	status := MapASRError(err)
+	assert.Equal(t, http.StatusBadGateway, status.StatusCode)
+	assert.True(t, status.SkipRetry, "订单已创建后的上游 5xx 不能重试，否则会重复创建订单")
+	assert.Contains(t, err.Error(), "100004")
+	assert.Contains(t, err.Error(), "查询")
+}
+
+// TestASRTranscribeUploadAcceptedWithoutOrderID 上游以成功码应答但没给出订单号时，
+// 订单多半已在上游侧创建，不能重试。
+func TestASRTranscribeUploadAcceptedWithoutOrderID(t *testing.T) {
+	fake := newASRErrorFakeUpstream(t,
+		`{"code":"000000","descInfo":"success"}`,
+		`{"code":"000000","descInfo":"success"}`)
+
+	_, err := ASRTranscribe(context.Background(), asrTestCredentials(), asrTestAudio(), ASROptions{
+		PollInterval: time.Millisecond,
+		MaxWait:      5 * time.Second,
+		BaseURL:      fake.server.URL,
+	})
+	require.Error(t, err)
+
+	status := MapASRError(err)
+	assert.True(t, status.SkipRetry, "上游已受理上传时不能重试，否则会创建第二个订单")
+	assert.Contains(t, err.Error(), "上游未返回订单号")
 }
 
 // TestASRTranscribeNumericUpstreamCode 上游失败响应的业务码是数字形态时（官方失败示例
@@ -386,7 +534,7 @@ func TestASRTranscribeNumericUpstreamCode(t *testing.T) {
 
 		status := MapASRError(err)
 		assert.Equal(t, http.StatusTooManyRequests, status.StatusCode)
-		assert.False(t, status.SkipRetry)
+		assert.True(t, status.SkipRetry, "轮询阶段的数字错误码同样发生在订单创建之后，不能重试")
 		assert.Contains(t, err.Error(), "100012")
 	})
 

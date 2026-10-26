@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 )
 
@@ -16,6 +17,10 @@ import (
 // 与「凭据错误不该让渠道被误禁用、限流与上游故障才计入失败次数」的要求正好相反。
 // 因此凭据类错误统一映射到 403（不落入自动禁用范围），并显式标记跳过重试；
 // 400 类错误既不在默认重试范围内，也显式跳过重试。
+//
+// 对外契约：客户端可见的错误码固定是调用方传入的标准错误码（fallbackCode），
+// 不引入讯飞专有的客户端错误码；上游的业务错误码、描述、失败类型、阶段与错误分类
+// 只出现在错误信息与管理员可见的说明里，便于排查而不对外新增契约。
 
 // 错误发生阶段。
 const (
@@ -25,25 +30,7 @@ const (
 	asrStagePoll = "poll"
 )
 
-// 客户端可见的讯飞转写错误码。
-const (
-	// ASRErrorCodeInvalidRequest 请求参数或音频本身不合法。
-	ASRErrorCodeInvalidRequest types.ErrorCode = "xfyun_asr_invalid_request"
-	// ASRErrorCodeCredential 凭据或签名不合法。
-	ASRErrorCodeCredential types.ErrorCode = "xfyun_asr_credential_error"
-	// ASRErrorCodePermission 账号缺少相应权限。
-	ASRErrorCodePermission types.ErrorCode = "xfyun_asr_permission_error"
-	// ASRErrorCodeOrderNotFound 订单不存在。
-	ASRErrorCodeOrderNotFound types.ErrorCode = "xfyun_asr_order_not_found"
-	// ASRErrorCodeOrderConflict 订单状态与当前请求冲突（例如订单未完成）。
-	ASRErrorCodeOrderConflict types.ErrorCode = "xfyun_asr_order_conflict"
-	// ASRErrorCodeRateLimited 上游频率限制。
-	ASRErrorCodeRateLimited types.ErrorCode = "xfyun_asr_rate_limited"
-	// ASRErrorCodeUpstream 上游故障或网络故障。
-	ASRErrorCodeUpstream types.ErrorCode = "xfyun_asr_upstream_error"
-)
-
-// asrErrorCategory 是讯飞转写错误的分类，决定网关状态码、重试标记与客户端可见的错误码。
+// asrErrorCategory 是讯飞转写错误的分类，决定网关状态码、重试标记与错误说明。
 type asrErrorCategory int
 
 const (
@@ -65,30 +52,52 @@ const (
 	asrCategoryUpstream
 )
 
-// asrCategoryBehavior 返回一个错误分类对应的网关状态码、跳过重试标记与错误码。
+// asrCategoryDescriptions 是错误分类的中文说明。
+//
+// 说明既进入面向客户端的错误信息，也进入管理员可见的说明，用于判断失败属于哪一类问题。
+var asrCategoryDescriptions = map[asrErrorCategory]string{
+	asrCategoryUnknown:       "未分类故障",
+	asrCategoryClient:        "客户端请求有误",
+	asrCategoryCredential:    "凭据或签名有误",
+	asrCategoryPermission:    "账号权限不足",
+	asrCategoryOrderNotFound: "订单不存在",
+	asrCategoryOrderConflict: "订单状态冲突",
+	asrCategoryRateLimited:   "上游频率限制",
+	asrCategoryUpstream:      "上游故障",
+}
+
+// asrCategoryDescription 返回错误分类的中文说明。
+func asrCategoryDescription(category asrErrorCategory) string {
+	if description, ok := asrCategoryDescriptions[category]; ok {
+		return description
+	}
+	return asrCategoryDescriptions[asrCategoryUnknown]
+}
+
+// asrCategoryBehavior 返回一个错误分类对应的网关状态码与是否跳过重试。
 //
 // 状态码的选取受仓库默认规则约束：自动禁用范围只有 401，自动重试范围覆盖 401–407 与
 // 409–499。凭据类映射到 403 并跳过重试，因此既不会被自动禁用，也不会被重试；
 // 409（订单状态冲突）与 429（频率限制）都落在默认重试范围内，前者靠显式跳过重试避免
-// 重跑一次转写，后者则按既有规则重试。
-func asrCategoryBehavior(category asrErrorCategory) (int, bool, types.ErrorCode) {
+// 重跑一次转写，后者则按既有规则重试——但前提是上游订单尚未创建。
+func asrCategoryBehavior(category asrErrorCategory) (int, bool) {
 	switch category {
 	case asrCategoryClient:
-		return http.StatusBadRequest, true, ASRErrorCodeInvalidRequest
+		return http.StatusBadRequest, true
 	case asrCategoryCredential:
-		return http.StatusForbidden, true, ASRErrorCodeCredential
+		return http.StatusForbidden, true
 	case asrCategoryPermission:
-		return http.StatusForbidden, true, ASRErrorCodePermission
+		return http.StatusForbidden, true
 	case asrCategoryOrderNotFound:
-		return http.StatusNotFound, true, ASRErrorCodeOrderNotFound
+		return http.StatusNotFound, true
 	case asrCategoryOrderConflict:
-		return http.StatusConflict, true, ASRErrorCodeOrderConflict
+		return http.StatusConflict, true
 	case asrCategoryRateLimited:
-		return http.StatusTooManyRequests, false, ASRErrorCodeRateLimited
+		return http.StatusTooManyRequests, false
 	case asrCategoryUpstream:
-		return http.StatusBadGateway, false, ASRErrorCodeUpstream
+		return http.StatusBadGateway, false
 	default:
-		return http.StatusInternalServerError, false, ""
+		return http.StatusInternalServerError, false
 	}
 }
 
@@ -219,6 +228,11 @@ type ASRUpstreamError struct {
 	HTTPStatus int
 	// Cause 是引发本次失败的底层错误（网络故障、上下文取消等），可以为空。
 	Cause error
+	// OrderCreated 表示上游订单已经创建：音频上传成功之后的所有失败都属于此类。
+	//
+	// 这类失败一律跳过网关重试——重试会重新上传音频并在讯飞侧创建第二个订单，
+	// 导致上游额度双扣与重复计费。
+	OrderCreated bool
 }
 
 // Unwrap 暴露底层错误，使 errors.Is / errors.As 能沿错误链判定。
@@ -226,17 +240,18 @@ func (e *ASRUpstreamError) Unwrap() error {
 	return e.Cause
 }
 
-// Error 输出面向客户端的错误信息：失败阶段、上游错误码、上游描述与失败类型。
-func (e *ASRUpstreamError) Error() string {
-	stage := "转写"
-	switch e.Stage {
-	case asrStageUpload:
-		stage = "上传"
-	case asrStagePoll:
-		stage = "查询"
-	}
+// orderExists 判断该失败是否发生在上游订单已创建之后。
+//
+// 轮询阶段只可能在上传成功之后发生，因此轮询阶段的失败一律视为订单已存在；OrderCreated
+// 标记用于显式声明「订单已创建」，两者取或，保证订单已存在时不会漏判。
+func (e *ASRUpstreamError) orderExists() bool {
+	return e.OrderCreated || e.Stage == asrStagePoll
+}
 
-	parts := []string{"讯飞转写" + stage + "失败"}
+// Error 输出面向客户端的错误信息：失败阶段、错误分类、上游错误码、上游描述与失败类型。
+func (e *ASRUpstreamError) Error() string {
+	parts := []string{"讯飞转写" + asrStageName(e.Stage) + "失败"}
+	parts = append(parts, "分类："+asrCategoryDescription(e.category()))
 	if e.UpstreamCode != "" && e.UpstreamCode != asrSuccessCode {
 		parts = append(parts, "上游错误码 "+e.UpstreamCode)
 	}
@@ -272,6 +287,19 @@ func (e *ASRUpstreamError) category() asrErrorCategory {
 	return asrCategoryUpstream
 }
 
+// newASRPollError 构造轮询阶段的上游失败。
+//
+// 轮询只发生在音频上传成功之后，此时上游订单已经存在：这类失败一律跳过网关重试，
+// 否则重试会重新上传音频并创建第二个订单，造成上游额度双扣与重复计费。
+func newASRPollError(info ASRErrorInfo, httpStatus int, cause error) *ASRUpstreamError {
+	return &ASRUpstreamError{
+		ASRErrorInfo: info,
+		HTTPStatus:   httpStatus,
+		Cause:        cause,
+		OrderCreated: true,
+	}
+}
+
 // ASRLocalError 是讯飞转写在调用上游之前检测到的请求侧错误。
 //
 // 它区分「客户端请求有误」与「凭据有误」两类：前者返回 400，后者返回 403，两类都跳过
@@ -281,11 +309,41 @@ type ASRLocalError struct {
 	Category asrErrorCategory
 	// Reason 错误原因。
 	Reason string
+	// Cause 引发本次错误的底层错误，可以为空。
+	//
+	// 保留底层错误是为了让 errors.As 能沿错误链找到内层的网关错误：service 层若已经
+	// 给出 *types.NewAPIError，这一层包装不会把它改写成别的错误码。
+	Cause error
 }
 
-// Error 返回错误原因。
+// Error 返回错误原因与错误分类。
 func (e *ASRLocalError) Error() string {
-	return e.Reason
+	return asrCategoryDescription(e.Category) + "：" + e.Reason
+}
+
+// Unwrap 暴露底层错误，使 errors.Is / errors.As 能沿错误链判定。
+func (e *ASRLocalError) Unwrap() error {
+	return e.Cause
+}
+
+// newASRAudioSourceError 把本地音频来源错误包装成 400 的网关错误。
+//
+// 音频来源问题（缺少音频、扩展名不受支持、webm 容器等）都是客户端请求有误，不是网关
+// 故障：状态码取 400，错误码沿用调用方的标准码，不引入讯飞专有的客户端错误码。
+//
+// 这里返回 *types.NewAPIError 而不是普通错误，是为了让上层对转换失败的包装保留这个
+// 400 状态码，而不是把它覆盖成 500：上层的 types.NewError 命中 errors.As 分支时
+// 直接返回内层错误，状态码与错误码都保持不变。
+//
+// service 层若已经给出 *types.NewAPIError，这一层包装经由 ASRLocalError 的错误链同样
+// 能把它找出来，NewError 会保留它：错误码仍是内层的那个，状态码统一为 400。
+func newASRAudioSourceError(err error) *types.NewAPIError {
+	local := &ASRLocalError{
+		Category: asrCategoryClient,
+		Reason:   err.Error(),
+		Cause:    err,
+	}
+	return types.NewError(local, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
 }
 
 // MapASRError 把讯飞 IFASR 的上游错误映射为网关错误行为。
@@ -293,24 +351,74 @@ func MapASRError(err error) ASRErrorStatus {
 	if err == nil {
 		return ASRErrorStatus{StatusCode: http.StatusInternalServerError, Message: "讯飞转写未知错误"}
 	}
-	status, skipRetry, _ := asrCategoryBehavior(classifyASRError(err))
+	status, skipRetry := asrErrorBehavior(err)
 	return ASRErrorStatus{StatusCode: status, SkipRetry: skipRetry, Message: err.Error()}
 }
 
-// NewASRAPIError 把上游错误转换为网关错误，fallbackCode 是无法分类时的兜底错误码。
+// NewASRAPIError 把上游错误转换为网关错误，fallbackCode 是客户端可见的错误码。
+//
+// 客户端可见的错误码始终是调用方传入的标准错误码，不引入讯飞专有的客户端错误码；
+// 上游的业务错误码、描述、失败类型、阶段与错误分类进入错误信息与管理员可见的说明。
 func NewASRAPIError(err error, fallbackCode types.ErrorCode) *types.NewAPIError {
 	if err == nil {
 		return nil
 	}
-	status, skipRetry, errorCode := asrCategoryBehavior(classifyASRError(err))
-	if errorCode == "" {
-		errorCode = fallbackCode
-	}
+	status, skipRetry := asrErrorBehavior(err)
 	options := []types.NewAPIErrorOptions{types.ErrOptionWithStatusCode(status)}
 	if skipRetry {
 		options = append(options, types.ErrOptionWithSkipRetry())
 	}
-	return types.NewError(err, errorCode, options...)
+	options = append(options, types.ErrOptionWithAdminReason(asrAdminReason(err)))
+	return types.NewError(err, fallbackCode, options...)
+}
+
+// asrErrorBehavior 判定错误映射后的网关状态码与是否跳过重试。
+//
+// 状态码与基础重试标记由错误分类决定；上游订单已经创建时一律跳过重试，
+// 因为网关重试会重新上传音频并创建第二个上游订单。
+func asrErrorBehavior(err error) (int, bool) {
+	status, skipRetry := asrCategoryBehavior(classifyASRError(err))
+	if skipRetry {
+		return status, true
+	}
+	var upstream *ASRUpstreamError
+	if errors.As(err, &upstream) && upstream.orderExists() {
+		return status, true
+	}
+	return status, false
+}
+
+// asrAdminReason 汇总管理员可见的失败说明：分类、阶段、上游错误码与描述。
+//
+// 说明只进入日志的管理员段，不发给客户端；内容经仓库既有的脱敏机制处理。
+func asrAdminReason(err error) string {
+	parts := []string{"分类：" + asrCategoryDescription(classifyASRError(err))}
+	var upstream *ASRUpstreamError
+	if errors.As(err, &upstream) {
+		parts = append(parts, "阶段："+asrStageName(upstream.Stage))
+		if upstream.UpstreamCode != "" && upstream.UpstreamCode != asrSuccessCode {
+			parts = append(parts, "上游错误码："+upstream.UpstreamCode)
+		}
+		if upstream.FailType != 0 {
+			parts = append(parts, "失败类型："+strconv.Itoa(upstream.FailType)+"（"+asrFailTypeDescription(upstream.FailType)+"）")
+		}
+		if upstream.Description != "" {
+			parts = append(parts, "上游描述："+upstream.Description)
+		}
+	}
+	return common.MaskSensitiveInfo(strings.Join(parts, "，"))
+}
+
+// asrStageName 返回失败阶段的中文名称。
+func asrStageName(stage string) string {
+	switch stage {
+	case asrStageUpload:
+		return "上传"
+	case asrStagePoll:
+		return "查询"
+	default:
+		return "转写"
+	}
 }
 
 // classifyASRError 判定一个错误所属的分类。

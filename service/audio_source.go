@@ -284,6 +284,19 @@ func audioDurationMs(c *gin.Context, data []byte, format string) (int64, error) 
 	return int64(math.Round(seconds * 1000)), nil
 }
 
+// AudioDurationMsToTokens 把音频时长（毫秒）换算成音频 token 数。
+//
+// 口径与结算侧一致：每分钟 1000 token，秒数向上取整后按分钟折算。
+// 时长来自音频元数据（用户可伪造），负时长钳到 0，换算走配额饱和辅助函数，
+// 饱和标记由调用方挂到结算层的审计字段上。
+func AudioDurationMsToTokens(durationMs int64) (int, *common.QuotaClamp) {
+	if durationMs < 0 {
+		durationMs = 0
+	}
+	seconds := float64(durationMs) / 1000
+	return common.QuotaRoundChecked(math.Ceil(seconds) / 60.0 * 1000)
+}
+
 // audioFormatFromDataURI 从 data URI 前缀（形如 data:audio/wav;base64）取 MIME 子类型推出音频格式。
 func audioFormatFromDataURI(prefix string) string {
 	meta := strings.TrimPrefix(strings.ToLower(prefix), "data:")

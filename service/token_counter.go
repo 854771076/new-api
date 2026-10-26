@@ -45,6 +45,10 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	return tokenkit.ImageTokens(model, img), nil
 }
 
+// maxAudioDurationSeconds 是音频时长（秒）的上界，约 31700 年。
+// 时长来自用户可控的音频元数据，秒转毫秒前先限到该上界，避免 int64 转换溢出。
+const maxAudioDurationSeconds = 1e11
+
 func EstimateRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relaycommon.RelayInfo) (int, error) {
 	// 是否统计token
 	if !constant.CountToken {
@@ -65,6 +69,21 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 		return 0, nil
 	}
 	if info.RelayMode == constant2.RelayModeAudioTranscription || info.RelayMode == constant2.RelayModeAudioTranslation {
+		// 转写与翻译的预扣估算：音频来源有 multipart file / Base64 / URL 三种。
+		// 统一交给 ResolveAudioSource 归一，估算与渠道侧上传共用同一份解析结果
+		// （请求级缓存），避免 URL 被重复下载、预扣时长与结算时长不一致。
+		if audioRequest, ok := info.Request.(*dto.AudioRequest); ok {
+			source, err := ResolveAudioSource(c, audioRequest)
+			if err != nil {
+				return 0, fmt.Errorf("解析音频来源失败: %w", err)
+			}
+			// 时长来自用户可控的音频元数据，换算走配额饱和辅助函数，负值钳到 0。
+			tokens, clamp := AudioDurationMsToTokens(source.DurationMs)
+			noteQuotaClamp(info, clamp)
+			return tokens, nil
+		}
+
+		// 请求体不是音频请求 DTO 时回落既有的 multipart 解析分支。
 		multiForm, err := common.ParseMultipartFormReusable(c)
 		if err != nil {
 			return 0, fmt.Errorf("error parsing multipart form: %v", err)
@@ -84,12 +103,18 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 				return 0, fmt.Errorf("error getting audio duration: %v", err)
 			}
 			// duration 来自用户上传文件的元数据，可被伪造成天文数字或负数。
-			// 负值会让 token 估算变成负数（低估预扣费），先钳到 0 再转换。
-			if duration < 0 {
-				duration = 0
+			// 换算走配额饱和辅助函数，负值钳到 0。
+			durationMs := int64(0)
+			if duration > 0 {
+				// 秒转毫秒前先限到上界，避免 int64 转换溢出。
+				if duration > maxAudioDurationSeconds {
+					duration = maxAudioDurationSeconds
+				}
+				durationMs = int64(duration * 1000)
 			}
-			// 一分钟 1000 token，与 $price / minute 对齐。
-			totalAudioToken += common.QuotaRound(math.Ceil(duration) / 60.0 * 1000)
+			tokens, clamp := AudioDurationMsToTokens(durationMs)
+			noteQuotaClamp(info, clamp)
+			totalAudioToken += tokens
 		}
 		return totalAudioToken, nil
 	}

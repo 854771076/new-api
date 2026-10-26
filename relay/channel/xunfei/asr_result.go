@@ -95,7 +95,7 @@ func ParseASRResult(body []byte, resultType ASRResultType) (*ASRResult, error) {
 	info := envelope.Content.OrderInfo
 	result := &ASRResult{
 		ResultType:         resultType,
-		Code:               envelope.Code,
+		Code:               string(envelope.Code),
 		DescInfo:           envelope.DescInfo,
 		OriginalDurationMs: info.OriginalDuration,
 		Language:           info.Language,
@@ -127,9 +127,12 @@ func ParseASRResult(body []byte, resultType ASRResultType) (*ASRResult, error) {
 }
 
 // asrPollEnvelope 讯飞 IFASR 轮询接口（/v2/getResult）的响应结构。
+//
+// 业务码用宽松取值承接：官方成功响应的码是字符串 "000000"，失败响应的示例却是数字
+// （如 100003），若按字符串解析会让整段响应解析失败，错误码根本到不了映射层。
 type asrPollEnvelope struct {
-	Code     string `json:"code"`
-	DescInfo string `json:"descInfo"`
+	Code     asrBusinessCode `json:"code"`
+	DescInfo string          `json:"descInfo"`
 	Content  struct {
 		OrderInfo asrOrderInfoPayload `json:"orderInfo"`
 		// OrderResult 上游该字段是一个 JSON 字符串（内含 lattice 列表），这里保留原始 JSON 以便区分字符串与对象。
@@ -192,6 +195,48 @@ type asrSentenceCW struct {
 // asrUpstreamValue 上游以字符串承载的字段（起止时间毫秒、说话人标识）。
 // 这里同时容忍数字形态，避免上游偶发返回数字时整段识别结果无法解析。
 type asrUpstreamValue string
+
+// asrBusinessCode 上游业务码，兼容字符串与数字两种形态。
+//
+// 官方成功响应的业务码是字符串 "000000"，失败响应的示例却是数字（如 100003）；
+// 两种形态统一补零到 6 位，与错误码对照表的写法一致，才能落到同一套分类映射上。
+type asrBusinessCode string
+
+// asrBusinessCodeWidth 是上游业务码的固定宽度。
+const asrBusinessCodeWidth = 6
+
+// UnmarshalJSON 接受字符串与数字两种形态；纯数字形态补零到 6 位。
+func (c *asrBusinessCode) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*c = ""
+		return nil
+	}
+	text := string(trimmed)
+	if trimmed[0] == '"' {
+		var decoded string
+		if err := common.Unmarshal(trimmed, &decoded); err != nil {
+			return err
+		}
+		text = decoded
+	}
+	*c = asrBusinessCode(padASRBusinessCode(text))
+	return nil
+}
+
+// padASRBusinessCode 把纯数字的业务码补零到 6 位；非数字形态原样保留。
+func padASRBusinessCode(text string) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || len(trimmed) >= asrBusinessCodeWidth {
+		return trimmed
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return trimmed
+		}
+	}
+	return strings.Repeat("0", asrBusinessCodeWidth-len(trimmed)) + trimmed
+}
 
 // UnmarshalJSON 接受字符串与数字两种形态，其余形态按原始文本保留。
 func (v *asrUpstreamValue) UnmarshalJSON(data []byte) error {

@@ -162,21 +162,19 @@ func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, op
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, &ASRUpstreamError{
-				ASRErrorInfo: ASRErrorInfo{
-					Description: "等待转写结果超时：订单 " + upload.OrderId + " 在 " + maxWait.String() + " 内未完成",
-					Stage:       asrStagePoll,
-				},
-			}
+			return nil, newASRPollError(ASRErrorInfo{
+				Description: "等待转写结果超时：订单 " + upload.OrderId + " 在 " + maxWait.String() + " 内未完成",
+				Stage:       asrStagePoll,
+			}, 0, nil)
 		}
 		if wait > remaining {
 			wait = remaining
 		}
 		if err := asrWait(ctx, wait); err != nil {
-			return nil, &ASRUpstreamError{
-				ASRErrorInfo: ASRErrorInfo{Description: "等待转写结果被中断", Stage: asrStagePoll},
-				Cause:        err,
-			}
+			return nil, newASRPollError(ASRErrorInfo{
+				Description: "等待转写结果被中断",
+				Stage:       asrStagePoll,
+			}, 0, err)
 		}
 
 		result, err := asrQueryResult(ctx, baseURL, creds, upload.OrderId, resultType, signatureRandom)
@@ -188,13 +186,11 @@ func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, op
 		case ASROrderStatusCompleted:
 			return result, nil
 		case ASROrderStatusFailed:
-			return nil, &ASRUpstreamError{
-				ASRErrorInfo: ASRErrorInfo{
-					Description: "订单 " + result.Order.OrderId + " 转写失败",
-					FailType:    result.Order.FailType,
-					Stage:       asrStagePoll,
-				},
-			}
+			return nil, newASRPollError(ASRErrorInfo{
+				Description: "订单 " + result.Order.OrderId + " 转写失败",
+				FailType:    result.Order.FailType,
+				Stage:       asrStagePoll,
+			}, 0, nil)
 		}
 		// 0（已创建）与 3（处理中）不是终态，继续按固定间隔轮询。
 		wait = pollInterval
@@ -212,8 +208,8 @@ type asrUploadResult struct {
 // asrUploadEnvelope 讯飞 IFASR 上传接口的响应结构。
 type asrUploadEnvelope struct {
 	// Code 是上游业务码：成功是字符串 "000000"，官方失败示例里是数字，两种形态都兼容。
-	Code     asrUpstreamValue `json:"code"`
-	DescInfo string           `json:"descInfo"`
+	Code     asrBusinessCode `json:"code"`
+	DescInfo string          `json:"descInfo"`
 	Content  struct {
 		OrderId          string `json:"orderId"`
 		TaskEstimateTime int64  `json:"taskEstimateTime"`
@@ -225,8 +221,8 @@ type asrUploadEnvelope struct {
 // 上游成功响应的业务码是字符串 "000000"，官方失败示例里的业务码却是数字；完整解析只
 // 接受字符串码，因此这里先用兼容两种形态的结构取出业务错误码。
 type asrPollFailure struct {
-	Code     asrUpstreamValue `json:"code"`
-	DescInfo string           `json:"descInfo"`
+	Code     asrBusinessCode `json:"code"`
+	DescInfo string          `json:"descInfo"`
 	Content  struct {
 		OrderInfo asrOrderInfoPayload `json:"orderInfo"`
 	} `json:"content"`
@@ -292,12 +288,15 @@ func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, a
 		}
 	}
 	if envelope.Content.OrderId == "" {
+		// 上游以成功码应答说明上传已被受理，订单多半已经在上游侧创建，只是没有给出
+		// 订单号。这类失败不能重试：重试会重新上传音频并创建第二个订单，造成双扣。
 		description := "上游未返回订单号"
 		if envelope.DescInfo != "" {
 			description += "：" + envelope.DescInfo
 		}
 		return nil, &ASRUpstreamError{
 			ASRErrorInfo: ASRErrorInfo{Description: description, Stage: asrStageUpload},
+			OrderCreated: true,
 		}
 	}
 	return &asrUploadResult{
@@ -319,45 +318,46 @@ func asrQueryResult(ctx context.Context, baseURL string, creds ASRCredentials, o
 	requestURL, signature := XfyunASRBuildRequest(baseURL+ASRResultPath, params, creds.APISecret)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader("{}"))
 	if err != nil {
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{Description: "查询请求构造失败", Stage: asrStagePoll},
-			Cause:        err,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			Description: "查询请求构造失败",
+			Stage:       asrStagePoll,
+		}, 0, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(XfyunASRSignatureHeader, signature)
 
 	response, err := asrHTTPClient().Do(request)
 	if err != nil {
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{Description: "上游请求失败（网络或传输故障）", Stage: asrStagePoll},
-			Cause:        err,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			Description: "上游请求失败（网络或传输故障）",
+			Stage:       asrStagePoll,
+		}, 0, err)
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, asrMaxResponseBytes))
 	if err != nil {
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{Description: "上游响应读取失败", Stage: asrStagePoll},
-			Cause:        err,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			Description: "上游响应读取失败",
+			Stage:       asrStagePoll,
+		}, 0, err)
 	}
 	if response.StatusCode != http.StatusOK {
 		code, description := asrUpstreamErrorBody(body)
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: description, Stage: asrStagePoll},
-			HTTPStatus:   response.StatusCode,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			UpstreamCode: code,
+			Description:  description,
+			Stage:        asrStagePoll,
+		}, response.StatusCode, nil)
 	}
 
 	// 上游以非成功码表示「订单未完成」时继续轮询，其余情况按失败处理。
 	// 业务码先按宽松结构取出：官方失败示例里的业务码是数字，完整解析只接受字符串码。
 	var failure asrPollFailure
 	if err := common.Unmarshal(body, &failure); err != nil {
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{Description: "上游响应不是合法 JSON", Stage: asrStagePoll},
-			Cause:        err,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			Description: "上游响应不是合法 JSON",
+			Stage:       asrStagePoll,
+		}, 0, err)
 	}
 	if code := string(failure.Code); code != "" && code != asrSuccessCode {
 		order := ASROrderInfo{
@@ -368,17 +368,19 @@ func asrQueryResult(ctx context.Context, baseURL string, creds ASRCredentials, o
 		if order.OrderId != "" && (order.Status == ASROrderStatusCreated || order.Status == ASROrderStatusProcessing) {
 			return &ASRResult{ResultType: resultType, Code: code, DescInfo: failure.DescInfo, Order: order}, nil
 		}
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: failure.DescInfo, Stage: asrStagePoll},
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			UpstreamCode: code,
+			Description:  failure.DescInfo,
+			Stage:        asrStagePoll,
+		}, 0, nil)
 	}
 
 	result, err := ParseASRResult(body, resultType)
 	if err != nil {
-		return nil, &ASRUpstreamError{
-			ASRErrorInfo: ASRErrorInfo{Description: "上游响应解析失败", Stage: asrStagePoll},
-			Cause:        err,
-		}
+		return nil, newASRPollError(ASRErrorInfo{
+			Description: "上游响应解析失败",
+			Stage:       asrStagePoll,
+		}, 0, err)
 	}
 	return result, nil
 }

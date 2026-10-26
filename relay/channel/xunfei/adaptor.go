@@ -58,7 +58,7 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 	source, err := service.ResolveAudioSource(c, &request)
 	if err != nil {
-		return nil, err
+		return nil, newASRAudioSourceError(err)
 	}
 
 	a.audio = &ASRAudio{

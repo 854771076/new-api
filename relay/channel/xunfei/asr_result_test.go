@@ -130,6 +130,42 @@ func TestParseASRResultAcceptsNumericTimestamps(t *testing.T) {
 	}, result.Segments)
 }
 
+// TestParseASRResultAcceptsNumericBusinessCode 上游业务码的字符串与数字两种形态都要能解析，
+// 数字形态补零到 6 位，与错误码对照表的写法一致。
+func TestParseASRResultAcceptsNumericBusinessCode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "字符串形态的成功码",
+			body: `{"code":"000000","content":{"orderInfo":{"orderId":"DKHJQ20250909161126126","status":4}}}`,
+			want: "000000",
+		},
+		{
+			name: "数字形态的失败码",
+			body: `{"code":100003,"content":{"orderInfo":{"orderId":"DKHJQ20250909161126126","status":4}}}`,
+			want: "100003",
+		},
+		{
+			name: "数字形态补零到 6 位",
+			body: `{"code":1,"content":{"orderInfo":{"orderId":"DKHJQ20250909161126126","status":4}}}`,
+			want: "000001",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ParseASRResult([]byte(tc.body), ASRResultTypeTransfer)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+
+			assert.Equal(t, tc.want, result.Code)
+		})
+	}
+}
+
 func TestParseASRResultKeepsEmptySpeakerWhenUpstreamOmitsIt(t *testing.T) {
 	result, err := ParseASRResult([]byte(asrResponseNoSpeaker), ASRResultTypeTransfer)
 	require.NoError(t, err)

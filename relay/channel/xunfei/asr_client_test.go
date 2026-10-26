@@ -19,6 +19,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -488,6 +489,56 @@ func TestAdaptorConvertAudioRequest(t *testing.T) {
 	assert.Equal(t, "wav", adaptor.audio.Format)
 	assert.Equal(t, "sample.wav", adaptor.audio.FileName)
 	assert.Equal(t, int64(1000), adaptor.audio.DurationMs)
+}
+
+// TestAdaptorConvertAudioRequestReturnsBadRequest 本地音频来源问题（缺少音频、
+// 不受支持的扩展名等）返回 400，而不是被上层包装成 500。
+func TestAdaptorConvertAudioRequestReturnsBadRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	webm := &bytes.Buffer{}
+	writer := multipart.NewWriter(webm)
+	part, err := writer.CreateFormFile("file", "sample.webm")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("fake-webm-bytes"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	cases := []struct {
+		name        string
+		body        *bytes.Buffer
+		contentType string
+	}{
+		{name: "没有提供音频", body: bytes.NewBufferString(`{"model":"spark-asr"}`), contentType: "application/json"},
+		{name: "上传的音频扩展名不受支持", body: webm, contentType: writer.FormDataContentType()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", tc.body)
+			c.Request.Header.Set("Content-Type", tc.contentType)
+
+			adaptor := &Adaptor{}
+			info := &relaycommon.RelayInfo{
+				RelayMode:   relayconstant.RelayModeAudioTranscription,
+				ChannelMeta: &relaycommon.ChannelMeta{},
+			}
+
+			_, err := adaptor.ConvertAudioRequest(c, info, dto.AudioRequest{Model: "spark-asr"})
+			require.Error(t, err)
+
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.Equal(t, types.ErrorCodeConvertRequestFailed, apiErr.GetErrorCode())
+			assert.True(t, types.IsSkipRetryError(apiErr))
+
+			// 上层把转换失败再包一层时，errors.As 分支必须保留这个 400，而不是退回 500。
+			wrapped := types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			assert.Equal(t, http.StatusBadRequest, wrapped.StatusCode)
+		})
+	}
 }
 
 // TestAdaptorDoResponseAudioBranch 音频路径不依赖星火对话专用的请求状态，
