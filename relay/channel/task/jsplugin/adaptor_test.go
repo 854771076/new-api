@@ -134,6 +134,78 @@ export function parseSubmitResponse(ctx,r){return {taskId:"1"}} export function 
 	assert.Equal(t, "image-bytes", string(content))
 }
 
+func TestTaskAdaptorBuildsFileBodyFromOpaqueFileReference(t *testing.T) {
+	source := `
+export const meta = {apiVersion:1,key:"file-body",name:"File Body",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/upload",method:"POST",headers:{"Content-Type":"application/octet-stream","X-Plugin":"file"},bodyType:"file",parts:[{name:"audio",fileRef:ctx.files[0].ref}]}; }
+export function parseSubmitResponse(){return {taskId:"1"}} export function buildQueryRequest(){return {url:"https://example.com"}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	adaptor.Init(info)
+	content := []byte{0x00, 0x01, 0x02, 0xff, 'a', '\n', 0x7f}
+	c := newMultipartFileContext(t, "audio", "sample.wav", "audio/wav", content)
+	c.Set("task_request", map[string]any{"model": "m"})
+
+	body, err := adaptor.BuildRequestBody(c, info)
+	require.NoError(t, err)
+	requestBytes, err := io.ReadAll(body)
+	require.NoError(t, err)
+	assert.Equal(t, content, requestBytes, "the uploaded file bytes are the whole request body")
+
+	// The descriptor headers own Content-Type; the host neither infers a media
+	// type nor rewrites the inbound multipart request header.
+	req := httptest.NewRequest(http.MethodPost, "https://provider.example/upload", nil)
+	require.NoError(t, adaptor.BuildRequestHeader(c, req, info))
+	assert.Equal(t, "application/octet-stream", req.Header.Get("Content-Type"))
+	assert.Equal(t, "file", req.Header.Get("X-Plugin"))
+	assert.Contains(t, c.GetHeader("Content-Type"), "multipart/form-data")
+}
+
+func TestTaskAdaptorFileBodyErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		parts       string
+		fileSize    int
+		globalMB    int
+		wantContain string
+	}{
+		{name: "parts omitted", parts: "", fileSize: 4, wantContain: "requires exactly one part, got 0"},
+		{name: "empty parts", parts: ",parts:[]", fileSize: 4, wantContain: "requires exactly one part, got 0"},
+		{name: "multiple parts", parts: `,parts:[{name:"a",fileRef:ctx.files[0].ref},{name:"b",fileRef:ctx.files[0].ref}]`, fileSize: 4, wantContain: "requires exactly one part, got 2"},
+		{name: "part without fileRef", parts: `,parts:[{name:"audio",value:"x"}]`, fileSize: 4, wantContain: "requires a fileRef"},
+		{name: "unknown fileRef", parts: `,parts:[{name:"audio",fileRef:"request_file:missing"}]`, fileSize: 4, wantContain: `unknown file reference "request_file:missing"`},
+		{name: "file exceeds limit", parts: `,parts:[{name:"audio",fileRef:ctx.files[0].ref}]`, fileSize: 2 << 20, globalMB: 1, wantContain: "1048576 byte limit"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if testCase.globalMB > 0 {
+				previous := constant.MaxFileDownloadMB
+				constant.MaxFileDownloadMB = testCase.globalMB
+				t.Cleanup(func() { constant.MaxFileDownloadMB = previous })
+			}
+			source := strings.Replace(`
+export const meta = {apiVersion:1,key:"file-body-err",name:"File Body Err",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/upload",method:"POST",headers:{"Content-Type":"application/octet-stream"},bodyType:"file"PARTS}; }
+export function parseSubmitResponse(){return {taskId:"1"}} export function buildQueryRequest(){return {url:"https://example.com"}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`, "PARTS", testCase.parts, 1)
+			plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+			require.NoError(t, err)
+			adaptor := New(plugin)
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+			adaptor.Init(info)
+			c := newMultipartFileContext(t, "audio", "sample.wav", "audio/wav", bytes.Repeat([]byte("x"), testCase.fileSize))
+			c.Set("task_request", map[string]any{"model": "m"})
+
+			_, err = adaptor.BuildRequestBody(c, info)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), testCase.wantContain)
+		})
+	}
+}
+
 func TestTaskAdaptorInlinesJSONFilePlaceholders(t *testing.T) {
 	const fileBytes = "image-bytes"
 	encoded := base64.StdEncoding.EncodeToString([]byte(fileBytes))
@@ -1675,6 +1747,109 @@ export function parseBatchResult(ctx, body) {
 }
 export function extractUsageOnComplete(task, result, body) { return {upstreamUnits: body.usage || 0}; }
 `
+
+// audioTaskPluginSource returns a task plugin that claims the openai_audio host
+// protocol and renders the given JavaScript expression from its retrieve hook.
+func audioTaskPluginSource(renderValue string) string {
+	return fmt.Sprintf(`
+export const meta = {
+  apiVersion: 1, key: "mock-audio", name: "Mock Audio", version: "1.0.0",
+  author: {name: "Test"},
+  channelTypes: [1002], models: ["mock-asr"], fetchMode: "per_task",
+  protocols: ["openai_audio"],
+};
+export function buildSubmitRequest() { return {url: "https://api.example.com/submit", method: "POST"}; }
+export function parseSubmitResponse() { return {taskId: "upstream-audio"}; }
+export function buildQueryRequest() { return {url: "https://api.example.com/task", method: "GET"}; }
+export function parseTaskResult() { return {status: "SUCCESS"}; }
+export const protocols = {openai_audio: {
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+  render: function() { return %s; }
+}};
+`, renderValue)
+}
+
+var audioTaskPlugin = audioTaskPluginSource(`{
+      task_id: "upstream-audio", upstream_task_id: "upstream-audio",
+      object: "provider-transcription", model: "provider-model",
+      status: "completed", progress: 100, created_at: 99, completed_at: 20,
+      text: "你好", duration: 8, language: "",
+      segments: [{id: 0, start: 0.42, end: 7.98, text: "你好"}],
+    }`)
+
+func TestTaskAdaptorRejectsOpenAIAudioConversionWithoutClaim(t *testing.T) {
+	plugin, err := pluginruntime.NewRegistry().Register(mockPlugin, pluginruntime.Options{})
+	require.NoError(t, err)
+
+	_, err = New(plugin).ConvertToOpenAIAudioTask(&model.Task{TaskID: "task_public"})
+
+	require.ErrorContains(t, err, "does not claim openai_audio")
+}
+
+func TestTaskAdaptorOwnsOpenAIAudioTaskLifecycle(t *testing.T) {
+	plugin, err := pluginruntime.NewRegistry().Register(audioTaskPlugin, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+
+	for _, tc := range []struct {
+		status model.TaskStatus
+		want   string
+	}{
+		{model.TaskStatusQueued, "queued"},
+		{model.TaskStatusInProgress, "in_progress"},
+		{model.TaskStatusSuccess, "succeeded"},
+		{model.TaskStatusFailure, "failed"},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			task := &model.Task{
+				TaskID:     "task_public",
+				Status:     tc.status,
+				Progress:   "42%",
+				CreatedAt:  100,
+				FinishTime: 200,
+				Properties: model.Properties{OriginModelName: "origin-asr"},
+				PrivateData: model.TaskPrivateData{
+					UpstreamTaskID: "upstream-audio",
+				},
+			}
+
+			rendered, err := adaptor.ConvertToOpenAIAudioTask(task)
+			require.NoError(t, err)
+
+			var fields map[string]any
+			require.NoError(t, common.Unmarshal(rendered, &fields))
+			assert.Equal(t, "task_public", fields["id"])
+			assert.Equal(t, "audio.transcription", fields["object"])
+			assert.Equal(t, "origin-asr", fields["model"])
+			assert.Equal(t, tc.want, fields["status"])
+			assert.Equal(t, float64(42), fields["progress"])
+			assert.Equal(t, float64(100), fields["created_at"])
+			assert.NotContains(t, fields, "task_id")
+			assert.NotContains(t, fields, "upstream_task_id")
+			assert.Equal(t, "你好", fields["text"])
+			assert.Equal(t, float64(8), fields["duration"])
+			assert.Equal(t, []any{map[string]any{"id": float64(0), "start": 0.42, "end": 7.98, "text": "你好"}}, fields["segments"])
+			if tc.status == model.TaskStatusSuccess {
+				assert.Equal(t, float64(200), fields["completed_at"])
+			} else {
+				assert.NotContains(t, fields, "completed_at")
+			}
+		})
+	}
+}
+
+func TestTaskAdaptorRejectsNonObjectOpenAIAudioRendererOutput(t *testing.T) {
+	for _, value := range []string{"null", "[]", `"transcription"`, "42", "false"} {
+		t.Run(value, func(t *testing.T) {
+			plugin, err := pluginruntime.NewRegistry().Register(audioTaskPluginSource(value), pluginruntime.Options{})
+			require.NoError(t, err)
+
+			_, err = New(plugin).ConvertToOpenAIAudioTask(&model.Task{TaskID: "task_public"})
+
+			require.ErrorContains(t, err, "invalid OpenAI audio transcription object")
+		})
+	}
+}
 
 // Covers the bridge half of the batch contract: FetchBatchTasks must build the
 // upstream request from the plugin descriptor, and ParseBatchResult must key

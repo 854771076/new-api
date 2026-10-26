@@ -344,6 +344,48 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	if err != nil {
 		return nil, err
 	}
+	if descriptor.BodyType == "file" {
+		// A file body is the raw bytes of exactly one uploaded file: no JSON
+		// encoding, no multipart framing, and no Content-Type inference. The
+		// plugin names the media type in the descriptor headers.
+		if len(descriptor.Parts) != 1 {
+			return nil, fmt.Errorf(`bodyType "file" requires exactly one part, got %d`, len(descriptor.Parts))
+		}
+		fileRef := strings.TrimSpace(descriptor.Parts[0].FileRef)
+		if fileRef == "" {
+			return nil, fmt.Errorf(`bodyType "file" requires a fileRef on its single part`)
+		}
+		field, index, validRef := pluginruntime.ParseFileReference(fileRef)
+		if !validRef {
+			return nil, fmt.Errorf("unknown file reference %q", fileRef)
+		}
+		form, parseErr := common.ParseMultipartFormReusable(c)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		defer form.RemoveAll()
+		files := form.File[field]
+		if index >= len(files) {
+			return nil, fmt.Errorf("unknown file reference %q", fileRef)
+		}
+		limit := maxUploadFileBytes()
+		if files[index].Size > limit {
+			return nil, fmt.Errorf("file %q exceeds the %d byte limit", fileRef, limit)
+		}
+		file, openErr := files[index].Open()
+		if openErr != nil {
+			return nil, openErr
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+		file.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("file %q exceeds the %d byte limit", fileRef, limit)
+		}
+		return bytes.NewReader(data), nil
+	}
 	if descriptor.BodyType == "multipart" {
 		form, parseErr := common.ParseMultipartFormReusable(c)
 		if parseErr != nil {
@@ -433,7 +475,9 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	return bytes.NewReader(body), nil
 }
 
-func maxInlineFileBytes() int64 {
+// maxUploadFileBytes bounds one uploaded file, for both inlined JSON
+// placeholders and a raw file request body, by MAX_FILE_DOWNLOAD_MB.
+func maxUploadFileBytes() int64 {
 	limitMB := constant.MaxFileDownloadMB
 	if limitMB <= 0 {
 		limitMB = 64
@@ -452,7 +496,7 @@ func inlineJSONFilePlaceholders(c *gin.Context, body any) (any, error) {
 		form = parsed
 		defer form.RemoveAll()
 	}
-	limit := maxInlineFileBytes()
+	limit := maxUploadFileBytes()
 	var total int64
 	return replaceJSONFilePlaceholders(cloned, form, limit, &total)
 }
@@ -1215,6 +1259,79 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 		delete(rendered, "completed_at")
 	}
 	return common.Marshal(rendered)
+}
+
+// ConvertToOpenAIAudioTask renders a finished audio transcription task through
+// the plugin's openai_audio retrieve hook. The plugin owns the transcription
+// payload while the host owns the public task's identity and lifecycle, so
+// queued and running tasks stay readable through the retrieve endpoint.
+func (a *TaskAdaptor) ConvertToOpenAIAudioTask(task *model.Task) ([]byte, error) {
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+	claimed := slices.ContainsFunc(a.plugin.Meta.Protocols, func(claim pluginruntime.ProtocolClaim) bool {
+		return claim.Name == pluginruntime.ProtocolOpenAIAudio
+	})
+	if !claimed {
+		return nil, fmt.Errorf("plugin does not claim openai_audio")
+	}
+	view, err := service.BuildTaskPluginView(task)
+	if err != nil {
+		return nil, err
+	}
+	value, err := a.plugin.Engine.CallPath(context.Background(), "protocols", []string{pluginruntime.ProtocolOpenAIAudio, "render"}, map[string]any{"protocol": pluginruntime.ProtocolOpenAIAudio, "operation": "retrieve"}, jsonValue(view))
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := common.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var rendered map[string]any
+	if err = common.Unmarshal(encoded, &rendered); err != nil || rendered == nil {
+		return nil, fmt.Errorf("plugin returned an invalid OpenAI audio transcription object")
+	}
+	progress, _ := strconv.Atoi(strings.TrimSuffix(task.Progress, "%"))
+	completedAt := int64(0)
+	if task.Status == model.TaskStatusSuccess {
+		completedAt = task.FinishTime
+		if completedAt == 0 {
+			completedAt = task.UpdatedAt
+		}
+	}
+	rendered["id"] = task.TaskID
+	rendered["object"] = "audio.transcription"
+	delete(rendered, "task_id")
+	// 插件拿到的任务视图里带着上游订单号，那是宿主私有的身份字段：客户端只认
+	// 公开任务号，上游订单号不在转写响应契约里。
+	delete(rendered, "upstream_task_id")
+	rendered["status"] = openAIAudioTaskStatus(task.Status)
+	rendered["progress"] = progress
+	rendered["created_at"] = task.CreatedAt
+	rendered["model"] = task.Properties.OriginModelName
+	if completedAt != 0 {
+		rendered["completed_at"] = completedAt
+	} else {
+		delete(rendered, "completed_at")
+	}
+	return common.Marshal(rendered)
+}
+
+// openAIAudioTaskStatus maps a stored task status onto the transcription task
+// lifecycle. Success is "succeeded" rather than the video API's "completed".
+func openAIAudioTaskStatus(status model.TaskStatus) string {
+	switch status {
+	case model.TaskStatusNotStart, model.TaskStatusQueued, model.TaskStatusSubmitted:
+		return "queued"
+	case model.TaskStatusInProgress:
+		return "in_progress"
+	case model.TaskStatusSuccess:
+		return "succeeded"
+	case model.TaskStatusFailure:
+		return "failed"
+	default:
+		return "unknown"
+	}
 }
 
 func (a *TaskAdaptor) ListArtifacts(task *model.Task) ([]channel.TaskArtifact, error) {

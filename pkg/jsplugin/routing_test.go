@@ -83,6 +83,7 @@ func TestSupportsRegisteredHostProtocols(t *testing.T) {
 	assert.True(t, SupportsHostProtocol("openai_responses"))
 	assert.True(t, SupportsHostProtocol("openai_video"))
 	assert.True(t, SupportsHostProtocol(ProtocolOpenAIImage))
+	assert.True(t, SupportsHostProtocol(ProtocolOpenAIAudio))
 	assert.False(t, SupportsHostProtocol("plugin_owned_wire"))
 }
 
@@ -132,6 +133,58 @@ func TestOpenAIImageProtocolClaimBindsBothEndpointsAndRequiresRender(t *testing.
 	require.ErrorContains(t, err, `missing hook "render"`)
 	_, err = CompilePlugin(routingTestPluginSource("image-modes", 17, `["image-a"]`, `protocols: [{name: "openai_image", supports: ["sync"]}],`, exports), Options{})
 	require.ErrorContains(t, err, "does not define modes")
+}
+
+// The OpenAI audio protocol serves asynchronous transcription tasks: the
+// create endpoint is always a task submission, so the protocol declares no
+// request modes, and the retrieve endpoint renders a finished task.
+func TestOpenAIAudioProtocolBindsAsyncTaskEndpointsWithoutModes(t *testing.T) {
+	definition, ok := HostProtocol(ProtocolOpenAIAudio)
+	require.True(t, ok)
+	assert.Empty(t, definition.DefinedModes(), "audio task creation is always asynchronous")
+	require.Len(t, definition.Operations, 2)
+
+	create := definition.Operations[0]
+	assert.Equal(t, "create", create.Name)
+	assert.Equal(t, []string{http.MethodPost}, create.Methods)
+	assert.Equal(t, "/v1/audio/transcriptions/tasks", create.Path)
+	assert.Equal(t, []BodyKind{BodyJSON, BodyMultipart}, create.BodyKinds)
+	assert.Equal(t, "model", create.ModelField)
+	assert.Equal(t, []string{"decodeRequest"}, create.RequiredProtocolMembers)
+
+	retrieve := definition.Operations[1]
+	assert.Equal(t, "retrieve", retrieve.Name)
+	assert.Equal(t, []string{http.MethodGet}, retrieve.Methods)
+	assert.Equal(t, "/v1/audio/transcriptions/tasks/:task_id", retrieve.Path)
+	assert.Equal(t, []BodyKind{BodyNone}, retrieve.BodyKinds)
+	assert.Empty(t, retrieve.ModelField)
+	assert.Equal(t, []string{"render"}, retrieve.RequiredProtocolMembers)
+
+	exports := `export const protocols = {openai_audio: {
+		decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+		render: function(ctx, task) { return {text: ""}; }
+	}};`
+	registry := NewRegistry()
+	plugin := mustCompileRoutingPlugin(t, "audio-plugin", 17, `["audio-a", "audio-b"]`, `protocols: ["openai_audio"],`, exports)
+	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{plugin}))
+	for _, model := range []string{"audio-a", "audio-b"} {
+		binding, found := registry.Generation().LookupEndpoint(http.MethodPost, "/v1/audio/transcriptions/tasks", model)
+		require.True(t, found, model)
+		assert.Equal(t, ProtocolOpenAIAudio, binding.Protocol)
+		assert.Same(t, plugin, binding.Plugin)
+	}
+
+	scoped := mustCompileRoutingPlugin(t, "audio-scoped", 17, `["audio-a", "audio-b"]`, `protocols: [{name: "openai_audio", models: ["audio-a"]}],`, exports)
+	require.NoError(t, registry.ReplaceOverrides([]*LoadedPlugin{scoped}))
+	_, found := registry.Generation().LookupEndpoint(http.MethodPost, "/v1/audio/transcriptions/tasks", "audio-b")
+	assert.False(t, found, "models narrows the audio endpoint bindings")
+
+	_, err := CompilePlugin(routingTestPluginSource("audio-modes", 17, `["audio-a"]`, `protocols: [{name: "openai_audio", supports: ["async"]}],`, exports), Options{})
+	require.ErrorContains(t, err, "does not define modes")
+
+	_, err = CompilePlugin(routingTestPluginSource("audio-no-render", 17, `["audio-a"]`, `protocols: ["openai_audio"],`,
+		`export const protocols = {openai_audio: {decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model}; }}};`), Options{})
+	require.ErrorContains(t, err, `missing hook "render"`)
 }
 
 func TestFileReferenceRoundTripAddressesRepeatedFieldFiles(t *testing.T) {

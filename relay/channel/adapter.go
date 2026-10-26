@@ -101,6 +101,12 @@ type OpenAIVideoConverter interface {
 	ConvertToOpenAIVideo(originTask *model.Task) ([]byte, error)
 }
 
+// OpenAIAudioTaskConverter renders a finished audio transcription task for the
+// audio task retrieve endpoint.
+type OpenAIAudioTaskConverter interface {
+	ConvertToOpenAIAudioTask(originTask *model.Task) ([]byte, error)
+}
+
 type TaskArtifact = hosttypes.TaskArtifact
 
 type TaskArtifactClientRequest struct {

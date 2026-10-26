@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
@@ -40,7 +41,7 @@ func setupRelayChannelDB(t *testing.T) *gorm.DB {
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}))
+	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Task{}))
 	model.DB = database
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	common.MemoryCacheEnabled = false
@@ -180,6 +181,64 @@ func TestApplyChannelPinPreservesOriginTasksAndRetryMode(t *testing.T) {
 		})
 	}
 }
+
+// The audio task retrieve endpoint resolves the stored task, picks the plugin
+// adaptor by platform, and answers with the host-owned transcription object.
+func TestRelayTaskFetchRendersAudioTranscriptionTask(t *testing.T) {
+	database := setupRelayChannelDB(t)
+	plugin, err := pluginruntime.DefaultRegistry.Register(relayAudioTaskPluginSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pluginruntime.DefaultRegistry.Unregister(plugin.Meta.Key)) })
+
+	task := &model.Task{
+		TaskID:     "task_audio_public",
+		Platform:   constant.TaskPlatform(plugin.Meta.Key),
+		UserId:     91,
+		Status:     model.TaskStatusSuccess,
+		Progress:   "100%",
+		CreatedAt:  1710000000,
+		FinishTime: 1710000060,
+		Properties: model.Properties{OriginModelName: "mock-asr"},
+	}
+	require.NoError(t, database.Create(task).Error)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/audio/transcriptions/tasks/task_audio_public", nil)
+	c.Params = gin.Params{{Key: "task_id", Value: "task_audio_public"}}
+	c.Set("id", 91)
+
+	require.Nil(t, RelayTaskFetch(c, relayconstant.RelayModeAudioTaskFetchByID))
+
+	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "task_audio_public", response["id"])
+	assert.Equal(t, "audio.transcription", response["object"])
+	assert.Equal(t, "succeeded", response["status"])
+	assert.Equal(t, "mock-asr", response["model"])
+	assert.Equal(t, "你好", response["text"])
+	assert.Equal(t, float64(8), response["duration"])
+	assert.Equal(t, float64(1710000000), response["created_at"])
+	assert.Equal(t, float64(1710000060), response["completed_at"])
+}
+
+const relayAudioTaskPluginSource = `
+export const meta = {
+  apiVersion: 1, key: "audio-fetch-e2e", name: "Audio Fetch E2E", version: "1.0.0",
+  author: {name: "Test"},
+  models: ["mock-asr"], fetchMode: "per_task",
+  protocols: ["openai_audio"],
+};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export const protocols = {openai_audio: {
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+  render: function() { return {text: "你好", duration: 8, segments: [{id: 0, start: 0.42, end: 7.98, text: "你好"}], language: ""}; }
+}};
+`
 
 func TestTaskModel2DtoNormalizesLegacyAction(t *testing.T) {
 	task := &model.Task{Action: "firstTailGenerate"}

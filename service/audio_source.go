@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"slices"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -23,14 +22,6 @@ import (
 
 // audioSourceContextKey 是归一后的音频来源在 gin 上下文中的缓存键。
 const audioSourceContextKey = "relay_audio_source"
-
-// durationSupportedExts 是本地纯 Go 时长解析器可解析的音频扩展名。
-// 与 common.GetAudioDuration 的解析器能力保持一致；不含 webm（该分支恒返回错误）。
-var durationSupportedExts = []string{
-	".mp3", ".wav", ".flac", ".m4a", ".mp4",
-	".ogg", ".oga", ".opus",
-	".aiff", ".aif", ".aifc", ".aac",
-}
 
 // audioMimeFormatMap 把常见的 MIME 子类型映射为上游可识别的音频格式。
 var audioMimeFormatMap = map[string]string{
@@ -269,8 +260,8 @@ func resolveURLAudioSource(c *gin.Context, rawURL string) (*AudioSource, error) 
 // 时长解析失败一律报错，不按 0 时长静默继续。
 func audioDurationMs(c *gin.Context, data []byte, format string) (int64, error) {
 	ext := "." + strings.ToLower(format)
-	if !slices.Contains(durationSupportedExts, ext) {
-		return 0, fmt.Errorf("音频格式 %q 不受支持：本地时长解析器仅支持 %s", format, strings.Join(durationSupportedExts, "、"))
+	if !common.SupportsAudioDuration(ext) {
+		return 0, fmt.Errorf("音频格式 %q 不受支持：本地时长解析器仅支持 %s", format, strings.Join(common.SupportedAudioDurationExtensions(), "、"))
 	}
 
 	ctx := context.Background()

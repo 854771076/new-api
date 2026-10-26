@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
@@ -153,6 +154,24 @@ export const protocols = {openai_responses: {
   renderFinal: function() { return {output: []}; },
 }};
 `, key, key, channelType)
+}
+
+// Audio task retrieval reads the model from the stored task, so it must not be
+// mistaken for a synchronous transcription that needs a whisper channel.
+func TestGetModelRequestKeepsAudioTaskRetrievalOffChannelSelection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/audio/transcriptions/tasks/task_abc", nil)
+	c.Params = gin.Params{{Key: "task_id", Value: "task_abc"}}
+
+	request, shouldSelectChannel, err := getModelRequest(c)
+
+	require.NoError(t, err)
+	assert.False(t, shouldSelectChannel)
+	assert.Empty(t, request.Model)
+	relayMode, exists := c.Get("relay_mode")
+	require.True(t, exists)
+	assert.Equal(t, relayconstant.RelayModeAudioTaskFetchByID, relayMode)
 }
 
 func TestTokenModelLimitAllowsLegacyAliasAndModifierVariant(t *testing.T) {

@@ -524,6 +524,19 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranslation
+		} else if strings.HasPrefix(c.Request.URL.Path, "/v1/audio/transcriptions/tasks") {
+			// 异步转写任务：提交按任务链路走，查询取自已落库任务且不再选渠道。
+			// 这一分支必须排在同步转写之前，否则任务端点会被误判成同步转写。
+			if c.Request.Method == http.MethodGet {
+				shouldSelectChannel = false
+				modelRequest.Model = getTaskOriginModelName(c)
+				relayMode = relayconstant.RelayModeAudioTaskFetchByID
+			} else {
+				if req, err := getModelFromRequest(c); err == nil && req.Model != "" {
+					modelRequest.Model = req.Model
+				}
+				relayMode = relayconstant.RelayModeAudioTaskSubmit
+			}
 		} else if strings.HasPrefix(c.Request.URL.Path, "/v1/audio/transcriptions") {
 			// 先尝试从请求读取
 			if req, err := getModelFromRequest(c); err == nil && req.Model != "" {

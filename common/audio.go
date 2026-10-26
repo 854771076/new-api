@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/abema/go-mp4"
@@ -16,6 +17,26 @@ import (
 	"github.com/tcolgate/mp3"
 	"github.com/yapingcat/gomedia/go-codec"
 )
+
+// audioDurationExtensions 列出宿主能测量时长的音频扩展名。
+// webm 不在其中：它的解析分支恒返回错误。
+var audioDurationExtensions = []string{
+	".mp3", ".wav", ".flac", ".m4a", ".mp4",
+	".ogg", ".oga", ".opus",
+	".aiff", ".aif", ".aifc", ".aac",
+}
+
+// SupportsAudioDuration reports whether the host can measure the duration of a
+// file with the given extension.
+func SupportsAudioDuration(ext string) bool {
+	return slices.Contains(audioDurationExtensions, strings.ToLower(ext))
+}
+
+// SupportedAudioDurationExtensions returns the extensions whose duration the
+// host can measure.
+func SupportedAudioDurationExtensions() []string {
+	return slices.Clone(audioDurationExtensions)
+}
 
 // GetAudioDuration 使用纯 Go 库获取音频文件的时长（秒）。
 // 它不再依赖外部的 ffmpeg 或 ffprobe 程序。

@@ -15,6 +15,9 @@ func TestPath2RelayMode(t *testing.T) {
 		{path: "/v1/alpha/search?foo=1", want: RelayModeAlphaSearch},
 		{path: "/v1/tools/search", want: RelayModeToolsSearch},
 		{path: "/v1/tools/fetch", want: RelayModeToolsFetch},
+		{path: "/v1/audio/transcriptions/tasks/task_abc", want: RelayModeAudioTaskFetchByID},
+		{path: "/v1/audio/transcriptions", want: RelayModeAudioTranscription},
+		{path: "/v1/audio/translations", want: RelayModeAudioTranslation},
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {

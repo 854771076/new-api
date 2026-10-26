@@ -52,6 +52,12 @@ const (
 
 	RelayModeToolsSearch
 	RelayModeToolsFetch
+
+	// RelayModeAudioTaskSubmit submits an asynchronous audio transcription task
+	// and RelayModeAudioTaskFetchByID retrieves a stored one. Both replace the
+	// synchronous transcription relay for the task endpoints.
+	RelayModeAudioTaskSubmit
+	RelayModeAudioTaskFetchByID
 )
 
 func Path2RelayMode(path string) int {
@@ -84,6 +90,14 @@ func Path2RelayMode(path string) int {
 		relayMode = RelayModeToolsFetch
 	} else if strings.HasPrefix(path, "/v1/audio/speech") {
 		relayMode = RelayModeAudioSpeech
+	} else if strings.HasPrefix(path, "/v1/audio/transcriptions/tasks/") {
+		// 异步转写任务查询（/v1/audio/transcriptions/tasks/:task_id），必须排在
+		// 同步转写前缀判定之前，否则会被误判成 RelayModeAudioTranscription。
+		relayMode = RelayModeAudioTaskFetchByID
+	} else if strings.HasPrefix(path, "/v1/audio/transcriptions/tasks") {
+		// 异步转写任务提交（/v1/audio/transcriptions/tasks），同样必须排在同步
+		// 转写前缀判定之前。
+		relayMode = RelayModeAudioTaskSubmit
 	} else if strings.HasPrefix(path, "/v1/audio/transcriptions") {
 		relayMode = RelayModeAudioTranscription
 	} else if strings.HasPrefix(path, "/v1/audio/translations") {

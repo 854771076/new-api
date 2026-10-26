@@ -3,6 +3,7 @@ package jsplugin
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -105,6 +106,21 @@ func injectGlobals(runtime *moejs.Runtime, identity func() string, now func() ti
 			mac := hmac.New(sha256.New, []byte(secret))
 			_, _ = mac.Write([]byte(message))
 			return moejs.String(hex.EncodeToString(mac.Sum(nil))), nil
+		}),
+		// Standard Base64 of the HMAC-SHA1 digest, not hexadecimal: JavaScript
+		// cannot turn a hex digest into arbitrary bytes before base64-encoding.
+		"hmacSHA1Base64": runtime.Function("hmacSHA1Base64", 2, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			message, err := stringValue(r, moejs.Arg(args, 0))
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			secret, err := stringValue(r, moejs.Arg(args, 1))
+			if err != nil {
+				return moejs.Undefined(), err
+			}
+			mac := hmac.New(sha1.New, []byte(secret))
+			_, _ = mac.Write([]byte(message))
+			return moejs.String(base64.StdEncoding.EncodeToString(mac.Sum(nil))), nil
 		}),
 		"base64": runtime.Function("base64", 1, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			value, err := stringValue(r, moejs.Arg(args, 0))
