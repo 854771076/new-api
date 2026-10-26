@@ -25,6 +25,10 @@ type AudioRequest struct {
 	XVectorOnlyMode         json.RawMessage `json:"x_vector_only_mode,omitempty"`
 	MaxNewTokens            json.RawMessage `json:"max_new_tokens,omitempty"`
 	InitialCodecChunkFrames json.RawMessage `json:"initial_codec_chunk_frames,omitempty"`
+	// 音频来源扩展字段（转写场景）：multipart file 之外的两种来源
+	AudioBase64 string `json:"audio_base64,omitempty"`
+	AudioURL    string `json:"audio_url,omitempty"`
+	AudioFormat string `json:"audio_format,omitempty"`
 	// TODO：ensure that the logic remains correct after the stream is started.
 	//Stream                  json.RawMessage `json:"stream,omitempty"`
 }
