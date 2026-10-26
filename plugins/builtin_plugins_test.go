@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,7 +12,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai", "xfyun-asr"}
+
+// responsesPluginKeys 是声明 openai_responses 协议的内置插件名单。名单是这份
+// 契约的来源：名单内的插件丢掉该声明会直接失败，名单外的插件走别的协议。
+var responsesPluginKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu"}
+
+// claimsHostProtocol reports whether the plugin declares the given host protocol.
+func claimsHostProtocol(plugin *jsplugin.LoadedPlugin, name string) bool {
+	for _, claim := range plugin.Meta.Protocols {
+		if claim.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -171,17 +186,23 @@ func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
 					break
 				}
 			}
-			require.True(t, foundResponses, "openai_responses claim must be present")
-			assert.Equal(t, []string{"stream", "sync", "background"}, responsesClaim.Supports)
-			for _, model := range plugin.Meta.Models {
-				binding, claimed := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
-				require.True(t, claimed, model)
-				assert.Same(t, plugin, binding.Plugin)
-			}
-			for _, hook := range []string{"decodeRequest", "renderEvents", "renderFinal"} {
-				callable, callableErr := plugin.Engine.HasCallablePath(t.Context(), "protocols", "openai_responses", hook)
-				require.NoError(t, callableErr)
-				assert.True(t, callable, hook)
+			// 每个内置插件都必须声明一个宿主协议：文本类插件走 openai_responses，
+			// 音频转写插件走 openai_audio。声明了哪个协议，就必须满足该协议的
+			// 完整成员要求，不允许因为「本插件不走这个协议」而整体跳过校验。
+			require.True(t, foundResponses || claimsHostProtocol(plugin, "openai_audio"),
+				"plugin must claim openai_responses or openai_audio")
+			if foundResponses {
+				assert.Equal(t, []string{"stream", "sync", "background"}, responsesClaim.Supports)
+				for _, model := range plugin.Meta.Models {
+					binding, claimed := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
+					require.True(t, claimed, model)
+					assert.Same(t, plugin, binding.Plugin)
+				}
+				for _, hook := range []string{"decodeRequest", "renderEvents", "renderFinal"} {
+					callable, callableErr := plugin.Engine.HasCallablePath(t.Context(), "protocols", "openai_responses", hook)
+					require.NoError(t, callableErr)
+					assert.True(t, callable, hook)
+				}
 			}
 			for _, hook := range []string{"extractUsage", "extractUsageOnComplete"} {
 				assert.True(t, plugin.Engine.HasExport(hook), hook)
@@ -204,6 +225,17 @@ func TestBuiltInResponsesDecodersEchoChannelMappedAlias(t *testing.T) {
 			plugin, registerErr := registry.RegisterFactory(source, jsplugin.Options{Key: key})
 			require.NoError(t, registerErr)
 			require.NotEmpty(t, plugin.Meta.Models)
+
+			// 本用例只针对声明 openai_responses 的插件。名单外的插件（如音频转写
+			// 插件）走别的协议，由各自的专项测试覆盖；名单内的插件一旦丢掉
+			// openai_responses 声明，这里直接失败，不会被悄悄跳过。
+			if !slices.Contains(responsesPluginKeys, key) {
+				require.False(t, claimsHostProtocol(plugin, "openai_responses"),
+					"plugin %s lost its openai_responses claim", key)
+				t.Skip("plugin does not claim openai_responses")
+			}
+			require.True(t, claimsHostProtocol(plugin, "openai_responses"),
+				"plugin %s must claim openai_responses", key)
 
 			alias := "alias-under-test"
 			upstreamModel := plugin.Meta.Models[0]

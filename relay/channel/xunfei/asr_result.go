@@ -171,6 +171,12 @@ type asrLatticeUnit struct {
 	ED asrUpstreamValue `json:"ed"`
 	// RL 单元层级的说话人标识；lattice 形态不带该字段。
 	RL asrUpstreamValue `json:"rl"`
+	// Begin 单元层级的起始时间，单位毫秒；上游较新的 lattice2 版本用这个字段名。
+	Begin asrUpstreamValue `json:"begin"`
+	// End 单元层级的结束时间，单位毫秒；上游较新的 lattice2 版本用这个字段名。
+	End asrUpstreamValue `json:"end"`
+	// Spk 单元层级的说话人标识；上游较新的 lattice2 版本用这个字段名。
+	Spk asrUpstreamValue `json:"spk"`
 }
 
 // asrJSONPayload 是 json_1best 字段的载荷，兼容 JSON 字符串与 JSON 对象两种形态。
@@ -395,6 +401,11 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 		start, hasStart := unit.BG.millis()
 		end, hasEnd := unit.ED.millis()
 		if !hasStart && !hasEnd {
+			// 上游较新的 lattice2 版本把时间写成 begin/end。
+			start, hasStart = unit.Begin.millis()
+			end, hasEnd = unit.End.millis()
+		}
+		if !hasStart && !hasEnd {
 			start, hasStart = sentence.BG.millis()
 			end, hasEnd = sentence.ED.millis()
 		}
@@ -402,11 +413,15 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 			start, hasStart = sentence.ST.BG.millis()
 			end, hasEnd = sentence.ST.ED.millis()
 		}
+		// rl 是上游的角色编号，语义上就是说话人；spk 只在没有 rl 的响应里才当说话人用。
 		if speaker == "" {
 			speaker = sentence.RL.speaker()
 		}
 		if speaker == "" {
 			speaker = sentence.ST.RL.speaker()
+		}
+		if speaker == "" {
+			speaker = unit.Spk.speaker()
 		}
 		if len(segments) > 0 && segments[len(segments)-1].Speaker == speaker {
 			last := &segments[len(segments)-1]

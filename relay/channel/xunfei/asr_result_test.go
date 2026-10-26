@@ -294,3 +294,42 @@ func TestBuildASRSegmentsKeepsZeroStart(t *testing.T) {
 	assert.Equal(t, int64(1000), segments[1].StartMs, "说话人变化时切新段")
 	assert.Equal(t, int64(1200), segments[1].EndMs)
 }
+
+// TestBuildASRSegmentsReadsBeginEndSpk 上游较新的 lattice2 版本把单元层级的时间写成
+// begin/end、说话人写成 spk，解析器必须认得这组字段名。
+func TestBuildASRSegmentsReadsBeginEndSpk(t *testing.T) {
+	units := []asrLatticeUnit{
+		{
+			Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"一"}]}]}]}}`)},
+			Begin:     "0", End: "400", Spk: "段落-1",
+		},
+		{
+			Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"二"}]}]}]}}`)},
+			Begin:     "500", End: "900", Spk: "段落-1",
+		},
+	}
+
+	segments := buildASRSegments(units)
+
+	require.Len(t, segments, 1)
+	assert.Equal(t, int64(0), segments[0].StartMs)
+	assert.Equal(t, int64(900), segments[0].EndMs)
+	assert.Equal(t, "段落-1", segments[0].Speaker)
+	assert.Equal(t, "一二", segments[0].Text)
+}
+
+// TestBuildASRSegmentsPrefersRoleLabelOverSpk rl 是上游的角色编号，语义上就是说话人；
+// 只有响应里完全没有 rl 时才把 spk 当说话人。
+func TestBuildASRSegmentsPrefersRoleLabelOverSpk(t *testing.T) {
+	units := []asrLatticeUnit{
+		{
+			Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"一"}]}]}]},"rl":"0"}`)},
+			Begin:     "420", End: "7980", Spk: "W20-0",
+		},
+	}
+
+	segments := buildASRSegments(units)
+
+	require.Len(t, segments, 1)
+	assert.Equal(t, "0", segments[0].Speaker)
+}
