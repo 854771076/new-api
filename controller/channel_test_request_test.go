@@ -343,13 +343,13 @@ func TestChannelTestRelayFormat(t *testing.T) {
 // TestChannelTestAudioTranscriptionRequest 校验音频转写端点构造出的是音频转写请求。
 func TestChannelTestAudioTranscriptionRequest(t *testing.T) {
 	request, ok := buildTestRequest(
-		channelTestAudioTranscriptionModel,
+		constant.XunfeiASRModelName,
 		string(constant.EndpointTypeAudioTranscription),
 		&model.Channel{},
 		false,
 	).(*dto.AudioRequest)
 	require.True(t, ok)
-	assert.Equal(t, channelTestAudioTranscriptionModel, request.Model)
+	assert.Equal(t, constant.XunfeiASRModelName, request.Model)
 	assert.Equal(t, "json", request.ResponseFormat)
 
 	// 其它端点类型的请求构造保持不变。
@@ -357,9 +357,28 @@ func TestChannelTestAudioTranscriptionRequest(t *testing.T) {
 	assert.True(t, ok)
 }
 
+// TestChannelTestAudioModelOnlyForcedForXunfei 音频转写端点只在讯飞渠道上强制使用
+// 讯飞转写模型；其它渠道（如 OpenAI whisper）保持运营方指定的模型，否则会被改成
+// 讯飞模型名发往非讯飞上游并得到 model_not_found。
+func TestChannelTestAudioModelOnlyForcedForXunfei(t *testing.T) {
+	audioEndpoint := string(constant.EndpointTypeAudioTranscription)
+
+	// 讯飞渠道：音频转写端点使用固定转写模型，忽略运营方指定的对话模型或空模型。
+	assert.Equal(t, constant.XunfeiASRModelName, resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", audioEndpoint))
+	assert.Equal(t, constant.XunfeiASRModelName, resolveChannelTestModel(constant.ChannelTypeXunfei, "", audioEndpoint))
+
+	// 非讯飞渠道：模型保持原值，包括空值（由调用方回落到渠道测试模型或渠道模型列表）。
+	assert.Equal(t, "whisper-1", resolveChannelTestModel(constant.ChannelTypeOpenAI, "whisper-1", audioEndpoint))
+	assert.Equal(t, "", resolveChannelTestModel(constant.ChannelTypeOpenAI, "", audioEndpoint))
+
+	// 非音频端点不改写模型。
+	assert.Equal(t, "SparkDesk", resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", string(constant.EndpointTypeOpenAI)))
+	assert.Equal(t, "SparkDesk", resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", ""))
+}
+
 // TestChannelTestAudioMultipartCarriesFixture 校验渠道测试的 multipart 请求体携带音频夹具。
 func TestChannelTestAudioMultipartCarriesFixture(t *testing.T) {
-	body, contentType, err := buildChannelTestAudioMultipart(channelTestAudioTranscriptionModel)
+	body, contentType, err := buildChannelTestAudioMultipart(constant.XunfeiASRModelName)
 	require.NoError(t, err)
 	require.NotEmpty(t, body)
 
@@ -371,7 +390,7 @@ func TestChannelTestAudioMultipartCarriesFixture(t *testing.T) {
 	require.NoError(t, err)
 	defer form.RemoveAll()
 
-	assert.Equal(t, []string{channelTestAudioTranscriptionModel}, form.Value["model"])
+	assert.Equal(t, []string{constant.XunfeiASRModelName}, form.Value["model"])
 	files := form.File["file"]
 	require.Len(t, files, 1)
 	assert.Equal(t, channelTestAudioFileName, files[0].Filename)

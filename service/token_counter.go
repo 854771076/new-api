@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -45,7 +46,7 @@ func getImageToken(c *gin.Context, fileMeta *types.FileMeta, model string, strea
 	return tokenkit.ImageTokens(model, img), nil
 }
 
-// maxAudioDurationSeconds 是音频时长（秒）的上界，约 31700 年。
+// maxAudioDurationSeconds 是音频时长（秒）的上界，约 3170 年。
 // 时长来自用户可控的音频元数据，秒转毫秒前先限到该上界，避免 int64 转换溢出。
 const maxAudioDurationSeconds = 1e11
 
@@ -75,7 +76,14 @@ func CountRequestToken(c *gin.Context, meta *types.TokenCountMeta, info *relayco
 		if audioRequest, ok := info.Request.(*dto.AudioRequest); ok {
 			source, err := ResolveAudioSource(c, audioRequest)
 			if err != nil {
-				return 0, fmt.Errorf("解析音频来源失败: %w", err)
+				// 音频来源问题（未提供音频、格式不受支持、Base64 非法、URL 下载失败等）
+				// 属于客户端请求错误，必须在预扣阶段就给出 400。
+				// 预扣发生在渠道适配器之前，这里不标明状态码的话会被上游包装成
+				// count_token_failed 的 500，适配器里的 400 语义永远走不到。
+				// 包成 *types.NewAPIError 后，外层 NewError 会原样保留这个状态码。
+				return 0, types.NewError(err, types.ErrorCodeInvalidRequest,
+					types.ErrOptionWithStatusCode(http.StatusBadRequest),
+					types.ErrOptionWithSkipRetry())
 			}
 			// 时长来自用户可控的音频元数据，换算走配额饱和辅助函数，负值钳到 0。
 			tokens, clamp := AudioDurationMsToTokens(source.DurationMs)

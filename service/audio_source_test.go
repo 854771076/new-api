@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,58 @@ func buildTestWav(sampleRate int, sampleCount int) []byte {
 	buf.WriteString("data")
 	_ = binary.Write(buf, binary.LittleEndian, uint32(dataLen))
 	buf.Write(make([]byte, dataLen))
+	return buf.Bytes()
+}
+
+// writeTestMP4Box 按 ISO BMFF 格式写出一个 box：4 字节长度 + 4 字节类型 + 负载。
+func writeTestMP4Box(buf *bytes.Buffer, boxType string, payload []byte) {
+	_ = binary.Write(buf, binary.BigEndian, uint32(8+len(payload)))
+	buf.WriteString(boxType)
+	buf.Write(payload)
+}
+
+// buildTestM4A 构造只含 ftyp 与 moov/mvhd 的最小 M4A，时长（秒）= duration / timescale。
+// version 1 使用 64 位时长，可构造超出 uint32 的样本。
+// timescale 为 0 时真实解析器会得到 +Inf（duration > 0）或 NaN（duration == 0），
+// 用于覆盖用户伪造音频头导致的异常时长。
+func buildTestM4A(timescale uint32, duration uint64) []byte {
+	mvhd := &bytes.Buffer{}
+	if duration > math.MaxUint32 {
+		mvhd.Write([]byte{1, 0, 0, 0})                      // FullBox: version 1 + flags 0
+		_ = binary.Write(mvhd, binary.BigEndian, uint64(0)) // creation time
+		_ = binary.Write(mvhd, binary.BigEndian, uint64(0)) // modification time
+		_ = binary.Write(mvhd, binary.BigEndian, timescale)
+		_ = binary.Write(mvhd, binary.BigEndian, duration)
+	} else {
+		mvhd.Write([]byte{0, 0, 0, 0})                      // FullBox: version 0 + flags 0
+		_ = binary.Write(mvhd, binary.BigEndian, uint32(0)) // creation time
+		_ = binary.Write(mvhd, binary.BigEndian, uint32(0)) // modification time
+		_ = binary.Write(mvhd, binary.BigEndian, timescale)
+		_ = binary.Write(mvhd, binary.BigEndian, uint32(duration))
+	}
+	_ = binary.Write(mvhd, binary.BigEndian, uint32(0x00010000)) // rate 1.0
+	_ = binary.Write(mvhd, binary.BigEndian, uint16(0x0100))     // volume 1.0
+	_ = binary.Write(mvhd, binary.BigEndian, uint16(0))          // reserved
+	_ = binary.Write(mvhd, binary.BigEndian, uint32(0))          // reserved
+	_ = binary.Write(mvhd, binary.BigEndian, uint32(0))          // reserved
+	// matrix: 0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000
+	for _, value := range []uint32{0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000} {
+		_ = binary.Write(mvhd, binary.BigEndian, value)
+	}
+	for range 6 {
+		_ = binary.Write(mvhd, binary.BigEndian, uint32(0)) // pre_defined
+	}
+	_ = binary.Write(mvhd, binary.BigEndian, uint32(1)) // next_track_ID
+
+	moov := &bytes.Buffer{}
+	writeTestMP4Box(moov, "mvhd", mvhd.Bytes())
+
+	buf := &bytes.Buffer{}
+	ftyp := &bytes.Buffer{}
+	ftyp.WriteString("M4A ")                            // major brand
+	_ = binary.Write(ftyp, binary.BigEndian, uint32(0)) // minor version
+	writeTestMP4Box(buf, "ftyp", ftyp.Bytes())
+	writeTestMP4Box(buf, "moov", moov.Bytes())
 	return buf.Bytes()
 }
 
@@ -317,6 +370,47 @@ func TestResolveAudioSourceMissingAudio(t *testing.T) {
 	_, err := ResolveAudioSource(c, &dto.AudioRequest{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "未提供音频")
+}
+
+// TestAudioDurationMsRejectsNonFiniteDuration 验证伪造音频头产生 NaN/Inf 时长时明确报错：
+// 浮点越界转 int64 是实现相关行为（amd64 上得到 MinInt64），不能静默变成负时长或 0。
+func TestAudioDurationMsRejectsNonFiniteDuration(t *testing.T) {
+	cases := []struct {
+		name      string
+		timescale uint32
+		duration  uint64
+	}{
+		{
+			// duration/timescale = 1000/0 = +Inf（真实的采样率/时间刻度缺失情形）。
+			name:      "零时间刻度得到正无穷",
+			timescale: 0,
+			duration:  1000,
+		},
+		{
+			// duration/timescale = 0/0 = NaN。
+			name:      "时长与时间刻度都为零得到 NaN",
+			timescale: 0,
+			duration:  0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			durationMs, err := audioDurationMs(nil, buildTestM4A(tc.timescale, tc.duration), "m4a")
+			require.Error(t, err, "非法时长必须报错，不能静默返回 0 或负值")
+			assert.Zero(t, durationMs)
+			assert.Contains(t, err.Error(), "时长")
+		})
+	}
+}
+
+// TestAudioDurationMsClampsOversizedDuration 验证超出上界的时长被钳到上界，
+// 秒转毫秒不会溢出 int64 产生负值。
+func TestAudioDurationMsClampsOversizedDuration(t *testing.T) {
+	// 1<<40 秒（约 3.5 万年）远超 maxAudioDurationSeconds。
+	durationMs, err := audioDurationMs(nil, buildTestM4A(1, 1<<40), "m4a")
+	require.NoError(t, err)
+	assert.Equal(t, int64(maxAudioDurationSeconds)*1000, durationMs)
 }
 
 func TestResolveAudioSourceResolvesOnlyOnce(t *testing.T) {

@@ -62,6 +62,22 @@ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) s
 	return normalized
 }
 
+// resolveChannelTestModel 决定渠道测试使用的模型名。
+//
+// 音频转写端点只在讯飞渠道上强制使用讯飞转写模型：该端点此前对所有渠道都改写模型，
+// 运营方给 OpenAI whisper 之类渠道选择音频转写时，请求会被改成讯飞模型名发往 OpenAI，
+// 得到 model_not_found，失败原因与「渠道不可用」无法区分。其它渠道保持运营方指定的模型
+// （为空时由调用方回落到渠道测试模型或渠道模型列表）。
+func resolveChannelTestModel(channelType int, testModel string, endpointType string) string {
+	if constant.EndpointType(endpointType) != constant.EndpointTypeAudioTranscription {
+		return testModel
+	}
+	if channelType != constant.ChannelTypeXunfei {
+		return testModel
+	}
+	return constant.XunfeiASRModelName
+}
+
 // channelTestRelayFormat 把渠道测试的端点类型映射为 relay format。
 // 未登记的端点类型回落到 OpenAI 对话格式。
 func channelTestRelayFormat(endpointType string) types.RelayFormat {
@@ -132,11 +148,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	testModel = strings.TrimSpace(testModel)
 	endpointType = normalizeChannelTestEndpoint(channel, endpointType)
-
-	// 音频转写端点只服务固定的转写模型，避免拿对话模型名发起转写请求。
-	if constant.EndpointType(endpointType) == constant.EndpointTypeAudioTranscription {
-		testModel = channelTestAudioTranscriptionModel
-	}
+	testModel = resolveChannelTestModel(channel.Type, testModel, endpointType)
 	if testModel == "" {
 		if channel.TestModel != nil && *channel.TestModel != "" {
 			testModel = strings.TrimSpace(*channel.TestModel)
@@ -151,7 +163,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 	// 自动检测时命中转写模型，说明该渠道提供音频转写能力，改走音频端点。
-	if endpointType == "" && testModel == channelTestAudioTranscriptionModel {
+	if endpointType == "" && testModel == constant.XunfeiASRModelName {
 		endpointType = string(constant.EndpointTypeAudioTranscription)
 	}
 

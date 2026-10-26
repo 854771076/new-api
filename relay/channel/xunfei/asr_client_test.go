@@ -60,6 +60,8 @@ type asrFakeUpstream struct {
 	taskEstimateTimeMs int64
 	orderId            string
 	onPollResponse     func(pollIndex int)
+	// pollPayloadOverride 非空时替换查询接口的默认成功响应，用于构造业务错误码等异常响应。
+	pollPayloadOverride func(pollIndex int) map[string]any
 }
 
 func newASRFakeUpstream(t *testing.T, pollStatuses []int) *asrFakeUpstream {
@@ -119,9 +121,14 @@ func (f *asrFakeUpstream) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		onPoll := f.onPollResponse
+		override := f.pollPayloadOverride
 		f.mu.Unlock()
 
-		writeASRJSON(w, f.pollPayload(status, failType))
+		payload := f.pollPayload(status, failType)
+		if override != nil {
+			payload = override(index)
+		}
+		writeASRJSON(w, payload)
 		if onPoll != nil {
 			onPoll(index)
 		}
@@ -294,7 +301,7 @@ func TestASRTranscribeUploadAndPoll(t *testing.T) {
 	}
 }
 
-// TestASRTranscribeOptions 语言、结果类型与文件名补全。
+// TestASRTranscribeOptions 语种归一、结果类型与文件名补全。
 func TestASRTranscribeOptions(t *testing.T) {
 	fake := newASRFakeUpstream(t, []int{ASROrderStatusCompleted})
 
@@ -312,7 +319,7 @@ func TestASRTranscribeOptions(t *testing.T) {
 
 	uploads := fake.uploads()
 	require.Len(t, uploads, 1)
-	assert.Equal(t, "en", uploads[0].Query.Get("language"))
+	assert.Equal(t, ASRDefaultLanguage, uploads[0].Query.Get("language"), "通用语种代码必须归一为默认的 autodialect")
 	assert.Equal(t, "recording.wav", uploads[0].Query.Get("fileName"), "缺后缀的文件名按音频格式补齐")
 	assert.Equal(t, string(ASRResultTypeAnalysis), fake.polls()[0].Query.Get("resultType"))
 }
@@ -353,6 +360,36 @@ func TestASRTranscribeRespectsContextCancellation(t *testing.T) {
 	assert.Nil(t, result)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Len(t, fake.polls(), 1, "取消后不应继续轮询")
+}
+
+// TestASRTranscribePollStageHardErrorStopsPolling 轮询响应带硬错误业务码时必须立即返回错误。
+//
+// 非终态判据以业务码为准：100001（订单不存在）即使带着 orderId、又不带 status（缺省 0，
+// 与「已创建」无法区分），也不能被当成「订单处理中」继续轮询到超时而掩盖真实原因。
+func TestASRTranscribePollStageHardErrorStopsPolling(t *testing.T) {
+	fake := newASRFakeUpstream(t, []int{ASROrderStatusCreated})
+	fake.pollPayloadOverride = func(int) map[string]any {
+		return map[string]any{
+			"code":     100001,
+			"descInfo": "order not exist",
+			"content": map[string]any{
+				"orderInfo": map[string]any{
+					"orderId": testASROrderID,
+				},
+			},
+		}
+	}
+
+	_, err := ASRTranscribe(context.Background(), asrTestCredentials(), asrTestAudio(), ASROptions{
+		PollInterval: time.Millisecond,
+		MaxWait:      5 * time.Second,
+		BaseURL:      fake.server.URL,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "100001")
+	assert.Contains(t, err.Error(), "order not exist")
+	assert.NotContains(t, err.Error(), "超时")
+	assert.Len(t, fake.polls(), 1, "硬错误必须立即返回，不能继续轮询")
 }
 
 // TestASRTranscribeTimeout 超过最大等待时间后返回明确错误。
@@ -732,10 +769,13 @@ func TestASRUploadLanguage(t *testing.T) {
 	}{
 		{name: "缺失时为空", raw: "", want: ""},
 		// 讯飞 IFASR 的 language 参数只接受 autodialect 与 autominor，
-		// 通用语种代码一律映射到默认的 autodialect。
+		// 通用语种代码与其它未知取值一律回落到默认的 autodialect。
 		{name: "JSON 字符串的中文语种映射为 autodialect", raw: `"zh"`, want: "autodialect"},
 		{name: "JSON 字符串的英文语种映射为 autodialect", raw: `"en"`, want: "autodialect"},
+		{name: "未知语种回落到 autodialect", raw: `"ja"`, want: "autodialect"},
+		{name: "未知语种 fr 回落到 autodialect", raw: `"fr"`, want: "autodialect"},
 		{name: "讯飞自有取值原样透传", raw: `"autodialect"`, want: "autodialect"},
+		{name: "讯飞自有取值大小写归一", raw: `"AutoDialect"`, want: "autodialect"},
 		{name: "讯飞自有取值 autominor 原样透传", raw: `"autominor"`, want: "autominor"},
 		{name: "null 视为缺失", raw: "null", want: ""},
 	}

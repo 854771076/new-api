@@ -141,9 +141,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	if model != "" {
 		switch {
 		case isTranscription && !IsASRModel(model):
-			return nil, newASRModelGuardError("模型 " + model + " 不是讯飞转写模型，转写请求必须使用 " + ASRModelName)
+			return nil, newASRClientError("模型 " + model + " 不是讯飞转写模型，转写请求必须使用 " + ASRModelName)
 		case !isTranscription && IsASRModel(model):
-			return nil, newASRModelGuardError("模型 " + ASRModelName + " 是讯飞转写模型，只能用于 /v1/audio/transcriptions，不能用于对话接口")
+			return nil, newASRClientError("模型 " + ASRModelName + " 是讯飞转写模型，只能用于 /v1/audio/transcriptions，不能用于对话接口")
 		}
 	}
 
@@ -166,11 +166,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	return
 }
 
-// newASRModelGuardError 构造模型名守卫失败时的客户端错误。
+// newASRClientError 构造讯飞转写路径上的客户端错误。
 //
-// 模型用错是客户端请求有误：状态码取 400 并显式跳过重试，既不落在仓库默认的重试范围里，
-// 也不会因为重试而反复触发上游调用。
-func newASRModelGuardError(message string) *types.NewAPIError {
+// 这类错误是客户端请求有误（模型名用错、缺少音频来源等）：状态码取 400 并显式跳过重试，
+// 既不落在仓库默认的重试范围里，也不会因为重试而反复触发上游调用。
+func newASRClientError(message string) *types.NewAPIError {
 	return types.NewError(errors.New(message), types.ErrorCodeInvalidRequest,
 		types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
 }
@@ -182,7 +182,7 @@ func (a *Adaptor) doASRResponse(c *gin.Context, info *relaycommon.RelayInfo) (an
 		return nil, types.NewError(errors.New("invalid auth"), types.ErrorCodeChannelInvalidKey)
 	}
 	if a.audio == nil {
-		return nil, types.NewError(errors.New("audio source is missing"), types.ErrorCodeInvalidRequest)
+		return nil, newASRClientError("audio source is missing")
 	}
 
 	// 渠道 BaseURL 覆盖只作用于 IFASR 转写路径，星火对话继续使用其既有地址。
@@ -247,7 +247,7 @@ func ASRResultFromContext(c *gin.Context) (*ASRResult, bool) {
 //
 // 讯飞 IFASR 的 language 参数只接受 autodialect（中英 + 202 种方言免切识别）与
 // autominor（37 个语种免切识别，需单独申请权限）两个取值，因此客户端给的通用语种代码
-// （zh / en 等）一律映射到 autodialect；讯飞自有取值原样透传。
+// （zh / en 等）与其它未知取值一律回落到默认语种；讯飞自有取值原样透传（大小写归一）。
 // 字段缺失或不是字符串时返回空串，由调用方回落到默认语种。
 func asrUploadLanguage(raw []byte) string {
 	value := strings.TrimSpace(string(raw))
@@ -262,15 +262,7 @@ func asrUploadLanguage(raw []byte) string {
 		}
 		language = strings.Trim(value, `"`)
 	}
-	language = strings.TrimSpace(language)
-	switch strings.ToLower(language) {
-	case "autodialect", "autominor":
-		return strings.ToLower(language)
-	case "zh", "zh-cn", "zh_cn", "zh-hans", "zh-hant", "zh-tw", "zh_tw",
-		"en", "en-us", "en_us", "en-gb", "en_gb":
-		return ASRDefaultLanguage
-	}
-	return language
+	return normalizeASRLanguage(language)
 }
 
 func (a *Adaptor) GetModelList() []string {

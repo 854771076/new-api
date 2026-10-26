@@ -306,13 +306,20 @@ func (v *asrUpstreamValue) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// millis 解析毫秒值；上游缺失或给出非数字形态时返回 0。
-func (v asrUpstreamValue) millis() int64 {
-	millis, err := strconv.ParseInt(strings.TrimSpace(string(v)), 10, 64)
-	if err != nil {
-		return 0
+// millis 解析毫秒值；ok 报告上游是否给出了该字段。
+//
+// 缺失与非数字形态都返回 ok=false，调用方据此区分「未取到」与「确实是 0」：
+// 音频从 0ms 开始时上游给出的就是 "0"，0 不能当作「未取到」的哨兵。
+func (v asrUpstreamValue) millis() (int64, bool) {
+	text := strings.TrimSpace(string(v))
+	if text == "" {
+		return 0, false
 	}
-	return millis
+	millis, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return millis, true
 }
 
 // speaker 说话人标识；上游未开启角色分离时该字段缺失，返回空字符串。
@@ -372,23 +379,28 @@ func decodeASRSentence(payload asrJSONPayload) (asrSentence, bool) {
 // 起止时间与说话人标识优先取单元层级（lattice2 形态），缺失时回落到识别结果里的 st（lattice 形态）。
 // 相邻分段单元的说话人标识不同时切为新段；同一说话人内的时间范围取各单元的并集
 // （起始取最小、结束取最新）。
+//
+// 是否取到起止时间由 asrUpstreamValue.millis 的 ok 标记，而不是用 0 当哨兵：音频常从
+// 0ms 开始，0 是合法的起点，用 0 表示「未取到」会让并集起点被后续单元抬晚。
 func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 	segments := make([]ASRSegment, 0, len(units))
+	// lastHasStart/lastHasEnd 记录当前末段是否已取到起止时间，供并集更新判断。
+	lastHasStart, lastHasEnd := false, false
 	for _, unit := range units {
 		sentence, ok := decodeASRSentence(unit.Json1best)
 		if !ok {
 			continue
 		}
 		speaker := unit.RL.speaker()
-		start := unit.BG.millis()
-		end := unit.ED.millis()
-		if start == 0 && end == 0 {
-			start = sentence.BG.millis()
-			end = sentence.ED.millis()
+		start, hasStart := unit.BG.millis()
+		end, hasEnd := unit.ED.millis()
+		if !hasStart && !hasEnd {
+			start, hasStart = sentence.BG.millis()
+			end, hasEnd = sentence.ED.millis()
 		}
-		if start == 0 && end == 0 {
-			start = sentence.ST.BG.millis()
-			end = sentence.ST.ED.millis()
+		if !hasStart && !hasEnd {
+			start, hasStart = sentence.ST.BG.millis()
+			end, hasEnd = sentence.ST.ED.millis()
 		}
 		if speaker == "" {
 			speaker = sentence.RL.speaker()
@@ -398,11 +410,13 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 		}
 		if len(segments) > 0 && segments[len(segments)-1].Speaker == speaker {
 			last := &segments[len(segments)-1]
-			if start > 0 && (last.StartMs == 0 || start < last.StartMs) {
+			if hasStart && (!lastHasStart || start < last.StartMs) {
 				last.StartMs = start
+				lastHasStart = true
 			}
-			if end > last.EndMs {
+			if hasEnd && (!lastHasEnd || end > last.EndMs) {
 				last.EndMs = end
+				lastHasEnd = true
 			}
 			last.Text += sentence.text()
 			continue
@@ -413,6 +427,7 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 			EndMs:   end,
 			Text:    sentence.text(),
 		})
+		lastHasStart, lastHasEnd = hasStart, hasEnd
 	}
 
 	// 去掉没有文本的空段，并按最终顺序编号。

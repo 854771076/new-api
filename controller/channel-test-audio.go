@@ -17,9 +17,6 @@ var channelTestAudioSampleWAV []byte
 // channelTestAudioFileName 是夹具在 multipart 表单里的文件名，上游据此识别音频格式。
 const channelTestAudioFileName = "channel-test-sample.wav"
 
-// channelTestAudioTranscriptionModel 是音频转写端点使用的固定转写模型名。
-const channelTestAudioTranscriptionModel = "ifasr-llm-v1"
-
 // buildChannelTestAudioMultipart 构造音频转写测试用的 multipart 请求体。
 //
 // 音频转写需要携带音频文件，无法用 JSON 请求体表达，因此单独走 multipart 管道。

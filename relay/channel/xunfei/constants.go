@@ -1,11 +1,12 @@
 package xunfei
 
+import "github.com/QuantumNous/new-api/constant"
+
 // ASRModelName 是讯飞离线转写（IFASR 录音文件转写大模型）的模型名。
 //
-// 形态约束：星火对话路径的 getAPIVersion 会按 "-" 切分模型名，恰好切成两段时把第二段当作
-// API 版本（两段名如 SparkDesk-ASR 会被误解析成版本 ASR）。本模型名恰好三段，因此不会
-// 被星火路径误解析。
-const ASRModelName = "ifasr-llm-v1"
+// 模型名集中定义在 constant 包，这里保留导出名供本包的模型判定与既有测试使用。
+// 形态约束见 constant.XunfeiASRModelName 的说明。
+const ASRModelName = constant.XunfeiASRModelName
 
 var ModelList = []string{
 	"SparkDesk",

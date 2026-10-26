@@ -129,6 +129,61 @@ func TestCountRequestTokenAudioUnsupportedFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "不受支持")
 }
 
+// TestCountRequestTokenAudioSourceErrorIsBadRequest 验证音频来源解析失败属于客户端请求错误：
+// 预扣阶段直接给出 400，而不是 count_token_failed 的默认 500。
+// 预扣入口还会用 types.NewError(err, ErrorCodeCountTokenFailed) 再包一层，该包装必须保留 400。
+func TestCountRequestTokenAudioSourceErrorIsBadRequest(t *testing.T) {
+	cases := []struct {
+		name    string
+		request *dto.AudioRequest
+		wantMsg string
+	}{
+		{
+			name:    "未提供音频",
+			request: &dto.AudioRequest{},
+			wantMsg: "未提供音频",
+		},
+		{
+			name: "格式不受支持",
+			request: &dto.AudioRequest{
+				AudioBase64: "data:audio/webm;base64," + base64.StdEncoding.EncodeToString([]byte("webm-not-supported")),
+			},
+			wantMsg: "不受支持",
+		},
+		{
+			name: "Base64 非法",
+			request: &dto.AudioRequest{
+				AudioBase64: "data:audio/wav;base64,%%%not-base64%%%",
+				AudioFormat: "wav",
+			},
+			wantMsg: "Base64",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newJSONContext(t)
+
+			tokens, err := CountRequestToken(c, &types.TokenCountMeta{}, newAudioRelayInfo(tc.request))
+			require.Error(t, err)
+			assert.Zero(t, tokens)
+			assert.Contains(t, err.Error(), tc.wantMsg)
+
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode, "客户端音频错误必须是 400")
+			assert.True(t, types.IsSkipRetryError(apiErr), "客户端请求错误不应重试")
+
+			// relay.PrepareRequestBilling 的二次包装：NewError 遇到内层 *NewAPIError
+			// 时直接应用选项并返回内层错误，因此 400 与 skipRetry 都被保留。
+			wrapped := types.NewError(err, types.ErrorCodeCountTokenFailed)
+			assert.Equal(t, http.StatusBadRequest, wrapped.StatusCode)
+			assert.True(t, types.IsSkipRetryError(wrapped))
+			assert.Contains(t, wrapped.Error(), tc.wantMsg)
+		})
+	}
+}
+
 // TestAudioDurationMsToTokens 验证时长到 token 的换算与结算侧口径一致：
 // 每分钟 1000 token，秒数向上取整；负时长钳到 0；异常时长走配额饱和换算。
 func TestAudioDurationMsToTokens(t *testing.T) {

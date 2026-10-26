@@ -55,6 +55,10 @@ const (
 	// asrSuccessCode 讯飞业务成功码。
 	asrSuccessCode = "000000"
 
+	// asrOrderNotFinishedCode 是「订单未完成」业务码：查询接口用它表示结果尚未生成，
+	// 属非终态，应继续轮询；其余非成功码都是硬错误，必须立即返回。
+	asrOrderNotFinishedCode = "100013"
+
 	// asrMaxResponseBytes 上游响应体读取上限，防止异常响应打爆内存。
 	asrMaxResponseBytes = 32 << 20
 
@@ -99,7 +103,7 @@ type ASROptions struct {
 	PollInterval time.Duration
 	// MaxWait 轮询阶段的最大等待时长，超时返回明确错误；零值或负值时取默认值。
 	MaxWait time.Duration
-	// Language 上传时的语种参数，空值时取默认 cn。
+	// Language 上传时的语种参数，空值时取默认的 autodialect；其余未知取值同样回落到默认语种。
 	Language string
 	// ResultType 查询时的结果类型，零值时取默认 transfer。
 	ResultType ASRResultType
@@ -148,7 +152,7 @@ func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, op
 	if resultType == "" {
 		resultType = ASRResultTypeTransfer
 	}
-	language := opts.Language
+	language := normalizeASRLanguage(opts.Language)
 	if language == "" {
 		language = ASRDefaultLanguage
 	}
@@ -354,7 +358,9 @@ func asrQueryResult(ctx context.Context, baseURL string, creds ASRCredentials, o
 		}, response.StatusCode, nil)
 	}
 
-	// 上游以非成功码表示「订单未完成」时继续轮询，其余情况按失败处理。
+	// 非终态判据以业务码为准：只有成功码与「订单未完成」继续轮询。
+	// 不能用订单状态推断：订单信息缺失时 status 默认 0，与「已创建」无法区分，
+	// 硬错误（如 100001 订单不存在）会被当成「订单处理中」一直轮询到超时，掩盖真实原因。
 	// 业务码先按宽松结构取出：官方失败示例里的业务码是数字，完整解析只接受字符串码。
 	var failure asrPollFailure
 	if err := common.Unmarshal(body, &failure); err != nil {
@@ -364,19 +370,23 @@ func asrQueryResult(ctx context.Context, baseURL string, creds ASRCredentials, o
 		}, 0, err)
 	}
 	if code := string(failure.Code); code != "" && code != asrSuccessCode {
-		order := ASROrderInfo{
-			OrderId:  failure.Content.OrderInfo.OrderId,
-			Status:   failure.Content.OrderInfo.Status,
-			FailType: failure.Content.OrderInfo.FailType,
+		if code != asrOrderNotFinishedCode {
+			return nil, newASRPollError(ASRErrorInfo{
+				UpstreamCode: code,
+				Description:  failure.DescInfo,
+				Stage:        asrStagePoll,
+			}, 0, nil)
 		}
-		if order.OrderId != "" && (order.Status == ASROrderStatusCreated || order.Status == ASROrderStatusProcessing) {
-			return &ASRResult{ResultType: resultType, Code: code, DescInfo: failure.DescInfo, Order: order}, nil
-		}
-		return nil, newASRPollError(ASRErrorInfo{
-			UpstreamCode: code,
-			Description:  failure.DescInfo,
-			Stage:        asrStagePoll,
-		}, 0, nil)
+		return &ASRResult{
+			ResultType: resultType,
+			Code:       code,
+			DescInfo:   failure.DescInfo,
+			Order: ASROrderInfo{
+				OrderId:  failure.Content.OrderInfo.OrderId,
+				Status:   failure.Content.OrderInfo.Status,
+				FailType: failure.Content.OrderInfo.FailType,
+			},
+		}, nil
 	}
 
 	result, err := ParseASRResult(body, resultType)
@@ -472,6 +482,23 @@ func asrWait(ctx context.Context, duration time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// normalizeASRLanguage 归一上传语种。
+//
+// 讯飞 IFASR 的 language 参数只接受 autodialect（中英 + 202 种方言免切识别）与
+// autominor（37 个语种免切识别，需单独申请权限）两个取值。客户端常用的通用语种代码
+// （zh / en 等）以及其它未知取值（ja / fr / de 等）都回落到默认的 autodialect，
+// 原样透传只会得到上游 100020 语言验证失败。空值返回空串，由调用方决定默认值。
+func normalizeASRLanguage(language string) string {
+	trimmed := strings.ToLower(strings.TrimSpace(language))
+	switch trimmed {
+	case "":
+		return ""
+	case "autodialect", "autominor":
+		return trimmed
+	}
+	return ASRDefaultLanguage
 }
 
 // asrUploadFileName 补全上传文件名：上游按扩展名识别音频格式，缺后缀时按音频格式补齐。

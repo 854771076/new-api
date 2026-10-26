@@ -40,9 +40,14 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 	case constant.ChannelTypeSora:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIVideo}
 	case constant.ChannelTypeXunfei:
-		// 讯飞渠道同时提供星火对话（OpenAI 兼容）与 IFASR 音频转写两种能力，
-		// 转写模型必须显式声明音频转写端点，否则会落到默认的 OpenAI 分支上。
-		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeAudioTranscription}
+		// 讯飞渠道同时提供星火对话（OpenAI 兼容）与 IFASR 音频转写两种能力，能力必须按模型声明：
+		// 转写模型只声明音频转写端点，对话模型只声明 OpenAI 端点。模型名缺失时无法判定，
+		// 保守地按既有语义「所有渠道都支持 OpenAI 端点」处理。
+		if modelName == constant.XunfeiASRModelName {
+			endpointTypes = []constant.EndpointType{constant.EndpointTypeAudioTranscription}
+		} else {
+			endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI}
+		}
 	case constant.ChannelTypeSub2API, constant.ChannelTypeNewAPI:
 		endpointTypes = []constant.EndpointType{
 			constant.EndpointTypeOpenAI,

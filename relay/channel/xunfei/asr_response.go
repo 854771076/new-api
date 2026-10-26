@@ -2,11 +2,11 @@ package xunfei
 
 import (
 	"fmt"
-	"math"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,13 +73,11 @@ func buildASRUsage(result *ASRResult, audio ASRAudio) (*dto.Usage, *common.Quota
 	if durationMs == 0 {
 		durationMs = audio.DurationMs
 	}
-	if durationMs < 0 {
-		durationMs = 0
-	}
 
-	// 每分钟 1000 token，与仓库既有音频计费口径一致；饱和换算防止异常时长造成整数回绕。
-	seconds := float64(durationMs) / 1000
-	audioTokens, clamp := common.QuotaRoundChecked(math.Ceil(seconds) / 60.0 * 1000)
+	// 时长到 token 的换算口径由 service.AudioDurationMsToTokens 统一维护：
+	// 每分钟 1000 token、秒数向上取整、负时长钳到 0、异常时长走配额饱和换算。
+	// 预扣与结算共用这一份实现，避免口径分叉。
+	audioTokens, clamp := service.AudioDurationMsToTokens(durationMs)
 
 	return &dto.Usage{
 		PromptTokens:        audioTokens,

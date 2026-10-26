@@ -281,6 +281,18 @@ func audioDurationMs(c *gin.Context, data []byte, format string) (int64, error) 
 	if err != nil {
 		return 0, fmt.Errorf("解析音频时长失败: %w", err)
 	}
+	// 时长来自用户可伪造的音频头：采样率为 0 会得到 Inf，越界的样本数会得到超大值，
+	// 非法元数据也可能给出 NaN。NaN/Inf 明确报错而不是静默按 0 时长计费；负值钳到 0；
+	// 超大值限到上界，保证秒转毫秒不会溢出 int64。
+	if math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0, fmt.Errorf("解析音频时长失败: 音频元数据给出的时长 %v 非法", seconds)
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds > maxAudioDurationSeconds {
+		seconds = maxAudioDurationSeconds
+	}
 	return int64(math.Round(seconds * 1000)), nil
 }
 

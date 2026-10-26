@@ -19,7 +19,8 @@ func TestWanEndpointsDistinguishImagesFromVideos(t *testing.T) {
 		})
 	}
 	for _, name := range []string{
-		"wanx2.1-t2v-plus", "wanx2.1-t2v-turbo", "wanx2.1-i2v-plus", "wanx2.1-i2v-turbo",
+		"wanx2.1-t2v-plus", "wanx2.1-t2v-turbo", "wanx2.0-t2v-turbo",
+		"wanx2.1-i2v-plus", "wanx2.1-i2v-turbo",
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.NotContains(t, common.GetEndpointTypesByChannelType(constant.ChannelTypeAli, name), constant.EndpointTypeImageGeneration)
@@ -49,8 +50,12 @@ func TestAudioTranscriptionEndpointTypeRegistration(t *testing.T) {
 	assert.Equal(t, "/v1/audio/transcriptions", info.Path)
 	assert.Equal(t, "POST", info.Method)
 
-	// 讯飞渠道必须显式声明音频转写端点，否则转写模型会落到默认的 OpenAI 端点上。
-	endpointTypes := common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, "ifasr-llm-v1")
-	assert.Contains(t, endpointTypes, constant.EndpointTypeAudioTranscription)
-	assert.Contains(t, endpointTypes, constant.EndpointTypeOpenAI)
+	// 讯飞渠道的端点类型按模型声明：转写模型只声明音频转写端点，对话模型不声明音频转写端点。
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeAudioTranscription},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, constant.XunfeiASRModelName))
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, "SparkDesk-v3.5"))
+	// 模型名缺失时无法判定能力，保守地只声明 OpenAI 端点。
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, ""))
 }

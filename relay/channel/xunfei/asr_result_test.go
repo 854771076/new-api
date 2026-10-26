@@ -272,3 +272,25 @@ func TestParseASRResultHandlesRealLattice2ObjectPayload(t *testing.T) {
 	assert.Equal(t, "0", segment.Speaker)
 	assert.NotEmpty(t, segment.Text)
 }
+
+// TestBuildASRSegmentsKeepsZeroStart 首单元从 0ms 开始时，同说话人合并后的起点必须保持 0。
+//
+// 0 是合法起点（音频常从 0ms 开始），不能拿它当「起点未取到」的哨兵：否则第二个同说话人
+// 单元会把真实起点覆盖成更晚的时间，verbose_json 的 segments[].start 随之偏晚。
+func TestBuildASRSegmentsKeepsZeroStart(t *testing.T) {
+	units := []asrLatticeUnit{
+		{Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"一"}]}]}]},"bg":"0","ed":"400","rl":"1"}`)}},
+		{Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"二"}]}]}]},"bg":"500","ed":"900","rl":"1"}`)}},
+		// 说话人不同时切新段，既有语义保持不变。
+		{Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"三"}]}]}]},"bg":"1000","ed":"1200","rl":"2"}`)}},
+	}
+
+	segments := buildASRSegments(units)
+
+	require.Len(t, segments, 2)
+	assert.Equal(t, int64(0), segments[0].StartMs, "同说话人并集的起点必须保持真实的最小起点 0")
+	assert.Equal(t, int64(900), segments[0].EndMs, "同说话人并集的结束取最新")
+	assert.Equal(t, "一二", segments[0].Text)
+	assert.Equal(t, int64(1000), segments[1].StartMs, "说话人变化时切新段")
+	assert.Equal(t, int64(1200), segments[1].EndMs)
+}

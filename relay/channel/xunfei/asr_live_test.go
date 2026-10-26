@@ -39,7 +39,7 @@ const (
 	liveEnvAccessKeyID = "XFYUN_ASR_ACCESS_KEY_ID"
 	// liveEnvAudioPath 本地音频文件路径的环境变量名。
 	liveEnvAudioPath = "XFYUN_ASR_AUDIO_PATH"
-	// liveEnvLanguage 上传语种的环境变量名，可选，缺省为中文。
+	// liveEnvLanguage 上传语种的环境变量名，可选，缺省为 autodialect。
 	liveEnvLanguage = "XFYUN_ASR_LANGUAGE"
 )
 
@@ -56,7 +56,7 @@ var liveCredentialErrorCodes = []string{"100009", "100008", "000002"}
 //   - XFYUN_ASR_API_SECRET：讯飞访问密钥密钥（三段密钥的第二段，参与签名计算）
 //   - XFYUN_ASR_ACCESS_KEY_ID：讯飞访问密钥 ID（三段密钥的第三段，即 accessKeyId）
 //   - XFYUN_ASR_AUDIO_PATH：本地音频文件路径
-//   - XFYUN_ASR_LANGUAGE：可选，上传语种，缺省 cn
+//   - XFYUN_ASR_LANGUAGE：可选，上传语种，缺省 autodialect
 //
 // 三段凭据的拼装顺序与渠道密钥的既有切分一致：appId|apiSecret|apiKey。
 func TestXfyunASRLive(t *testing.T) {
