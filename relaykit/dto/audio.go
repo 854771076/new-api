@@ -78,3 +78,26 @@ type Segment struct {
 	CompressionRatio float64 `json:"compression_ratio"`
 	NoSpeechProb     float64 `json:"no_speech_prob"`
 }
+
+// TranscriptionSegment 是转写响应的分段结构。
+//
+// 与 Whisper 的 Segment 不同，这里只保留实际可用的字段（序号、起止秒数、文本）：
+// 既有 Segment 的 seek、tokens、temperature 等字段没有 omitempty，直接复用会向客户端
+// 输出一批无意义的零值。
+type TranscriptionSegment struct {
+	Id    int     `json:"id"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+	Text  string  `json:"text"`
+}
+
+// TranscriptionVerboseJSONResponse 是 verbose_json 格式的转写响应。
+//
+// Language 对应上游的语种字段：上游仅在开启语种分析能力且以 analysis 结果类型查询时返回，
+// 本次接入使用 transfer 结果类型，该字段留空而不臆造。
+type TranscriptionVerboseJSONResponse struct {
+	Text     string                 `json:"text"`
+	Language string                 `json:"language"`
+	Duration float64                `json:"duration"`
+	Segments []TranscriptionSegment `json:"segments"`
+}

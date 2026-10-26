@@ -138,3 +138,68 @@ func TestPreConsumeBillingRejectsNegativeQuotaBeforeDeduction(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 	require.Nil(t, info.Billing)
 }
+
+// TestNoteQuotaClampReachesAdminInfo verifies the exported seam used by channel
+// adaptors: a saturation event registered through it lands in the consume log's
+// admin_info.quota_saturation during settlement.
+func TestNoteQuotaClampReachesAdminInfo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(nil)
+
+	relayInfo := &relaycommon.RelayInfo{UserId: 7, OriginModelName: "spark-asr"}
+	NoteQuotaClamp(relayInfo, &common.QuotaClamp{
+		Op:       "QuotaRound",
+		Kind:     common.QuotaClampOverflow,
+		Original: 1e16,
+		Clamped:  common.MaxQuota,
+	})
+
+	other := model.NewLogOther()
+	attachQuotaSaturation(ctx, relayInfo, other)
+
+	adminInfo, ok := other.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok, "admin_info should be created")
+	sat, ok := adminInfo["quota_saturation"].(map[string]any)
+	require.True(t, ok, "quota_saturation should be nested under admin_info")
+	require.Equal(t, "QuotaRound", sat["op"])
+	require.Equal(t, common.MaxQuota, sat["clamped"])
+}
+
+// TestNoteQuotaClampKeepsFirstClamp verifies the "first clamp wins" guard also
+// applies to the exported seam.
+func TestNoteQuotaClampKeepsFirstClamp(t *testing.T) {
+	relayInfo := &relaycommon.RelayInfo{}
+	first := &common.QuotaClamp{Op: "QuotaRound", Kind: common.QuotaClampOverflow, Clamped: common.MaxQuota}
+
+	NoteQuotaClamp(relayInfo, first)
+	NoteQuotaClamp(relayInfo, &common.QuotaClamp{Op: "QuotaFromDecimal", Kind: common.QuotaClampOverflow, Clamped: 1})
+
+	require.Same(t, first, relayInfo.QuotaClamp)
+}
+
+// TestAudioQuotaSaturationReachesAdminInfo verifies the audio settlement path's
+// own quota conversion saturation is recorded and attached to the log.
+func TestAudioQuotaSaturationReachesAdminInfo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(nil)
+
+	relayInfo := &relaycommon.RelayInfo{UserId: 7, OriginModelName: "spark-asr"}
+	quota, clamp := calculateAudioQuota(QuotaInfo{
+		InputDetails: TokenDetails{AudioTokens: common.MaxQuota},
+		ModelName:    "spark-asr",
+		ModelRatio:   2,
+		GroupRatio:   1,
+	})
+	require.NotNil(t, clamp, "音频 token 极大时配额换算应饱和")
+	require.Equal(t, common.MaxQuota, quota)
+	noteQuotaClamp(relayInfo, clamp)
+
+	other := model.NewLogOther()
+	attachQuotaSaturation(ctx, relayInfo, other)
+
+	adminInfo, ok := other.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok)
+	sat, ok := adminInfo["quota_saturation"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "QuotaFromDecimal", sat["op"])
+}

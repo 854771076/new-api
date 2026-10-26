@@ -30,7 +30,12 @@ type Adaptor struct {
 	asrLanguage string
 	// asrResult 是音频路径的转写结果，供响应构造与计费使用。
 	asrResult *ASRResult
+	// responseFormat 是客户端请求的转写响应格式，缺省为 json。
+	responseFormat string
 }
+
+// asrAdaptorPollInterval 是 IFASR 的轮询间隔，测试会替换该变量以缩短等待时间。
+var asrAdaptorPollInterval = ASRDefaultPollInterval
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
 	//TODO implement me
@@ -63,6 +68,10 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		DurationMs: source.DurationMs,
 	}
 	a.asrLanguage = asrUploadLanguage(request.Language)
+	a.responseFormat = request.ResponseFormat
+	if a.responseFormat == "" {
+		a.responseFormat = asrResponseFormatJSON
+	}
 	return bytes.NewReader(source.Data), nil
 }
 
@@ -134,7 +143,7 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	return
 }
 
-// doASRResponse 完成讯飞 IFASR 的上传与轮询，并把解析结果放入请求上下文供响应构造与计费使用。
+// doASRResponse 完成讯飞 IFASR 的上传与轮询，写出转写响应并产出音频结算用量。
 func (a *Adaptor) doASRResponse(c *gin.Context, info *relaycommon.RelayInfo) (any, *types.NewAPIError) {
 	splits := strings.Split(info.ApiKey, "|")
 	if len(splits) != 3 {
@@ -155,18 +164,33 @@ func (a *Adaptor) doASRResponse(c *gin.Context, info *relaycommon.RelayInfo) (an
 		APISecret: splits[1],
 		APIKey:    splits[2],
 	}, *a.audio, ASROptions{
-		BaseURL:    baseURL,
-		Language:   a.asrLanguage,
-		ResultType: ASRResultTypeTransfer,
+		BaseURL:      baseURL,
+		Language:     a.asrLanguage,
+		ResultType:   ASRResultTypeTransfer,
+		PollInterval: asrAdaptorPollInterval,
 	})
 	if err != nil {
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
+		return nil, NewASRAPIError(err, types.ErrorCodeDoRequestFailed)
+	}
+
+	// 上游未回报原始时长时回落到本地解析出的音频时长，保证响应里的时长与计费时长一致。
+	if result.OriginalDurationMs == 0 && a.audio.DurationMs > 0 {
+		result.OriginalDurationMs = a.audio.DurationMs
 	}
 
 	a.asrResult = result
 	c.Set(contextKeyASRResult, result)
-	// 音频 token 的用量回填由音频计费环节负责，这里只交出转写结果本身。
-	return &dto.Usage{}, nil
+
+	if err := WriteASRResponse(c, result, a.responseFormat); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+
+	usage, clamp := buildASRUsage(result, *a.audio)
+	if clamp != nil {
+		// 饱和标记交给结算层记录：记录函数、「首次钳制生效」的守卫与日志挂载都在 service 包内。
+		service.NoteQuotaClamp(info, clamp)
+	}
+	return usage, nil
 }
 
 // ASRResult 返回本次音频转写的结果，音频路径之外返回 nil。

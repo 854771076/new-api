@@ -3,12 +3,11 @@ package xunfei
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +53,16 @@ const (
 
 	// asrMaxResponseBytes 上游响应体读取上限，防止异常响应打爆内存。
 	asrMaxResponseBytes = 32 << 20
+
+	// asrMaxAudioBytes 上游单次上传的音频大小上限（500MB）。
+	asrMaxAudioBytes = 500 << 20
+
+	// asrMaxAudioDuration 上游单次转写的音频时长上限（5 小时）。
+	asrMaxAudioDuration = 5 * time.Hour
 )
+
+// asrSupportedAudioFormats 是上游支持的音频格式，取值见讯飞 IFASR 接口文档。
+var asrSupportedAudioFormats = []string{"mp3", "wav", "pcm", "opus", "flac", "ogg", "speex"}
 
 // ASRCredentials 是讯飞 IFASR 所需的三项凭据。
 //
@@ -105,10 +113,19 @@ var asrNow = time.Now
 // 走请求头，不进查询串。轮询响应客户端请求上下文的取消，超过最大等待时长返回明确错误。
 func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, opts ASROptions) (*ASRResult, error) {
 	if strings.TrimSpace(creds.AppID) == "" || strings.TrimSpace(creds.APISecret) == "" || strings.TrimSpace(creds.APIKey) == "" {
-		return nil, errors.New("讯飞转写凭据不完整：需要 appId、apiSecret、apiKey")
+		return nil, &ASRLocalError{
+			Category: asrCategoryCredential,
+			Reason:   "讯飞转写凭据不完整：需要 appId、apiSecret、apiKey",
+		}
 	}
 	if len(audio.Data) == 0 {
-		return nil, errors.New("讯飞转写音频内容为空")
+		return nil, &ASRLocalError{
+			Category: asrCategoryClient,
+			Reason:   "讯飞转写音频内容为空",
+		}
+	}
+	if err := validateASRAudio(audio); err != nil {
+		return nil, err
 	}
 
 	baseURL := strings.TrimRight(strings.TrimSpace(opts.BaseURL), "/")
@@ -145,13 +162,21 @@ func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, op
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return nil, fmt.Errorf("讯飞转写等待超时：订单 %s 在 %s 内未完成", upload.OrderId, maxWait)
+			return nil, &ASRUpstreamError{
+				ASRErrorInfo: ASRErrorInfo{
+					Description: "等待转写结果超时：订单 " + upload.OrderId + " 在 " + maxWait.String() + " 内未完成",
+					Stage:       asrStagePoll,
+				},
+			}
 		}
 		if wait > remaining {
 			wait = remaining
 		}
 		if err := asrWait(ctx, wait); err != nil {
-			return nil, fmt.Errorf("讯飞转写等待结束: %w", err)
+			return nil, &ASRUpstreamError{
+				ASRErrorInfo: ASRErrorInfo{Description: "等待转写结果被中断", Stage: asrStagePoll},
+				Cause:        err,
+			}
 		}
 
 		result, err := asrQueryResult(ctx, baseURL, creds, upload.OrderId, resultType, signatureRandom)
@@ -163,7 +188,13 @@ func ASRTranscribe(ctx context.Context, creds ASRCredentials, audio ASRAudio, op
 		case ASROrderStatusCompleted:
 			return result, nil
 		case ASROrderStatusFailed:
-			return nil, fmt.Errorf("讯飞转写订单失败：订单 %s，失败类型 %d，描述 %s", result.Order.OrderId, result.Order.FailType, result.DescInfo)
+			return nil, &ASRUpstreamError{
+				ASRErrorInfo: ASRErrorInfo{
+					Description: "订单 " + result.Order.OrderId + " 转写失败",
+					FailType:    result.Order.FailType,
+					Stage:       asrStagePoll,
+				},
+			}
 		}
 		// 0（已创建）与 3（处理中）不是终态，继续按固定间隔轮询。
 		wait = pollInterval
@@ -180,11 +211,24 @@ type asrUploadResult struct {
 
 // asrUploadEnvelope 讯飞 IFASR 上传接口的响应结构。
 type asrUploadEnvelope struct {
-	Code     string `json:"code"`
-	DescInfo string `json:"descInfo"`
+	// Code 是上游业务码：成功是字符串 "000000"，官方失败示例里是数字，两种形态都兼容。
+	Code     asrUpstreamValue `json:"code"`
+	DescInfo string           `json:"descInfo"`
 	Content  struct {
 		OrderId          string `json:"orderId"`
 		TaskEstimateTime int64  `json:"taskEstimateTime"`
+	} `json:"content"`
+}
+
+// asrPollFailure 讯飞 IFASR 轮询响应的宽松解析：只取业务错误码、描述与订单状态。
+//
+// 上游成功响应的业务码是字符串 "000000"，官方失败示例里的业务码却是数字；完整解析只
+// 接受字符串码，因此这里先用兼容两种形态的结构取出业务错误码。
+type asrPollFailure struct {
+	Code     asrUpstreamValue `json:"code"`
+	DescInfo string           `json:"descInfo"`
+	Content  struct {
+		OrderInfo asrOrderInfoPayload `json:"orderInfo"`
 	} `json:"content"`
 }
 
@@ -204,33 +248,57 @@ func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, a
 	requestURL, signature := XfyunASRBuildRequest(baseURL+ASRUploadPath, params, creds.APISecret)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(audio.Data))
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写上传请求构造失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上传请求构造失败", Stage: asrStageUpload},
+			Cause:        err,
+		}
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
 	request.Header.Set(XfyunASRSignatureHeader, signature)
 
 	response, err := asrHTTPClient().Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写上传请求失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游请求失败（网络或传输故障）", Stage: asrStageUpload},
+			Cause:        err,
+		}
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, asrMaxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写上传响应读取失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游响应读取失败", Stage: asrStageUpload},
+			Cause:        err,
+		}
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("讯飞转写上传失败：HTTP %d，响应 %s", response.StatusCode, string(body))
+		code, description := asrUpstreamErrorBody(body)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: description, Stage: asrStageUpload},
+			HTTPStatus:   response.StatusCode,
+		}
 	}
 
 	var envelope asrUploadEnvelope
 	if err := common.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("讯飞转写上传响应不是合法 JSON: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游响应不是合法 JSON", Stage: asrStageUpload},
+			Cause:        err,
+		}
 	}
-	if envelope.Code != "" && envelope.Code != asrSuccessCode {
-		return nil, fmt.Errorf("讯飞转写上传失败：code=%s descInfo=%s", envelope.Code, envelope.DescInfo)
+	if code := string(envelope.Code); code != "" && code != asrSuccessCode {
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: envelope.DescInfo, Stage: asrStageUpload},
+		}
 	}
 	if envelope.Content.OrderId == "" {
-		return nil, fmt.Errorf("讯飞转写上传失败：上游未返回订单号，descInfo=%s", envelope.DescInfo)
+		description := "上游未返回订单号"
+		if envelope.DescInfo != "" {
+			description += "：" + envelope.DescInfo
+		}
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: description, Stage: asrStageUpload},
+		}
 	}
 	return &asrUploadResult{
 		OrderId:            envelope.Content.OrderId,
@@ -251,37 +319,114 @@ func asrQueryResult(ctx context.Context, baseURL string, creds ASRCredentials, o
 	requestURL, signature := XfyunASRBuildRequest(baseURL+ASRResultPath, params, creds.APISecret)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, strings.NewReader("{}"))
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写查询请求构造失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "查询请求构造失败", Stage: asrStagePoll},
+			Cause:        err,
+		}
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(XfyunASRSignatureHeader, signature)
 
 	response, err := asrHTTPClient().Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写查询请求失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游请求失败（网络或传输故障）", Stage: asrStagePoll},
+			Cause:        err,
+		}
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, asrMaxResponseBytes))
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写查询响应读取失败: %w", err)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游响应读取失败", Stage: asrStagePoll},
+			Cause:        err,
+		}
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("讯飞转写查询失败：HTTP %d，响应 %s", response.StatusCode, string(body))
+		code, description := asrUpstreamErrorBody(body)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: description, Stage: asrStagePoll},
+			HTTPStatus:   response.StatusCode,
+		}
+	}
+
+	// 上游以非成功码表示「订单未完成」时继续轮询，其余情况按失败处理。
+	// 业务码先按宽松结构取出：官方失败示例里的业务码是数字，完整解析只接受字符串码。
+	var failure asrPollFailure
+	if err := common.Unmarshal(body, &failure); err != nil {
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游响应不是合法 JSON", Stage: asrStagePoll},
+			Cause:        err,
+		}
+	}
+	if code := string(failure.Code); code != "" && code != asrSuccessCode {
+		order := ASROrderInfo{
+			OrderId:  failure.Content.OrderInfo.OrderId,
+			Status:   failure.Content.OrderInfo.Status,
+			FailType: failure.Content.OrderInfo.FailType,
+		}
+		if order.OrderId != "" && (order.Status == ASROrderStatusCreated || order.Status == ASROrderStatusProcessing) {
+			return &ASRResult{ResultType: resultType, Code: code, DescInfo: failure.DescInfo, Order: order}, nil
+		}
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{UpstreamCode: code, Description: failure.DescInfo, Stage: asrStagePoll},
+		}
 	}
 
 	result, err := ParseASRResult(body, resultType)
 	if err != nil {
-		return nil, fmt.Errorf("讯飞转写查询失败: %w", err)
-	}
-	// 上游以非成功码表示「订单未完成」时继续轮询，其余情况按失败处理。
-	if result.Code != "" && result.Code != asrSuccessCode {
-		pending := result.Order.OrderId != "" &&
-			(result.Order.Status == ASROrderStatusCreated || result.Order.Status == ASROrderStatusProcessing)
-		if !pending {
-			return nil, fmt.Errorf("讯飞转写查询失败：code=%s descInfo=%s", result.Code, result.DescInfo)
+		return nil, &ASRUpstreamError{
+			ASRErrorInfo: ASRErrorInfo{Description: "上游响应解析失败", Stage: asrStagePoll},
+			Cause:        err,
 		}
 	}
 	return result, nil
+}
+
+// asrUpstreamErrorBody 从上游失败响应体中提取业务错误码与描述。
+//
+// 上游通常以 HTTP 200 携带业务错误码，但网关或代理也可能直接返回 HTTP 错误；此时若
+// 响应体仍是上游的业务结构就取出错误码，否则把响应体片段当作描述。
+func asrUpstreamErrorBody(body []byte) (string, string) {
+	var envelope asrUploadEnvelope
+	if err := common.Unmarshal(body, &envelope); err == nil && envelope.Code != "" {
+		return string(envelope.Code), envelope.DescInfo
+	}
+
+	const bodyLimit = 200
+	text := strings.TrimSpace(string(body))
+	if len(text) > bodyLimit {
+		text = text[:bodyLimit] + "…"
+	}
+	return "", text
+}
+
+// validateASRAudio 校验音频是否满足上游的格式、大小与时长限制。
+//
+// 上游限制为音频大小不超过 500MB、时长不超过 5 小时、格式限定为
+// mp3/wav/pcm/opus/flac/ogg/speex。违反限制的音频属于客户端请求有误，网关直接返回
+// 4xx，不必等上游拒绝。格式缺失时交由上游按文件名判断。
+func validateASRAudio(audio ASRAudio) error {
+	format := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(audio.Format), "."))
+	if format != "" && !slices.Contains(asrSupportedAudioFormats, format) {
+		return &ASRLocalError{
+			Category: asrCategoryClient,
+			Reason:   "讯飞转写不支持该音频格式：" + format,
+		}
+	}
+	if len(audio.Data) > asrMaxAudioBytes {
+		return &ASRLocalError{
+			Category: asrCategoryClient,
+			Reason:   "讯飞转写音频大小超过上游限制（上限 500MB）",
+		}
+	}
+	if audio.DurationMs > int64(asrMaxAudioDuration/time.Millisecond) {
+		return &ASRLocalError{
+			Category: asrCategoryClient,
+			Reason:   "讯飞转写音频时长超过上游限制（上限 5 小时）",
+		}
+	}
+	return nil
 }
 
 // asrFirstPollDelay 计算上传成功后的首次等待时长。
