@@ -36,3 +36,21 @@ func TestDeepSeekToolRoutingNamesReportTheirEndpoint(t *testing.T) {
 	}
 	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeDeepSeek, "deepseek-flash"))
 }
+
+// TestAudioTranscriptionEndpointTypeRegistration 校验音频转写端点类型在各个登记面上都已落地。
+func TestAudioTranscriptionEndpointTypeRegistration(t *testing.T) {
+	// 宿主常量必须与 relaykit 侧的端点类型常量保持一致。
+	assert.Equal(t, types.EndpointTypeAudioTranscription, constant.EndpointTypeAudioTranscription)
+	assert.Equal(t, constant.EndpointType("audio-transcription"), constant.EndpointTypeAudioTranscription)
+
+	// 内置端点的默认请求信息。
+	info, ok := common.GetDefaultEndpointInfo(constant.EndpointTypeAudioTranscription)
+	require.True(t, ok)
+	assert.Equal(t, "/v1/audio/transcriptions", info.Path)
+	assert.Equal(t, "POST", info.Method)
+
+	// 讯飞渠道必须显式声明音频转写端点，否则转写模型会落到默认的 OpenAI 端点上。
+	endpointTypes := common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, "ifasr-llm-v1")
+	assert.Contains(t, endpointTypes, constant.EndpointTypeAudioTranscription)
+	assert.Contains(t, endpointTypes, constant.EndpointTypeOpenAI)
+}

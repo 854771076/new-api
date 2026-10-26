@@ -46,7 +46,11 @@ const (
 	ASRDefaultMaxWait = time.Hour
 
 	// ASRDefaultLanguage 默认上传语种。
-	ASRDefaultLanguage = "cn"
+	//
+	// 讯飞 IFASR 的 language 参数只接受 autodialect 与 autominor 两个取值：
+	// autodialect 支持中英与 202 种方言免切识别，autominor 支持 37 个语种免切识别
+	// 但需单独提交工单申请权限。因此默认取 autodialect。
+	ASRDefaultLanguage = "autodialect"
 
 	// asrSuccessCode 讯飞业务成功码。
 	asrSuccessCode = "000000"

@@ -600,6 +600,129 @@ func TestAdaptorDoResponseAudioBranchInvalidKey(t *testing.T) {
 	require.NotNil(t, apiErr)
 }
 
+// TestAdaptorModelGuard 模型名守卫：转写路径只接受转写模型，对话路径拒绝转写模型。
+//
+// 守卫判定用的是模型映射之后的上游模型名：运营方给转写模型配了别名时，转写请求仍然
+// 被接受；转写模型被映射到别的模型时，转写请求被明确拒绝。
+func TestAdaptorModelGuard(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("转写路径拒绝非转写模型", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", nil)
+
+		adaptor := &Adaptor{audio: &ASRAudio{Data: []byte("fake-audio-bytes"), FileName: "a.wav", Format: "wav"}}
+		info := &relaycommon.RelayInfo{
+			RelayMode: relayconstant.RelayModeAudioTranscription,
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ApiKey:            testASRAppID + "|" + testASRSecret + "|" + testASRAccessKey,
+				UpstreamModelName: "SparkDesk",
+			},
+		}
+
+		_, apiErr := adaptor.DoResponse(c, nil, info)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+		assert.Equal(t, types.ErrorCodeInvalidRequest, apiErr.GetErrorCode())
+		assert.True(t, types.IsSkipRetryError(apiErr))
+		assert.Contains(t, apiErr.Error(), ASRModelName)
+	})
+
+	t.Run("转写模型被映射到别的模型时转写路径拒绝", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", nil)
+
+		adaptor := &Adaptor{audio: &ASRAudio{Data: []byte("fake-audio-bytes"), FileName: "a.wav", Format: "wav"}}
+		info := &relaycommon.RelayInfo{
+			OriginModelName: ASRModelName,
+			RelayMode:       relayconstant.RelayModeAudioTranscription,
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ApiKey:            testASRAppID + "|" + testASRSecret + "|" + testASRAccessKey,
+				UpstreamModelName: "SparkDesk",
+			},
+		}
+
+		_, apiErr := adaptor.DoResponse(c, nil, info)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+		assert.Equal(t, types.ErrorCodeInvalidRequest, apiErr.GetErrorCode())
+	})
+
+	t.Run("对话路径拒绝转写模型", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		adaptor := &Adaptor{request: &dto.GeneralOpenAIRequest{Model: ASRModelName}}
+		info := &relaycommon.RelayInfo{
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ApiKey:            testASRAppID + "|" + testASRSecret + "|" + testASRAccessKey,
+				UpstreamModelName: ASRModelName,
+			},
+		}
+
+		_, apiErr := adaptor.DoResponse(c, nil, info)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+		assert.Equal(t, types.ErrorCodeInvalidRequest, apiErr.GetErrorCode())
+		assert.True(t, types.IsSkipRetryError(apiErr))
+		assert.Contains(t, apiErr.Error(), ASRModelName)
+	})
+
+	t.Run("对话路径的普通模型不受守卫影响", func(t *testing.T) {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+		adaptor := &Adaptor{request: &dto.GeneralOpenAIRequest{Model: "SparkDesk"}}
+		// 密钥不满足三段，错误必然是凭据错误而不是模型守卫错误，说明普通模型没有被守卫拦下。
+		info := &relaycommon.RelayInfo{
+			ChannelMeta: &relaycommon.ChannelMeta{
+				ApiKey:            "only-one-part",
+				UpstreamModelName: "SparkDesk",
+			},
+		}
+
+		_, apiErr := adaptor.DoResponse(c, nil, info)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, types.ErrorCodeChannelInvalidKey, apiErr.GetErrorCode())
+		assert.NotContains(t, apiErr.Error(), ASRModelName)
+	})
+}
+
+// TestAdaptorModelGuardAcceptsAliasedASRModel 转写模型配了别名时，转写请求按映射后的
+// 上游模型名判定，不会被误拒。
+func TestAdaptorModelGuardAcceptsAliasedASRModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	fake := newASRFakeUpstream(t, []int{ASROrderStatusCompleted})
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", nil)
+
+	adaptor := &Adaptor{
+		audio: &ASRAudio{
+			Data:       []byte("fake-audio-bytes"),
+			FileName:   "sample.wav",
+			Format:     "wav",
+			DurationMs: 1000,
+		},
+	}
+	info := &relaycommon.RelayInfo{
+		// 客户端请求的是别名，渠道把别名映射到了转写模型。
+		OriginModelName: "whisper-1",
+		RelayMode:       relayconstant.RelayModeAudioTranscription,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelBaseUrl:    fake.server.URL,
+			ApiKey:            testASRAppID + "|" + testASRSecret + "|" + testASRAccessKey,
+			UpstreamModelName: ASRModelName,
+		},
+	}
+
+	usage, apiErr := adaptor.DoResponse(c, nil, info)
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Len(t, fake.uploads(), 1)
+}
+
 // TestASRUploadLanguage 语种取值的映射规则。
 func TestASRUploadLanguage(t *testing.T) {
 	tests := []struct {

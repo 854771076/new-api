@@ -693,6 +693,7 @@
     "Attach": "附加",
     "Attempt": "嘗試",
     "Audio": "音頻",
+    "Audio Transcription (/v1/audio/transcriptions)": "音訊轉寫（/v1/audio/transcriptions）",
     "Audio and Realtime pricing must be converted manually.": "音訊及 Realtime 定價需手動轉換。",
     "Audio and text-only requests keep their respective pricing.": "音訊請求和純文字請求分別沿用原計費規則。",
     "Audio comp.": "音頻補全",

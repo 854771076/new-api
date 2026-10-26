@@ -39,6 +39,10 @@ func GetEndpointTypesByChannelType(channelType int, modelName string) []constant
 		endpointTypes = GetAdvancedCustomPreset(channelType).SupportedEndpointTypesForModel(modelName)
 	case constant.ChannelTypeSora:
 		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAIVideo}
+	case constant.ChannelTypeXunfei:
+		// 讯飞渠道同时提供星火对话（OpenAI 兼容）与 IFASR 音频转写两种能力，
+		// 转写模型必须显式声明音频转写端点，否则会落到默认的 OpenAI 分支上。
+		endpointTypes = []constant.EndpointType{constant.EndpointTypeOpenAI, constant.EndpointTypeAudioTranscription}
 	case constant.ChannelTypeSub2API, constant.ChannelTypeNewAPI:
 		endpointTypes = []constant.EndpointType{
 			constant.EndpointTypeOpenAI,

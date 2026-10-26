@@ -906,4 +906,6 @@ export const STATIC_I18N_KEYS = [
   'Channel priorities changed. Refresh and try again.',
   'Invalid channel priority move',
   'Channel priority is outside the sortable range',
+  // Channel test endpoint type option labels (passed to t() at runtime).
+  'Audio Transcription (/v1/audio/transcriptions)',
 ] as const

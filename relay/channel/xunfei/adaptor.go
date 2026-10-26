@@ -123,8 +123,31 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 // DoResponse 按 relay mode 分流：音频转写与音频翻译走讯飞 IFASR 的两段式流程，
 // 其余走既有的星火对话路径。音频路径不持有星火对话专用的请求状态。
+//
+// 分流先于星火路径的版本解析（getAPIVersion 只在星火路径被调用），因此转写模型名不会
+// 被当成 API 版本。分流的同时做模型名守卫：转写模型不能用于对话接口，对话模型也不能
+// 用于转写接口，误用时给出明确的客户端错误而不是含糊的上游报错。
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
-	if info.RelayMode == relayconstant.RelayModeAudioTranscription || info.RelayMode == relayconstant.RelayModeAudioTranslation {
+	// 守卫判定用模型映射之后的上游模型名：运营方给转写模型配了别名（model_mapping）时，
+	// 客户端请求的是别名，判定仍要落在转写模型上；反过来，转写模型被映射到别的模型时，
+	// 转写请求必须被拒绝。上游模型名缺失时回落到客户端请求的原始模型名。
+	model := info.GetUpstreamModelName()
+	if model == "" {
+		model = info.OriginModelName
+	}
+	isTranscription := info.RelayMode == relayconstant.RelayModeAudioTranscription || info.RelayMode == relayconstant.RelayModeAudioTranslation
+	// 请求没有携带模型名时不做判定：生产链路上模型名必填（GetAndValidAudioRequest 已校验），
+	// 这里只是让守卫不误伤没有模型信息的调用方。
+	if model != "" {
+		switch {
+		case isTranscription && !IsASRModel(model):
+			return nil, newASRModelGuardError("模型 " + model + " 不是讯飞转写模型，转写请求必须使用 " + ASRModelName)
+		case !isTranscription && IsASRModel(model):
+			return nil, newASRModelGuardError("模型 " + ASRModelName + " 是讯飞转写模型，只能用于 /v1/audio/transcriptions，不能用于对话接口")
+		}
+	}
+
+	if isTranscription {
 		return a.doASRResponse(c, info)
 	}
 
@@ -141,6 +164,15 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		usage, err = xunfeiHandler(c, *a.request, splits[0], splits[1], splits[2])
 	}
 	return
+}
+
+// newASRModelGuardError 构造模型名守卫失败时的客户端错误。
+//
+// 模型用错是客户端请求有误：状态码取 400 并显式跳过重试，既不落在仓库默认的重试范围里，
+// 也不会因为重试而反复触发上游调用。
+func newASRModelGuardError(message string) *types.NewAPIError {
+	return types.NewError(errors.New(message), types.ErrorCodeInvalidRequest,
+		types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
 }
 
 // doASRResponse 完成讯飞 IFASR 的上传与轮询，写出转写响应并产出音频结算用量。
@@ -213,9 +245,10 @@ func ASRResultFromContext(c *gin.Context) (*ASRResult, bool) {
 
 // asrUploadLanguage 从请求的 language 字段取出上传语种。
 //
-// 客户端给的是通用语种代码（zh / en），讯飞接口用的是 cn / en，这里做一次映射；
-// 讯飞自有取值（autodialect / autominor 等）原样透传。字段缺失或不是字符串时返回空串，
-// 由调用方回落到默认语种。
+// 讯飞 IFASR 的 language 参数只接受 autodialect（中英 + 202 种方言免切识别）与
+// autominor（37 个语种免切识别，需单独申请权限）两个取值，因此客户端给的通用语种代码
+// （zh / en 等）一律映射到 autodialect；讯飞自有取值原样透传。
+// 字段缺失或不是字符串时返回空串，由调用方回落到默认语种。
 func asrUploadLanguage(raw []byte) string {
 	value := strings.TrimSpace(string(raw))
 	if value == "" || value == "null" {
@@ -231,10 +264,11 @@ func asrUploadLanguage(raw []byte) string {
 	}
 	language = strings.TrimSpace(language)
 	switch strings.ToLower(language) {
-	case "zh", "zh-cn", "zh_cn", "zh-hans", "zh-hant", "zh-tw", "zh_tw":
-		return "cn"
-	case "en", "en-us", "en_us", "en-gb", "en_gb":
-		return "en"
+	case "autodialect", "autominor":
+		return strings.ToLower(language)
+	case "zh", "zh-cn", "zh_cn", "zh-hans", "zh-hant", "zh-tw", "zh_tw",
+		"en", "en-us", "en_us", "en-gb", "en_gb":
+		return ASRDefaultLanguage
 	}
 	return language
 }

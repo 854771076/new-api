@@ -191,6 +191,10 @@ const endpointTypeOptions: Array<{ value: string; label: string }> = [
     label: 'Image Generation (/v1/images/generations)',
   },
   { value: 'embeddings', label: 'Embeddings (/v1/embeddings)' },
+  {
+    value: 'audio-transcription',
+    label: 'Audio Transcription (/v1/audio/transcriptions)',
+  },
 ]
 
 const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
@@ -198,6 +202,7 @@ const STREAM_INCOMPATIBLE_ENDPOINTS = new Set([
   'image-generation',
   'jina-rerank',
   'openai-response-compact',
+  'audio-transcription',
 ])
 
 const MODEL_PRICE_ERROR_CODE = 'model_price_error'

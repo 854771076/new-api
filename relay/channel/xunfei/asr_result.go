@@ -157,13 +157,63 @@ type asrOrderResult struct {
 }
 
 // asrLatticeUnit 一个分段单元，装着单个 vad 的识别结果。
+//
+// 上游两个版本给出的字段位置不同：
+//   - lattice（已做顺滑）的 json_1best 是 JSON 字符串，起止时间与说话人在其中的 st 上；
+//   - lattice2（未做顺滑）的 json_1best 直接是 JSON 对象，起止时间与说话人在单元层级。
+//
+// 因此 json_1best 用 asrJSONPayload 兼容两种形态，单元层级的时间与说话人也一并承接。
 type asrLatticeUnit struct {
-	Json1best string `json:"json_1best"`
+	Json1best asrJSONPayload `json:"json_1best"`
+	// BG 单元层级的起始时间，单位毫秒；lattice 形态不带该字段。
+	BG asrUpstreamValue `json:"bg"`
+	// ED 单元层级的结束时间，单位毫秒；lattice 形态不带该字段。
+	ED asrUpstreamValue `json:"ed"`
+	// RL 单元层级的说话人标识；lattice 形态不带该字段。
+	RL asrUpstreamValue `json:"rl"`
+}
+
+// asrJSONPayload 是 json_1best 字段的载荷，兼容 JSON 字符串与 JSON 对象两种形态。
+//
+// 载荷保留原始字节，由 decodeASRSentence 统一解码：字符串形态先做一次过度转义还原，
+// 对象形态直接使用。
+type asrJSONPayload struct {
+	raw []byte
+}
+
+// UnmarshalJSON 接受 JSON 字符串与 JSON 对象两种形态。
+func (p *asrJSONPayload) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := common.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		p.raw = []byte(text)
+		return nil
+	}
+	p.raw = append([]byte(nil), trimmed...)
+	return nil
 }
 
 // asrSentence 分段单元的识别结果（json_1best 字段解码后的形态）。
+//
+// 起止时间与说话人标识在不同版本里位置不同：
+//   - lattice（已做顺滑）：放在 st 内部；
+//   - lattice2（未做顺滑）：放在 st 的同级。
+//
+// 两处都承接，由 buildASRSegments 按优先级取值。
 type asrSentence struct {
 	ST asrSentenceST `json:"st"`
+	// BG 单句开始时间，单位毫秒；lattice2 形态放在 st 的同级。
+	BG asrUpstreamValue `json:"bg"`
+	// ED 单句结束时间，单位毫秒；lattice2 形态放在 st 的同级。
+	ED asrUpstreamValue `json:"ed"`
+	// RL 分离的角色编号；lattice2 形态放在 st 的同级。
+	RL asrUpstreamValue `json:"rl"`
 }
 
 // asrSentenceST 单句的识别内容。
@@ -299,13 +349,19 @@ func decodeASROrderResult(raw common.RawMessage) (asrOrderResult, bool) {
 	return orderResult, true
 }
 
-// decodeASRSentence 解析分段单元的识别结果（json_1best 字段本身是一段 JSON 字符串）。
-func decodeASRSentence(json1best string) (asrSentence, bool) {
-	if json1best == "" {
+// decodeASRSentence 解析分段单元的识别结果（json_1best 的载荷）。
+//
+// 字符串形态先按原样解码；解码失败时再做一次过度转义还原后重试，覆盖上游重复转义的响应。
+func decodeASRSentence(payload asrJSONPayload) (asrSentence, bool) {
+	if len(payload.raw) == 0 {
 		return asrSentence{}, false
 	}
 	var sentence asrSentence
-	if err := common.UnmarshalJsonStr(json1best, &sentence); err != nil {
+	if err := common.Unmarshal(payload.raw, &sentence); err == nil {
+		return sentence, true
+	}
+	reduced := strings.ReplaceAll(string(payload.raw), `\\`, `\`)
+	if err := common.UnmarshalJsonStr(reduced, &sentence); err != nil {
 		return asrSentence{}, false
 	}
 	return sentence, true
@@ -313,6 +369,7 @@ func decodeASRSentence(json1best string) (asrSentence, bool) {
 
 // buildASRSegments 由分段单元构建分段列表。
 //
+// 起止时间与说话人标识优先取单元层级（lattice2 形态），缺失时回落到识别结果里的 st（lattice 形态）。
 // 相邻分段单元的说话人标识不同时切为新段；同一说话人内的时间范围取各单元的并集
 // （起始取最小、结束取最新）。
 func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
@@ -322,9 +379,23 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 		if !ok {
 			continue
 		}
-		speaker := sentence.ST.RL.speaker()
-		start := sentence.ST.BG.millis()
-		end := sentence.ST.ED.millis()
+		speaker := unit.RL.speaker()
+		start := unit.BG.millis()
+		end := unit.ED.millis()
+		if start == 0 && end == 0 {
+			start = sentence.BG.millis()
+			end = sentence.ED.millis()
+		}
+		if start == 0 && end == 0 {
+			start = sentence.ST.BG.millis()
+			end = sentence.ST.ED.millis()
+		}
+		if speaker == "" {
+			speaker = sentence.RL.speaker()
+		}
+		if speaker == "" {
+			speaker = sentence.ST.RL.speaker()
+		}
 		if len(segments) > 0 && segments[len(segments)-1].Speaker == speaker {
 			last := &segments[len(segments)-1]
 			if start > 0 && (last.StartMs == 0 || start < last.StartMs) {

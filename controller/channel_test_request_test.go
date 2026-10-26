@@ -1,7 +1,12 @@
 package controller
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -309,4 +314,88 @@ func TestCloudflareEmbeddingResponseCompatibility(t *testing.T) {
 			assert.JSONEq(t, tt.body, w.Body.String())
 		})
 	}
+}
+
+// TestChannelTestRelayFormat 校验端点类型到 relay format 的映射。
+func TestChannelTestRelayFormat(t *testing.T) {
+	for _, tt := range []struct {
+		endpointType constant.EndpointType
+		want         types.RelayFormat
+	}{
+		{endpointType: constant.EndpointTypeOpenAI, want: types.RelayFormatOpenAI},
+		{endpointType: constant.EndpointTypeOpenAIResponse, want: types.RelayFormatOpenAIResponses},
+		{endpointType: constant.EndpointTypeOpenAIResponseCompact, want: types.RelayFormatOpenAIResponsesCompaction},
+		{endpointType: constant.EndpointTypeAnthropic, want: types.RelayFormatClaude},
+		{endpointType: constant.EndpointTypeGemini, want: types.RelayFormatGemini},
+		{endpointType: constant.EndpointTypeJinaRerank, want: types.RelayFormatRerank},
+		{endpointType: constant.EndpointTypeImageGeneration, want: types.RelayFormatOpenAIImage},
+		{endpointType: constant.EndpointTypeEmbeddings, want: types.RelayFormatEmbedding},
+		{endpointType: constant.EndpointTypeAudioTranscription, want: types.RelayFormatOpenAIAudio},
+		{endpointType: constant.EndpointType("unknown-endpoint"), want: types.RelayFormatOpenAI},
+	} {
+		t.Run(string(tt.endpointType), func(t *testing.T) {
+			assert.Equal(t, tt.want, channelTestRelayFormat(string(tt.endpointType)))
+		})
+	}
+}
+
+// TestChannelTestAudioTranscriptionRequest 校验音频转写端点构造出的是音频转写请求。
+func TestChannelTestAudioTranscriptionRequest(t *testing.T) {
+	request, ok := buildTestRequest(
+		channelTestAudioTranscriptionModel,
+		string(constant.EndpointTypeAudioTranscription),
+		&model.Channel{},
+		false,
+	).(*dto.AudioRequest)
+	require.True(t, ok)
+	assert.Equal(t, channelTestAudioTranscriptionModel, request.Model)
+	assert.Equal(t, "json", request.ResponseFormat)
+
+	// 其它端点类型的请求构造保持不变。
+	_, ok = buildTestRequest("gpt-4o-mini", string(constant.EndpointTypeOpenAI), &model.Channel{}, false).(*dto.GeneralOpenAIRequest)
+	assert.True(t, ok)
+}
+
+// TestChannelTestAudioMultipartCarriesFixture 校验渠道测试的 multipart 请求体携带音频夹具。
+func TestChannelTestAudioMultipartCarriesFixture(t *testing.T) {
+	body, contentType, err := buildChannelTestAudioMultipart(channelTestAudioTranscriptionModel)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	require.NoError(t, err)
+	assert.Equal(t, "multipart/form-data", mediaType)
+
+	form, err := multipart.NewReader(bytes.NewReader(body), params["boundary"]).ReadForm(1 << 20)
+	require.NoError(t, err)
+	defer form.RemoveAll()
+
+	assert.Equal(t, []string{channelTestAudioTranscriptionModel}, form.Value["model"])
+	files := form.File["file"]
+	require.Len(t, files, 1)
+	assert.Equal(t, channelTestAudioFileName, files[0].Filename)
+
+	opened, err := files[0].Open()
+	require.NoError(t, err)
+	defer opened.Close()
+	audio, err := io.ReadAll(opened)
+	require.NoError(t, err)
+	assert.Equal(t, channelTestAudioSampleWAV, audio)
+}
+
+// TestChannelTestAudioFixtureFormat 校验音频夹具是讯飞要求的 16kHz/16bit/单声道 WAV。
+func TestChannelTestAudioFixtureFormat(t *testing.T) {
+	data := channelTestAudioSampleWAV
+	require.Greater(t, len(data), 44)
+	assert.Equal(t, "RIFF", string(data[0:4]))
+	assert.Equal(t, "WAVE", string(data[8:12]))
+	assert.Equal(t, "fmt ", string(data[12:16]))
+	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(data[20:22]))     // PCM
+	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(data[22:24]))     // 单声道
+	assert.Equal(t, uint32(16000), binary.LittleEndian.Uint32(data[24:28])) // 16kHz
+	assert.Equal(t, uint16(16), binary.LittleEndian.Uint16(data[34:36]))    // 16bit
+
+	seconds, err := common.GetAudioDuration(context.Background(), bytes.NewReader(data), ".wav")
+	require.NoError(t, err)
+	assert.InDelta(t, 2.0, seconds, 0.01)
 }
