@@ -478,22 +478,34 @@ func audioFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	if taskResp != nil {
 		return
 	}
+	return RenderOpenAIAudioTask(originTask)
+}
 
-	adaptor := GetTaskAdaptor(originTask.Platform)
+// RenderOpenAIAudioTask renders a stored audio transcription task through the
+// plugin's openai_audio render hook. Submission and retrieval share this
+// renderer, so a client parses both responses with the same object shape.
+func RenderOpenAIAudioTask(task *model.Task) ([]byte, *dto.TaskError) {
+	if task == nil {
+		return nil, service.TaskErrorWrapperLocal(errors.New("task is required"), "task_not_exist", http.StatusBadRequest)
+	}
+	adaptor := GetTaskAdaptor(task.Platform)
 	if adaptor == nil {
-		taskResp = service.TaskErrorWrapperLocal(fmt.Errorf("invalid channel id: %d", originTask.ChannelId), "invalid_channel_id", http.StatusBadRequest)
-		return
+		// The stored task's platform no longer resolves to an adaptor: the
+		// plugin system is off, or the plugin that served the task is disabled
+		// or unregistered. Name that condition instead of reporting a channel
+		// problem the client cannot act on.
+		code, message := TaskPlatformUnavailableError(task.Platform)
+		return nil, service.TaskErrorWrapperLocal(errors.New(message), code, http.StatusBadRequest)
 	}
 	converter, ok := adaptor.(channel.OpenAIAudioTaskConverter)
 	if !ok {
-		taskResp = service.TaskErrorWrapperLocal(fmt.Errorf("not_implemented:%s", originTask.Platform), "not_implemented", http.StatusNotImplemented)
-		return
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("not_implemented:%s", task.Platform), "not_implemented", http.StatusNotImplemented)
 	}
-	respBody, err := converter.ConvertToOpenAIAudioTask(originTask)
+	body, err := converter.ConvertToOpenAIAudioTask(task)
 	if err != nil {
-		taskResp = service.TaskErrorWrapper(err, "convert_to_openai_audio_task_failed", http.StatusInternalServerError)
+		return nil, service.TaskErrorWrapper(err, "convert_to_openai_audio_task_failed", http.StatusInternalServerError)
 	}
-	return
+	return body, nil
 }
 
 // resolveRetrievableTask loads the task the request refers to and reports the

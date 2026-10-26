@@ -269,20 +269,16 @@ function buildSegments(units) {
     if (!sentence) continue;
     const st = sentence.st && typeof sentence.st === "object" ? sentence.st : {};
 
+    // 起点与终点分别回退：上游只丢掉其中一个时间是常见形态，成对回退会让
+    // 另一端停在 0，产出 end 为 0 的分段。
     let start = integerValue(unit.bg);
     let end = integerValue(unit.ed);
-    if (!start.ok && !end.ok) {
-      start = integerValue(unit.begin);
-      end = integerValue(unit.end);
-    }
-    if (!start.ok && !end.ok) {
-      start = integerValue(sentence.bg);
-      end = integerValue(sentence.ed);
-    }
-    if (!start.ok && !end.ok) {
-      start = integerValue(st.bg);
-      end = integerValue(st.ed);
-    }
+    if (!start.ok) start = integerValue(unit.begin);
+    if (!end.ok) end = integerValue(unit.end);
+    if (!start.ok) start = integerValue(sentence.bg);
+    if (!end.ok) end = integerValue(sentence.ed);
+    if (!start.ok) start = integerValue(st.bg);
+    if (!end.ok) end = integerValue(st.ed);
 
     let speaker = "";
     // rl 是上游的角色编号，语义上就是说话人；spk 只在没有 rl 的响应里才当说话人用。

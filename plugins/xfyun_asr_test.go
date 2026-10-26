@@ -538,6 +538,29 @@ func TestXfyunASRPluginMatchesGoParser(t *testing.T) {
 		assert.Equal(t, "你好世界", first["text"])
 	})
 
+	// 上游有时只丢掉起止时间里的一个；插件必须逐字段回退，否则会产出
+	// end 为 0 的分段。
+	t.Run("per-timestamp fallback", func(t *testing.T) {
+		sample := map[string]any{"lattice2": []any{
+			map[string]any{
+				"bg": "0", "end": "900", "rl": "0",
+				"json_1best": map[string]any{"st": map[string]any{
+					"rt": []any{map[string]any{"ws": []any{map[string]any{"cw": []any{map[string]any{"w": "一"}}}}}},
+				}},
+			},
+		}}
+		response := xfyunResultResponse(t, 4, xfyunOverEscaped(t, sample))
+		goResult, err := xunfei.ParseASRResult([]byte(response), xunfei.ASRResultTypeTransfer)
+		require.NoError(t, err)
+		pluginResult := xfyunParseTaskResultHook(t, plugin, response)
+		require.Equal(t, "SUCCESS", pluginResult["status"])
+		data := pluginResult["data"].(map[string]any)
+		segments := data["segments"].([]any)
+		require.Len(t, segments, 1)
+		assert.Equal(t, float64(900), segments[0].(map[string]any)["end"])
+		xfyunAssertSegmentsMatchGo(t, goResult, data)
+	})
+
 	t.Run("business error code", func(t *testing.T) {
 		pluginResult := xfyunParseTaskResultHook(t, plugin, `{"code":100001,"descInfo":"order not found","content":{}}`)
 		assert.Equal(t, "FAILURE", pluginResult["status"])

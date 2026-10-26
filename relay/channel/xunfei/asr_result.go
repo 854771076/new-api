@@ -398,19 +398,27 @@ func buildASRSegments(units []asrLatticeUnit) []ASRSegment {
 			continue
 		}
 		speaker := unit.RL.speaker()
+		// 起点与终点分别回退：只丢掉其中一个是上游的常见形态，成对回退会让
+		// 另一端停在默认的 0，产出 EndMs 为 0 的分段。
 		start, hasStart := unit.BG.millis()
 		end, hasEnd := unit.ED.millis()
-		if !hasStart && !hasEnd {
+		if !hasStart {
 			// 上游较新的 lattice2 版本把时间写成 begin/end。
 			start, hasStart = unit.Begin.millis()
+		}
+		if !hasEnd {
 			end, hasEnd = unit.End.millis()
 		}
-		if !hasStart && !hasEnd {
+		if !hasStart {
 			start, hasStart = sentence.BG.millis()
+		}
+		if !hasEnd {
 			end, hasEnd = sentence.ED.millis()
 		}
-		if !hasStart && !hasEnd {
+		if !hasStart {
 			start, hasStart = sentence.ST.BG.millis()
+		}
+		if !hasEnd {
 			end, hasEnd = sentence.ST.ED.millis()
 		}
 		// rl 是上游的角色编号，语义上就是说话人；spk 只在没有 rl 的响应里才当说话人用。

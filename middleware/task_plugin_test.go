@@ -504,6 +504,29 @@ func TestBuildTaskPluginRouteRequestMeasuresMediaDuration(t *testing.T) {
 	files = filesOf(t, unsupported)
 	require.Len(t, files, 1)
 	assert.Equal(t, float64(relaycommon.MaxTaskDurationSeconds), files[0]["durationSeconds"])
+
+	// A file uploaded without an extension is still measurable when the part
+	// carries the media type: clients commonly omit the extension, and treating
+	// the file as unmeasurable would reserve the full ceiling for a 2s clip.
+	var typedBody bytes.Buffer
+	typedWriter := multipart.NewWriter(&typedBody)
+	require.NoError(t, typedWriter.WriteField("model", "m"))
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", `form-data; name="file"; filename="audio"`)
+	partHeader.Set("Content-Type", "audio/wav")
+	part, err := typedWriter.CreatePart(partHeader)
+	require.NoError(t, err)
+	_, err = part.Write(taskPluginTestWAV(8000, 2))
+	require.NoError(t, err)
+	require.NoError(t, typedWriter.Close())
+	typedContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	typedContext.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(typedBody.Bytes()))
+	typedContext.Request.Header.Set("Content-Type", typedWriter.FormDataContentType())
+	typed, err := buildTaskPluginRouteRequest(typedContext, true)
+	require.NoError(t, err)
+	files = filesOf(t, typed)
+	require.Len(t, files, 1)
+	assert.InDelta(t, 2.0, files[0]["durationSeconds"], 0.001)
 }
 
 func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {

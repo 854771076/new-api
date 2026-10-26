@@ -318,6 +318,23 @@ func TestBuildASRSegmentsReadsBeginEndSpk(t *testing.T) {
 	assert.Equal(t, "一二", segments[0].Text)
 }
 
+// TestBuildASRSegmentsFallsBackPerTimestamp 上游有时只丢掉起止时间里的一个；
+// 逐字段回退必须仍能取到另一端，而不是产出结束时间为 0 的分段。
+func TestBuildASRSegmentsFallsBackPerTimestamp(t *testing.T) {
+	units := []asrLatticeUnit{
+		{
+			Json1best: asrJSONPayload{raw: []byte(`{"st":{"rt":[{"ws":[{"cw":[{"w":"一"}]}]}]}}`)},
+			BG:        "0", End: "900",
+		},
+	}
+
+	segments := buildASRSegments(units)
+
+	require.Len(t, segments, 1)
+	assert.Equal(t, int64(0), segments[0].StartMs)
+	assert.Equal(t, int64(900), segments[0].EndMs)
+}
+
 // TestBuildASRSegmentsPrefersRoleLabelOverSpk rl 是上游的角色编号，语义上就是说话人；
 // 只有响应里完全没有 rl 时才把 spk 当说话人。
 func TestBuildASRSegmentsPrefersRoleLabelOverSpk(t *testing.T) {

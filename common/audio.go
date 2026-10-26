@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"mime"
 	"slices"
 	"strings"
 
@@ -26,10 +27,43 @@ var audioDurationExtensions = []string{
 	".aiff", ".aif", ".aifc", ".aac",
 }
 
+// audioDurationMediaTypes maps the media types of the measurable containers
+// onto the extension their parser expects. Clients commonly upload a file
+// without a filename extension (`curl -F file=@audio;type=audio/mpeg`), and the
+// extension alone would leave a measurable file unpriced.
+var audioDurationMediaTypes = map[string]string{
+	"audio/mpeg":   ".mp3",
+	"audio/mp3":    ".mp3",
+	"audio/wav":    ".wav",
+	"audio/wave":   ".wav",
+	"audio/x-wav":  ".wav",
+	"audio/flac":   ".flac",
+	"audio/x-flac": ".flac",
+	"audio/mp4":    ".m4a",
+	"audio/m4a":    ".m4a",
+	"audio/x-m4a":  ".m4a",
+	"audio/ogg":    ".ogg",
+	"audio/oga":    ".oga",
+	"audio/opus":   ".opus",
+	"audio/aiff":   ".aiff",
+	"audio/x-aiff": ".aiff",
+	"audio/aac":    ".aac",
+}
+
 // SupportsAudioDuration reports whether the host can measure the duration of a
 // file with the given extension.
 func SupportsAudioDuration(ext string) bool {
 	return slices.Contains(audioDurationExtensions, strings.ToLower(ext))
+}
+
+// AudioExtensionForMediaType returns the extension whose parser measures the
+// given media type, or an empty string when the host has no parser for it.
+func AudioExtensionForMediaType(mediaType string) string {
+	parsed, _, err := mime.ParseMediaType(mediaType)
+	if err != nil {
+		parsed = strings.TrimSpace(strings.Split(mediaType, ";")[0])
+	}
+	return audioDurationMediaTypes[strings.ToLower(parsed)]
 }
 
 // SupportedAudioDurationExtensions returns the extensions whose duration the

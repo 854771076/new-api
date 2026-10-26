@@ -223,6 +223,39 @@ func TestRelayTaskFetchRendersAudioTranscriptionTask(t *testing.T) {
 	assert.Equal(t, float64(1710000060), response["completed_at"])
 }
 
+// Submission renders the accepted task through the same renderer retrieval
+// uses, so a client parses the create response and later polls with one shape.
+// A pending task contributes no transcription payload of its own, which is what
+// makes the two responses identical apart from the payload.
+func TestRenderOpenAIAudioTaskPendingShapeMatchesRetrieval(t *testing.T) {
+	plugin, err := pluginruntime.DefaultRegistry.Register(relayAudioTaskPluginSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pluginruntime.DefaultRegistry.Unregister(plugin.Meta.Key)) })
+
+	task := &model.Task{
+		TaskID:     "task_audio_pending",
+		Platform:   constant.TaskPlatform(plugin.Meta.Key),
+		Status:     model.TaskStatusNotStart,
+		CreatedAt:  1710000000,
+		Properties: model.Properties{OriginModelName: "mock-asr"},
+	}
+
+	body, taskErr := RenderOpenAIAudioTask(task)
+	require.Nil(t, taskErr)
+
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(body, &response))
+	assert.Equal(t, "task_audio_pending", response["id"])
+	assert.Equal(t, "audio.transcription", response["object"])
+	assert.Equal(t, "queued", response["status"])
+	assert.Equal(t, float64(0), response["progress"])
+	assert.Equal(t, "mock-asr", response["model"])
+	assert.Equal(t, float64(1710000000), response["created_at"])
+	assert.NotContains(t, response, "task_id")
+	assert.NotContains(t, response, "completed_at")
+	assert.NotContains(t, response, "text", "a pending task carries no transcription payload")
+}
+
 const relayAudioTaskPluginSource = `
 export const meta = {
   apiVersion: 1, key: "audio-fetch-e2e", name: "Audio Fetch E2E", version: "1.0.0",
@@ -236,7 +269,10 @@ export function buildQueryRequest() { return {}; }
 export function parseTaskResult() { return {}; }
 export const protocols = {openai_audio: {
   decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
-  render: function() { return {text: "你好", duration: 8, segments: [{id: 0, start: 0.42, end: 7.98, text: "你好"}], language: ""}; }
+  render: function(_ctx, task) {
+    if (String(task.status).toUpperCase() !== "SUCCESS") return {};
+    return {text: "你好", duration: 8, segments: [{id: 0, start: 0.42, end: 7.98, text: "你好"}], language: ""};
+  }
 }};
 `
 

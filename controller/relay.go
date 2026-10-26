@@ -806,6 +806,17 @@ func presentTaskSubmission(c *gin.Context, outcome *taskSubmissionOutcome) {
 			c.JSON(http.StatusOK, outcome.Task.ToOpenAIVideo())
 			return
 		}
+		// An accepted audio task answers with the same transcription object the
+		// retrieve endpoint later returns, so one client parser covers both.
+		if pinned, ok := pinnedValue.(pluginruntime.PinnedEndpoint); ok && pinned.Protocol == pluginruntime.ProtocolOpenAIAudio && pinned.Operation.Name == "create" {
+			body, renderErr := relay.RenderOpenAIAudioTask(outcome.Task)
+			if renderErr == nil {
+				diagnostics.present(outcome.Task, "openai_audio_create")
+				c.Data(http.StatusOK, "application/json", body)
+				return
+			}
+			logger.LogError(c, "task plugin openai_audio create presenter failed: "+renderErr.Message)
+		}
 	}
 	createdAt := outcome.Task.CreatedAt
 	if createdAt == 0 {
