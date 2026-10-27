@@ -210,6 +210,24 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		code, message := TaskPlatformUnavailableError(platform)
 		return nil, service.TaskErrorWrapperLocal(errors.New(message), code, http.StatusBadRequest)
 	}
+	// The asynchronous audio transcription endpoint has no non-plugin
+	// fallback: no other endpoint serves it. A request that arrives here
+	// without a plugin that claims openai_audio reached it through a channel
+	// that advertises the model for a different provider, and the task
+	// validation that follows reads that provider's request shape — naming a
+	// field this endpoint never carries. Report the model instead.
+	if info.RelayMode == relayconstant.RelayModeAudioTaskSubmit {
+		provider, servesAudio := adaptor.(channel.OpenAIAudioTaskProvider)
+		if !servesAudio || !provider.ProvidesOpenAIAudioTask() {
+			modelName := info.OriginModelName
+			if modelName == "" {
+				modelName = info.UpstreamModelName
+			}
+			return nil, service.TaskErrorWrapperLocal(
+				fmt.Errorf("model %q is not served by any task plugin on the audio transcription endpoint", modelName),
+				"model_not_found", http.StatusServiceUnavailable)
+		}
+	}
 	// buildSubmitRequest runs during validation and the unreleased plugin
 	// contract exposes this host-generated id to that hook.
 	if info.PublicTaskID == "" {

@@ -305,6 +305,20 @@ export function buildQueryRequest(){return {url:"https://provider.example"};}
 export function parseTaskResult(){return {status:"SUCCESS"};}
 `
 
+// audioEndpointPlugin claims the openai_audio host protocol, so it can serve
+// the asynchronous audio transcription endpoint.
+const audioEndpointPlugin = `
+export const meta = {apiVersion:1,key:"audio-endpoint",name:"Audio Endpoint",version:"1.0.0",author:{name:"Test"},models:["audio-model"],fetchMode:"per_task",protocols:["openai_audio"]};
+export function buildSubmitRequest(ctx) { return {url: ctx.baseUrl+"/submit", method:"POST"}; }
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(){return {url:"https://provider.example"};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+export const protocols = {openai_audio: {
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+  render: function() { return {status: "succeeded", text: "ok", duration: 1, segments: [], language: ""}; }
+}};
+`
+
 func pinMappingOrderPlugin(t *testing.T, c *gin.Context, source string) {
 	t.Helper()
 	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
@@ -326,6 +340,68 @@ func newTaskSubmitContext(t *testing.T, originalModel, mapping string) (*gin.Con
 	}
 	c.Set("task_request", map[string]any{"prompt": "p"})
 	return c, &relaycommon.RelayInfo{TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+}
+
+// newAudioTaskSubmitContext builds the context of a submission to the
+// asynchronous audio transcription endpoint. Unlike the video endpoint, this
+// one has no non-plugin fallback, so a request that reaches it without a
+// plugin claiming openai_audio has to be rejected on the model.
+func newAudioTaskSubmitContext(t *testing.T, originalModel string) (*gin.Context, *relaycommon.RelayInfo) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions/tasks", nil)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, originalModel)
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://provider.example")
+	return c, &relaycommon.RelayInfo{
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
+		RelayMode:     relayconstant.RelayModeAudioTaskSubmit,
+	}
+}
+
+func TestRelayTaskSubmitRejectsAudioEndpointWithoutAudioPlugin(t *testing.T) {
+	c, info := newAudioTaskSubmitContext(t, "other-provider-model")
+	// A plugin that serves a different task shape, reached because the
+	// selected channel advertises the model for that provider.
+	pinMappingOrderPlugin(t, c, mappingOrderSubmitPlugin)
+	info.OriginModelName = "other-provider-model"
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "model_not_found", taskErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, taskErr.StatusCode)
+	assert.Contains(t, taskErr.Message, "other-provider-model")
+	assert.NotContains(t, taskErr.Message, "prompt")
+}
+
+func TestRelayTaskSubmitKeepsAudioEndpointWithAudioPlugin(t *testing.T) {
+	c, info := newAudioTaskSubmitContext(t, "audio-model")
+	pinMappingOrderPlugin(t, c, audioEndpointPlugin)
+	info.OriginModelName = "audio-model"
+	c.Set("task_request", map[string]any{"model": "audio-model"})
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	// The plugin serves the protocol, so the request is not rejected on the
+	// model and continues into the usual task validation and billing.
+	require.NotNil(t, taskErr)
+	assert.NotEqual(t, "model_not_found", taskErr.Code)
+}
+
+func TestRelayTaskSubmitLeavesOtherTaskEndpointsAlone(t *testing.T) {
+	c, info := newTaskSubmitContext(t, "declared-model", "")
+	pinMappingOrderPlugin(t, c, mappingOrderSubmitPlugin)
+	info.OriginModelName = "declared-model"
+	info.RelayMode = relayconstant.RelayModeVideoSubmit
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	// A video endpoint request on a plugin without openai_audio is unchanged:
+	// only the audio endpoint has no fallback that could serve it.
+	require.NotNil(t, taskErr)
+	assert.NotEqual(t, "model_not_found", taskErr.Code)
 }
 
 func TestRelayTaskSubmitMapsBeforeValidateWhenOriginSet(t *testing.T) {

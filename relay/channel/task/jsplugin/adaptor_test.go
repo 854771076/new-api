@@ -1810,58 +1810,6 @@ func TestTaskAdaptorRejectsOpenAIAudioConversionWithoutClaim(t *testing.T) {
 	require.ErrorContains(t, err, "does not claim openai_audio")
 }
 
-func TestTaskAdaptorRejectsModelNotServedByPlugin(t *testing.T) {
-	plugin, err := pluginruntime.NewRegistry().Register(audioTaskPlugin, pluginruntime.Options{})
-	require.NoError(t, err)
-	adaptor := New(plugin)
-
-	// The plugin declares "mock-asr". A request naming the plugin key
-	// reaches this adaptor without a claimed endpoint, and the error has to
-	// name the model: the generic task validation would blame "prompt", a
-	// field the audio protocol never carries.
-	info := &relaycommon.RelayInfo{
-		ChannelMeta:     &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"},
-		TaskRelayInfo:   &relaycommon.TaskRelayInfo{},
-		OriginModelName: "mock-audio",
-	}
-	adaptor.Init(info)
-
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions/tasks", nil)
-
-	taskErr := adaptor.ValidateRequestAndSetAction(c, info)
-
-	require.NotNil(t, taskErr)
-	assert.Equal(t, "model_not_found", taskErr.Code)
-	assert.Equal(t, http.StatusServiceUnavailable, taskErr.StatusCode)
-	assert.Contains(t, taskErr.Message, "mock-audio")
-	assert.Contains(t, taskErr.Message, "mock-asr")
-	assert.NotContains(t, taskErr.Message, "prompt")
-}
-
-func TestTaskAdaptorKeepsDeclaredModelOutOfTheNotServedBranch(t *testing.T) {
-	plugin, err := pluginruntime.NewRegistry().Register(audioTaskPlugin, pluginruntime.Options{})
-	require.NoError(t, err)
-	adaptor := New(plugin)
-
-	info := &relaycommon.RelayInfo{
-		ChannelMeta:     &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"},
-		TaskRelayInfo:   &relaycommon.TaskRelayInfo{},
-		OriginModelName: "mock-asr",
-	}
-	adaptor.Init(info)
-
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions/tasks", nil)
-
-	taskErr := adaptor.ValidateRequestAndSetAction(c, info)
-
-	// A declared model is not a "not served" case: the request continues into
-	// the generic task validation instead of being rejected on the model.
-	require.NotNil(t, taskErr)
-	assert.NotEqual(t, "model_not_found", taskErr.Code)
-}
-
 func TestTaskAdaptorOwnsOpenAIAudioTaskLifecycle(t *testing.T) {
 	plugin, err := pluginruntime.NewRegistry().Register(audioTaskPlugin, pluginruntime.Options{})
 	require.NoError(t, err)

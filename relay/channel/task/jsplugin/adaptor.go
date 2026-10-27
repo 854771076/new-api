@@ -222,13 +222,6 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 		}
 	}
 	if _, exists := c.Get("task_request"); !exists {
-		// No protocol endpoint claimed this request, so the model does not name
-		// a model of this plugin. The generic task validation below reads the
-		// video request shape and would blame "prompt", a field the audio
-		// protocol never carries, so name the model instead.
-		if taskErr := a.rejectUndeclaredModel(info); taskErr != nil {
-			return taskErr
-		}
 		if taskErr := relaycommon.ValidateBasicTaskRequest(c, info, "image_to_video"); taskErr != nil {
 			return taskErr
 		}
@@ -242,40 +235,6 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 		return taskErr
 	}
 	return nil
-}
-
-// rejectUndeclaredModel reports a request whose model this plugin does not
-// declare. A task plugin channel is selected by plugin identity, so a request
-// naming something else — the plugin key, or another channel's model alias —
-// still lands on this adaptor. The plugin's declared models are the only
-// names its protocol endpoints accept, and they are the names the channel is
-// bound to, so any other name can only fail later, upstream.
-func (a *TaskAdaptor) rejectUndeclaredModel(info *relaycommon.RelayInfo) *dto.TaskError {
-	declared := a.plugin.Meta.Models
-	if len(declared) == 0 {
-		return nil
-	}
-	requested := strings.TrimSpace(info.OriginModelName)
-	if requested == "" {
-		requested = strings.TrimSpace(info.UpstreamModelName)
-	}
-	if requested == "" {
-		return nil
-	}
-	for _, candidate := range []string{info.UpstreamModelName, requested} {
-		if candidate == "" {
-			continue
-		}
-		for _, model := range declared {
-			if strings.EqualFold(candidate, model) {
-				return nil
-			}
-		}
-	}
-	return service.TaskErrorWrapperLocal(
-		fmt.Errorf("model %q is not served by task plugin %q (available models: %s)",
-			requested, a.plugin.Meta.Key, strings.Join(declared, ", ")),
-		"model_not_found", http.StatusServiceUnavailable)
 }
 
 func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
@@ -1307,6 +1266,14 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	return common.Marshal(rendered)
 }
 
+// ProvidesOpenAIAudioTask reports whether this plugin claims the openai_audio
+// protocol, and so can serve the asynchronous audio transcription endpoint.
+func (a *TaskAdaptor) ProvidesOpenAIAudioTask() bool {
+	return slices.ContainsFunc(a.plugin.Meta.Protocols, func(claim pluginruntime.ProtocolClaim) bool {
+		return claim.Name == pluginruntime.ProtocolOpenAIAudio
+	})
+}
+
 // ConvertToOpenAIAudioTask renders a finished audio transcription task through
 // the plugin's openai_audio retrieve hook. The plugin owns the transcription
 // payload while the host owns the public task's identity and lifecycle, so
@@ -1315,10 +1282,7 @@ func (a *TaskAdaptor) ConvertToOpenAIAudioTask(task *model.Task) ([]byte, error)
 	if task == nil {
 		return nil, fmt.Errorf("task is required")
 	}
-	claimed := slices.ContainsFunc(a.plugin.Meta.Protocols, func(claim pluginruntime.ProtocolClaim) bool {
-		return claim.Name == pluginruntime.ProtocolOpenAIAudio
-	})
-	if !claimed {
+	if !a.ProvidesOpenAIAudioTask() {
 		return nil, fmt.Errorf("plugin does not claim openai_audio")
 	}
 	view, err := service.BuildTaskPluginView(task)

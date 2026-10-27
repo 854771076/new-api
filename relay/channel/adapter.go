@@ -107,6 +107,14 @@ type OpenAIAudioTaskConverter interface {
 	ConvertToOpenAIAudioTask(originTask *model.Task) ([]byte, error)
 }
 
+// OpenAIAudioTaskProvider reports whether the adaptor serves the asynchronous
+// audio transcription protocol. The audio task endpoint has no non-plugin
+// fallback, so a request that reaches it without a provider has to be told
+// that no plugin serves its model here.
+type OpenAIAudioTaskProvider interface {
+	ProvidesOpenAIAudioTask() bool
+}
+
 type TaskArtifact = hosttypes.TaskArtifact
 
 type TaskArtifactClientRequest struct {
