@@ -14,9 +14,17 @@
 //   原样交给上游，由上游判定格式是否可接受。
 // - 上游允许 5 小时音频，但宿主对 duration 用量事实有 1 小时上限校验；超限的结算
 //   事实会被宿主丢弃并保留提交期的预扣值。这是宿主侧限制，插件不做规避。
+// - 说话人依赖上游的角色分离：客户端用 multipart 表单字段 roleType（可选 roleNum）
+//   请求，插件把它们作为上游查询参数透传。未开启时上游不返回 rl/spk，转写文本里
+//   只有时间戳、没有说话人。
+// - 结算时长只认上游回传的真实时长（realDuration）。上游未回传时插件不产出时长
+//   事实，由宿主保留提交期的预扣值——宿主对测不出长度的格式给的是可计费上限，
+//   不是实测长度。
 
 const SUCCESS_CODE = "000000";
 const ORDER_NOT_FINISHED_CODE = "100013";
+// RATE_LIMIT_CODE 是上游的频率限制：退避后重试即可恢复，属于可自愈的瞬时状态。
+const RATE_LIMIT_CODE = "100012";
 const UPLOAD_PATH = "/v2/upload";
 const RESULT_PATH = "/v2/getResult";
 // language 只接受 autodialect / autominor。autodialect 支持中英与方言免切识别；
@@ -47,7 +55,7 @@ export const meta = {
     en: "Audio file transcription via iFLYTEK",
     zh: "通过讯飞转写音频文件",
   },
-  version: "1.0.0",
+  version: "1.1.0",
   author: { name: "QuantumNous" },
   baseUrl: "https://office-api-ist-dx.iflyaisol.com",
   models: ["ifasr-llm-v1"],
@@ -124,6 +132,10 @@ function newSignatureRandom() {
 
 function pad2(value) {
   return value < 10 ? "0" + value : String(value);
+}
+
+function pad3(value) {
+  return value < 10 ? "00" + value : value < 100 ? "0" + value : String(value);
 }
 
 // 官方格式 yyyy-MM-dd'T'HH:mm:ss±HHmm，东八区偏移不带冒号。用 UTC getter 加 8 小时
@@ -316,17 +328,31 @@ function buildSegments(units) {
   return result;
 }
 
-// 计费与展示使用的时长事实。
+// 展示用的时长事实。
 //
 // 上传时设置了 durationCheckDisable=true（插件拿不到文件字节，无法保证声明时长与实际一致），
 // 此时上游不再回显声明值：实测 8 秒音频的 originalDuration 退化为 60000，真实长度只在
 // realDuration 里。因此优先取 realDuration，缺失时回退 originalDuration。
-function billedDurationMs(info) {
+//
+// 回退值可能远大于真实长度，只用于展示与响应时长，不作为结算事实：结算只看
+// authoritativeDurationMs。
+function displayDurationMs(info) {
   if (!info) return null;
   const real = integerValue(info.realDuration);
   if (real.ok && real.value > 0) return real.value;
   const original = integerValue(info.originalDuration);
   if (original.ok && original.value > 0) return original.value;
+  return null;
+}
+
+// 结算用的时长事实：只认上游回传的真实时长。
+//
+// originalDuration 在关闭时长校验时是退化值（实测 8 秒音频返回 60000），拿它结算会把
+// 8 秒音频按 60 秒计费。上游没有回传真实时长时返回 null，由宿主保留提交期的预扣值。
+function authoritativeDurationMs(info) {
+  if (!info) return null;
+  const real = integerValue(info.realDuration);
+  if (real.ok && real.value > 0) return real.value;
   return null;
 }
 
@@ -336,15 +362,20 @@ function summarizeResult(body) {
   const segments = buildSegments(chooseUnits(decodeOrderResult(content.orderResult)));
   let text = "";
   for (const segment of segments) text += segment.text;
-  const billed = billedDurationMs(info);
-  return {
+  const display = displayDurationMs(info);
+  const authoritative = authoritativeDurationMs(info);
+  const summary = {
     code: normalizedCode(body && body.code),
     descInfo: trimmed(body && body.descInfo),
     text: text,
     segments: segments,
     language: info ? trimmed(info.language) : "",
-    billedDuration: billed === null ? 0 : billed,
+    billedDuration: display === null ? 0 : display,
   };
+  // 权威时长单独落库：结算只认它，billedDuration 只是展示值。缺失时字段整体不写，
+  // 空值会让结算把「没取到」当成「取到了 0」。
+  if (authoritative !== null) summary.realDurationMs = authoritative;
+  return summary;
 }
 
 // 订单异常的 failType 语义来自讯飞 IFASR 接口文档，与 Go 侧 asrFailTypeDescriptions
@@ -373,22 +404,24 @@ function failureReason(info, descInfo) {
   return message;
 }
 
-// 时长事实可能以三种形态到达：原始查询响应（content.orderInfo）、批次条目的
-// 摘要数据（orderInfo / billedDuration）。统一取毫秒值，取不到返回 null。
-// 取值优先级与 billedDurationMs 一致：realDuration 优先，originalDuration 兜底。
-function billedDurationFrom(value) {
+// 结算用的时长事实可能以两种形态到达：原始查询响应（content.orderInfo）或落库摘要
+// （realDurationMs）。统一取毫秒值，取不到返回 null。
+//
+// 刻意不回退到 billedDuration：那是展示用的合并值，可能带着退化的 originalDuration，
+// 拿它结算会把 8 秒音频按 60 秒计费。
+function authoritativeDurationFrom(value) {
   if (!value || typeof value !== "object") return null;
   const content = value.content;
   if (content && typeof content === "object" && content.orderInfo && typeof content.orderInfo === "object") {
-    const parsed = billedDurationMs(content.orderInfo);
+    const parsed = authoritativeDurationMs(content.orderInfo);
     if (parsed !== null) return parsed;
   }
   if (value.orderInfo && typeof value.orderInfo === "object") {
-    const parsed = billedDurationMs(value.orderInfo);
+    const parsed = authoritativeDurationMs(value.orderInfo);
     if (parsed !== null) return parsed;
   }
-  const parsed = integerValue(value.billedDuration);
-  return parsed.ok && parsed.value > 0 ? parsed.value : null;
+  const stored = integerValue(value.realDurationMs);
+  return stored.ok && stored.value > 0 ? stored.value : null;
 }
 
 // 宿主的单任务轮询把整段上游响应写入 task.data，因此 render 多半拿到原始响应；
@@ -407,6 +440,7 @@ function parseStoredResult(data) {
       };
     });
     const duration = integerValue(data.billedDuration !== undefined ? data.billedDuration : data.originalDuration);
+    const authoritative = integerValue(data.realDurationMs);
     return {
       code: normalizedCode(data.code),
       descInfo: trimmed(data.descInfo),
@@ -414,10 +448,31 @@ function parseStoredResult(data) {
       segments: segments,
       language: trimmed(data.language),
       billedDuration: duration.ok ? duration.value : 0,
+      realDurationMs: authoritative.ok && authoritative.value > 0 ? authoritative.value : null,
     };
   }
   if (data && typeof data === "object") return summarizeResult(data);
-  return { code: "", descInfo: "", text: "", segments: [], language: "", billedDuration: 0 };
+  return { code: "", descInfo: "", text: "", segments: [], language: "", billedDuration: 0, realDurationMs: null };
+}
+
+// 取表单字段的第一个值。宿主把 multipart 的文本字段以「字段名 → 字符串数组」交给
+// 插件，重复出现的字段按提交顺序排列。
+function firstFieldValue(fields, name) {
+  if (!fields || typeof fields !== "object") return "";
+  const value = fields[name];
+  if (Array.isArray(value)) return trimmed(value.length > 0 ? value[0] : "");
+  return trimmed(value);
+}
+
+// 可选的非负整数字段：缺失或空返回空串（表示不启用）；非整数或负数直接报错。
+//
+// 取值范围由上游判定，插件只挡掉明显非法的写法——提前拒掉上游可能支持的取值，
+// 会让请求以「参数非法」失败，而正确结果本应是上游照常处理。
+function optionalUnsignedInteger(fields, name) {
+  const value = firstFieldValue(fields, name);
+  if (value === "") return "";
+  if (!/^\d+$/.test(value)) throw new Error(name + " must be a non-negative integer");
+  return value;
 }
 
 function decodeRequest(ctx) {
@@ -449,8 +504,12 @@ function decodeRequest(ctx) {
   const billableSeconds = file.durationSeconds;
 
   const fields = body.fields && typeof body.fields === "object" ? body.fields : {};
-  const model = trimmed(ctx && ctx.model) || trimmed(Array.isArray(fields.model) ? fields.model[0] : "");
+  const model = trimmed(ctx && ctx.model) || firstFieldValue(fields, "model");
   if (model === "") throw new Error("model is required");
+  // 角色分离是上游的可选查询参数（roleType、roleNum）。未传时上游不返回 rl/spk，
+  // 转写结果里就没有说话人。
+  const roleType = optionalUnsignedInteger(fields, "roleType");
+  const roleNum = optionalUnsignedInteger(fields, "roleNum");
 
   return {
     kind: "submit",
@@ -463,6 +522,8 @@ function decodeRequest(ctx) {
       mimeType: trimmed(file.mimeType),
       fileSize: fileSize.value,
       durationSeconds: billableSeconds,
+      roleType: roleType,
+      roleNum: roleNum,
       // signatureRandom 在这里生成：上传与轮询必须复用同一个值，而宿主不会把
       // buildSubmitRequest 里的局部变量传给 parseSubmitResponse，只能随 requestBody
       // 持久化到提交结果，再由 parseSubmitResponse 写入插件状态。
@@ -489,6 +550,12 @@ export function buildSubmitRequest(ctx) {
     // 同步端点用本地解析器得到时长后保持校验开启，两者不要互相照抄。
     durationCheckDisable: "true",
   };
+  // 角色分离参数是上游的可选查询参数，参与签名。未启用时不进签名串，签名与调用方
+  // 未传角色分离时完全一致。
+  const roleType = trimmed(requestBody.roleType);
+  if (roleType !== "") params.roleType = roleType;
+  const roleNum = trimmed(requestBody.roleNum);
+  if (roleNum !== "") params.roleNum = roleNum;
   return {
     url: String(ctx.baseUrl || "").replace(/\/+$/, "") + UPLOAD_PATH + "?" + queryString(params),
     method: "POST",
@@ -554,7 +621,12 @@ export function parseTaskResult(ctx, body) {
   // 判据以业务码为准：订单信息缺失时 status 默认 0，只看 status 会把硬错误
   // （如 100001 订单不存在）当成处理中一直轮询，掩盖真实原因。
   if (code !== "" && code !== SUCCESS_CODE) {
-    if (code === ORDER_NOT_FINISHED_CODE) return { status: "IN_PROGRESS", progress: "50%" };
+    // 限流与订单未完成都是可自愈的瞬时状态：继续轮询，宿主有轮询上限兜底。
+    // 其余业务码（查询订单错误 100004、未知异常 999999 等）不是瞬时状态，继续轮询
+    // 只会把真实故障拖成宿主超时；直接判失败并带上游码，客户端才拿得到可定位的原因。
+    if (code === ORDER_NOT_FINISHED_CODE || code === RATE_LIMIT_CODE) {
+      return { status: "IN_PROGRESS", progress: "50%" };
+    }
     return { status: "FAILURE", progress: "100%", reason: "iFLYTEK error " + code + (descInfo === "" ? "" : ": " + descInfo) };
   }
   const info = orderInfoOf(body);
@@ -562,17 +634,23 @@ export function parseTaskResult(ctx, body) {
   const status = integerValue(info.status);
   if (status.ok && status.value === 4) {
     const summary = summarizeResult(body);
+    const data = {
+      text: summary.text,
+      duration_seconds: summary.billedDuration / 1000,
+      segments: summary.segments,
+      language: summary.language,
+      billedDuration: summary.billedDuration,
+    };
+    // 权威时长单独落库：结算只认它。上游没回传真实时长时字段整体不写，空值会被
+    // 结算当成「取到了 0」。
+    if (summary.realDurationMs !== undefined && summary.realDurationMs !== null) {
+      data.realDurationMs = summary.realDurationMs;
+    }
     return {
       status: "SUCCESS",
       progress: "100%",
       taskId: ctx.taskId,
-      data: {
-        text: summary.text,
-        duration_seconds: summary.billedDuration / 1000,
-        segments: summary.segments,
-        language: summary.language,
-        billedDuration: summary.billedDuration,
-      },
+      data: data,
     };
   }
   if (status.ok && status.value === -1) {
@@ -599,12 +677,54 @@ export function extractUsage(ctx) {
 
 // 结算阶段以上游回传的真实时长为准。宿主对时长类事实有上限校验，超限的事实会被宿主
 // 丢弃并保留提交期的预扣值，因此这里不自行封顶。
+//
+// 上游没有回传真实时长时不产出时长事实，由宿主保留提交期的预扣值——预扣值是宿主
+// 下发的可计费时长，对测不出长度的格式来说是可计费上限而不是实测长度。
 export function extractUsageOnComplete(ctx, result, data) {
-  let milliseconds = billedDurationFrom(data);
-  if (milliseconds === null && result) milliseconds = billedDurationFrom(result);
-  if (milliseconds === null && ctx) milliseconds = billedDurationFrom(ctx.data);
+  let milliseconds = authoritativeDurationFrom(data);
+  if (milliseconds === null && result) milliseconds = authoritativeDurationFrom(result);
+  if (milliseconds === null && ctx) milliseconds = authoritativeDurationFrom(ctx.data);
   if (milliseconds === null || milliseconds <= 0) return null;
   return { duration: milliseconds / 1000 };
+}
+
+// 时间戳格式化：毫秒 → HH:MM:SS.mmm。
+//
+// 小时位可以超过两位（超过 1 小时的音频），毫秒补零到 3 位。取不到时间时给出占位符，
+// 而不是伪造一个 0——0 是一个合法的起点，冒充它会让客户端以为音频从 0 毫秒开始。
+function formatTimestampMs(milliseconds) {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value)) return "??:??:??.???";
+  const total = Math.max(0, Math.trunc(value));
+  const hours = Math.floor(total / 3600000);
+  const minutes = Math.floor((total % 3600000) / 60000);
+  const seconds = Math.floor((total % 60000) / 1000);
+  return pad2(hours) + ":" + pad2(minutes) + ":" + pad2(seconds) + "." + pad3(total % 1000);
+}
+
+// 段文本渲染：每段一行，行首是时间戳标签。
+//
+// 说话人按首次出现顺序编号（从 1 起）；上游没开角色分离时标签里只有时间戳。
+// 分段之间用换行分隔。
+function formatSegmentsText(segments) {
+  const speakerLabels = {};
+  let speakerCount = 0;
+  const lines = [];
+  for (const segment of segments) {
+    const speaker = trimmed(segment.speaker);
+    let label = "";
+    if (speaker !== "") {
+      if (!Object.prototype.hasOwnProperty.call(speakerLabels, speaker)) {
+        speakerCount += 1;
+        speakerLabels[speaker] = String(speakerCount);
+      }
+      label = "说话人" + speakerLabels[speaker] + " ";
+    }
+    lines.push(
+      "[" + label + formatTimestampMs(segment.start) + "-" + formatTimestampMs(segment.end) + "] " + segment.text
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderTranscription(_ctx, task) {
@@ -625,10 +745,18 @@ function renderTranscription(_ctx, task) {
   }
   return {
     status: "succeeded",
-    text: parsed.text,
+    // 文本按分段渲染成带时间戳的行；分段缺失时退回解析层给出的全文。
+    text: parsed.segments.length > 0 ? formatSegmentsText(parsed.segments) : parsed.text,
     duration: parsed.billedDuration / 1000,
     segments: parsed.segments.map(function (segment) {
-      return { id: segment.id, start: segment.start / 1000, end: segment.end / 1000, text: segment.text };
+      return {
+        id: segment.id,
+        start: segment.start / 1000,
+        end: segment.end / 1000,
+        text: segment.text,
+        // 说话人是上游的原始标识，与解析层和 Go 侧同语义；文本标签里的编号是另一层。
+        speaker: trimmed(segment.speaker),
+      };
     }),
     // 上游未返回语种时留空字符串，不臆造。
     language: parsed.language,

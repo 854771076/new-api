@@ -53,6 +53,11 @@ var xfyunTestUnits = []xfyunTestUnit{
 	{speaker: "2", start: "3000", end: "5000", text: "第二段"},
 }
 
+// xfyunLabeledText 是上面三个单元渲染后的文本：同一说话人的相邻单元合并成一段，
+// 每段一行，行首是带时间戳的说话人标签。
+const xfyunLabeledText = "[说话人1 00:00:00.000-00:00:03.000] 你好世界\n" +
+	"[说话人2 00:00:03.000-00:00:05.000] 第二段"
+
 type xfyunUpstreamCall struct {
 	rawQuery string
 	header   http.Header
@@ -329,6 +334,24 @@ func xfyunRenderHook(t *testing.T, plugin *pluginruntime.LoadedPlugin, task map[
 	return xfyunJSONMap(t, value)
 }
 
+// xfyunBuildSubmitRequest 直接调用插件的 buildSubmitRequest，拿到签名后的上传 URL。
+func xfyunBuildSubmitRequest(t *testing.T, plugin *pluginruntime.LoadedPlugin, requestBody map[string]any) map[string]any {
+	t.Helper()
+	value, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", map[string]any{
+		"taskId":        xfyunTestOrderID,
+		"publicTaskId":  xfyunTestPublicTask,
+		"action":        "transcription",
+		"model":         xfyunTestModel,
+		"upstreamModel": xfyunTestModel,
+		"baseUrl":       "https://office-api-ist-dx.iflyaisol.com",
+		"apiKey":        xfyunTestChannelKey,
+		"authHeader":    xfyunTestChannelKey,
+		"requestBody":   requestBody,
+	})
+	require.NoError(t, err)
+	return xfyunJSONMap(t, value)
+}
+
 func xfyunQueryParams(t *testing.T, call xfyunUpstreamCall) url.Values {
 	t.Helper()
 	params, err := url.ParseQuery(call.rawQuery)
@@ -405,7 +428,7 @@ func TestXfyunASRPluginManifest(t *testing.T) {
 	value, err = plugin.Engine.Call(t.Context(), "extractUsageOnComplete", map[string]any{"taskId": xfyunTestOrderID}, map[string]any{"status": "SUCCESS"},
 		map[string]any{"content": map[string]any{"orderInfo": map[string]any{"originalDuration": 8000}}})
 	require.NoError(t, err)
-	assert.Equal(t, map[string]any{"duration": float64(8)}, xfyunJSONMap(t, value))
+	assert.Nil(t, value, "the degraded original duration alone is not a settlement fact")
 
 	value, err = plugin.Engine.Call(t.Context(), "extractUsageOnComplete", map[string]any{"taskId": xfyunTestOrderID}, map[string]any{"status": "SUCCESS"},
 		map[string]any{"content": map[string]any{"orderInfo": map[string]any{"realDuration": 8000, "originalDuration": 60000}}})
@@ -414,7 +437,7 @@ func TestXfyunASRPluginManifest(t *testing.T) {
 		"the measured duration replaces the degraded original duration")
 
 	value, err = plugin.Engine.Call(t.Context(), "extractUsageOnComplete", map[string]any{"taskId": xfyunTestOrderID}, map[string]any{"status": "SUCCESS"},
-		map[string]any{"content": map[string]any{"orderInfo": map[string]any{"originalDuration": 7200000}}})
+		map[string]any{"content": map[string]any{"orderInfo": map[string]any{"realDuration": 7200000}}})
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"duration": float64(7200)}, xfyunJSONMap(t, value),
 		"the plugin reports the upstream duration as is; the host enforces its own ceiling")
@@ -699,18 +722,17 @@ func TestXfyunASRPluginEndToEnd(t *testing.T) {
 	latticeBody, latticeResult := xfyunPoll(t, upstream, adaptor, task, xfyunResultResponse(t, 4, xfyunOverEscaped(t, xfyunLatticeSample(t))))
 	assert.Equal(t, "SUCCESS", latticeResult.Status)
 	require.NotNil(t, latticeResult.UsageFacts)
-	assert.Equal(t, float64(8), latticeResult.UsageFacts["duration"], "settlement uses originalDuration in seconds")
+	assert.Equal(t, float64(8), latticeResult.UsageFacts["duration"], "settlement uses the upstream real duration in seconds")
 
-	latticeText := "你好世界第二段"
 	rendered := xfyunRenderHook(t, plugin, map[string]any{"task_id": xfyunTestPublicTask, "status": "SUCCESS", "data": xfyunJSONMap(t, mustUnmarshalJSON(t, latticeBody))})
 	assert.Equal(t, "succeeded", rendered["status"])
-	assert.Equal(t, latticeText, rendered["text"])
+	assert.Equal(t, xfyunLabeledText, rendered["text"])
 	assert.Equal(t, float64(8), rendered["duration"])
 	assert.Equal(t, "", rendered["language"])
 	renderedSegments := rendered["segments"].([]any)
 	require.Len(t, renderedSegments, 2)
-	assert.Equal(t, map[string]any{"id": float64(0), "start": float64(0), "end": float64(3), "text": "你好世界"}, renderedSegments[0])
-	assert.Equal(t, map[string]any{"id": float64(1), "start": float64(3), "end": float64(5), "text": "第二段"}, renderedSegments[1])
+	assert.Equal(t, map[string]any{"id": float64(0), "start": float64(0), "end": float64(3), "text": "你好世界", "speaker": "1"}, renderedSegments[0])
+	assert.Equal(t, map[string]any{"id": float64(1), "start": float64(3), "end": float64(5), "text": "第二段", "speaker": "2"}, renderedSegments[1])
 
 	successTask := *task
 	successTask.Status = model.TaskStatusSuccess
@@ -724,13 +746,13 @@ func TestXfyunASRPluginEndToEnd(t *testing.T) {
 	assert.Equal(t, "audio.transcription", renderedObject["object"])
 	assert.Equal(t, "succeeded", renderedObject["status"])
 	assert.Equal(t, xfyunTestModel, renderedObject["model"])
-	assert.Equal(t, latticeText, renderedObject["text"])
+	assert.Equal(t, xfyunLabeledText, renderedObject["text"])
 	assert.Equal(t, float64(8), renderedObject["duration"])
 
 	lattice2Body, lattice2Result := xfyunPoll(t, upstream, adaptor, task, xfyunResultResponse(t, 4, xfyunOverEscaped(t, xfyunLattice2BeginSample(t))))
 	assert.Equal(t, "SUCCESS", lattice2Result.Status)
 	renderedLattice2 := xfyunRenderHook(t, plugin, map[string]any{"task_id": xfyunTestPublicTask, "status": "SUCCESS", "data": xfyunJSONMap(t, mustUnmarshalJSON(t, lattice2Body))})
-	assert.Equal(t, latticeText, renderedLattice2["text"], "lattice2 alone must yield the same transcription")
+	assert.Equal(t, xfyunLabeledText, renderedLattice2["text"], "lattice2 alone must yield the same transcription")
 	segments := renderedLattice2["segments"].([]any)
 	require.Len(t, segments, 2)
 	first := segments[0].(map[string]any)
@@ -753,6 +775,83 @@ func TestXfyunASRPluginEndToEnd(t *testing.T) {
 	failureError := failureObject["error"].(map[string]any)
 	assert.Equal(t, "100001", failureError["code"])
 	assert.Contains(t, failureError["message"], "100001")
+}
+
+// 时间戳标签与说话人编号：转写文本按分段渲染成带标签的行，segments 带回说话人标识。
+func TestXfyunASRPluginRendersTimestampsAndSpeakers(t *testing.T) {
+	plugin, _ := newXfyunTestPlugin(t)
+	body := xfyunResultResponse(t, 4, xfyunOverEscaped(t, xfyunLatticeSample(t)))
+
+	result := xfyunParseTaskResultHook(t, plugin, body)
+	assert.Equal(t, "SUCCESS", result["status"])
+
+	rendered := xfyunRenderHook(t, plugin, map[string]any{
+		"task_id": xfyunTestPublicTask,
+		"status":  "SUCCESS",
+		"data":    xfyunJSONMap(t, mustUnmarshalJSON(t, []byte(body))),
+	})
+	assert.Equal(t, "succeeded", rendered["status"])
+	assert.Equal(t, xfyunLabeledText, rendered["text"],
+		"每段一行，行首是带时间戳的说话人标签")
+	segments := rendered["segments"].([]any)
+	require.Len(t, segments, 2)
+	assert.Equal(t, "1", segments[0].(map[string]any)["speaker"])
+	assert.Equal(t, "2", segments[1].(map[string]any)["speaker"])
+}
+
+// 角色分离参数：客户端用 multipart 表单字段 roleType / roleNum 请求，插件把它们
+// 作为上游查询参数透传；不传时这两个参数不进签名串。
+func TestXfyunASRPluginPassesRoleSeparationOptions(t *testing.T) {
+	plugin, _ := newXfyunTestPlugin(t)
+
+	body := xfyunMultipartBody([]byte("audio"))
+	body["fields"] = map[string][]string{"model": {xfyunTestModel}, "roleType": {"1"}, "roleNum": {"2"}}
+	decoded, err := xfyunDecodeRequest(t, plugin, body)
+	require.NoError(t, err)
+	requestBody := decoded["requestBody"].(map[string]any)
+	assert.Equal(t, "1", requestBody["roleType"])
+	assert.Equal(t, "2", requestBody["roleNum"])
+
+	submit := xfyunBuildSubmitRequest(t, plugin, requestBody)
+	submitURL := submit["url"].(string)
+	params, err := url.ParseQuery(submitURL[strings.Index(submitURL, "?")+1:])
+	require.NoError(t, err)
+	assert.Equal(t, "1", params.Get("roleType"))
+	assert.Equal(t, "2", params.Get("roleNum"))
+	assert.Equal(t, xunfei.XfyunASRSignature(params, xfyunTestAPISecret),
+		submit["headers"].(map[string]any)["signature"],
+		"the signature must cover the role separation parameters")
+
+	// 不请求角色分离时，签名串里不能出现这两个参数：签名必须与调用方未传时一致。
+	plain, err := xfyunDecodeRequest(t, plugin, xfyunMultipartBody([]byte("audio")))
+	require.NoError(t, err)
+	plainBody := plain["requestBody"].(map[string]any)
+	plainSubmit := xfyunBuildSubmitRequest(t, plugin, plainBody)
+	plainURL := plainSubmit["url"].(string)
+	plainParams, err := url.ParseQuery(plainURL[strings.Index(plainURL, "?")+1:])
+	require.NoError(t, err)
+	assert.Empty(t, plainParams.Get("roleType"))
+	assert.Empty(t, plainParams.Get("roleNum"))
+}
+
+// 轮询期间的上游业务码：限流与订单未完成都能自愈，必须继续轮询而不是判失败。
+func TestXfyunASRPluginKeepsTransientCodesInProgress(t *testing.T) {
+	plugin, _ := newXfyunTestPlugin(t)
+
+	for _, code := range []string{"100012", "100013"} {
+		body := xfyunJSONString(t, map[string]any{
+			"code": code, "descInfo": "order not finished", "content": map[string]any{},
+		})
+		result := xfyunParseTaskResultHook(t, plugin, body)
+		assert.Equal(t, "IN_PROGRESS", result["status"], "code %s must keep the task in progress", code)
+	}
+
+	hard := xfyunJSONString(t, map[string]any{
+		"code": "100004", "descInfo": "query order error", "content": map[string]any{},
+	})
+	result := xfyunParseTaskResultHook(t, plugin, hard)
+	assert.Equal(t, "FAILURE", result["status"], "a hard business error must not be treated as in progress")
+	assert.Contains(t, result["reason"], "100004")
 }
 
 func mustUnmarshalJSON(t *testing.T, body []byte) any {
