@@ -1,32 +1,40 @@
 -- ============================================================================
--- supabase/schema.sql — Supabase 通用表结构 + RLS（可反复执行，所有 CREATE
--- 用 IF NOT EXISTS，所有策略只作用于新建表）。
--- ============================================================================
--- 约定：所有业务表携带 client_id（固定字符串，来自脚手架 VITE_GATEWAY_CLIENT_ID）。
--- RLS 策略同时匹配 auth.uid() = 当前会话用户 AND client_id = App 固定值，
--- 保证同一 Supabase 项目可以被多个 App 复用而不互相穿透。
+-- supabase/schema.sql — 换装 App 业务 schema（底座 + 换装业务层）
+--
+-- 这是 new-api 网关 Supabase App Starter 的换装业务模板。
+-- 通用底座（app_config / user_profiles / ai_generations）来自脚手架；
+-- official_outfits / user_outfits / character_profiles 是换装业务核心。
+--
+-- 所有业务表都有 client_id 字段；RLS 通过 current_app_client_id() 强制
+-- client_id 匹配 + auth.uid() 双隔离。多 App 共用同一 Supabase 项目时改
+-- app_config.client_id 即可切换隔离，不触碰 RLS 策略。
+--
+-- ⚠️ PostgreSQL 会在 CREATE FUNCTION 时解析函数体里引用的表，所以
+--    current_app_client_id() 和 seed_outfit_demo() 必须在所有表都建好后
+--    再创建。本文件按此顺序组织。
 -- ============================================================================
 
 -- ---------------- 扩展 ----------------
 create extension if not exists pgcrypto with schema extensions;
 
--- ---------------- 通用 App 配置表 ----------------
--- 每个 App 在网关侧已有独立 client_id；在 Supabase 侧 client_id 只是业务表的
--- 普通字段，RLS 强制把所有写入/读取限制在一个固定 client_id 上。
+-- ============================================================================
+-- 第一部分：脚手架通用底座
+-- ============================================================================
+
+-- App 配置（每个 Supabase 项目共用一个 client_id）
 create table if not exists public.app_config (
   id           uuid primary key default gen_random_uuid(),
-  client_id    text not null,            -- 网关 OAuthApp.client_id（如 nac_xxxxx）
+  client_id    text not null,   -- 网关 OAuthApp.client_id
   app_name     text,
   created_at   timestamptz not null default now()
 );
 
--- ---------------- 用户扩展表 ----------------
--- 当 Supabase Auth 通过 OIDC 把网关用户同步过来时，Edge Function user-sync
--- 会在 auth.users.app_metadata.gateway_user_id 里写入网关侧的 user_id。
+-- 用户扩展表（首次 OIDC 登录时 Edge Function 写）
 create table if not exists public.user_profiles (
   id                 uuid primary key references auth.users(id) on delete cascade,
-  gateway_user_id    int unique,           -- 网关 User.Id；Edge Function 写入
+  gateway_user_id    int unique,
   display_name       text,
+  avatar_url         text,
   client_id          text not null,
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now()
@@ -34,13 +42,8 @@ create table if not exists public.user_profiles (
 
 create index if not exists idx_user_profiles_gateway_user_id
   on public.user_profiles(gateway_user_id);
-create index if not exists idx_user_profiles_client_id
-  on public.user_profiles(client_id);
 
--- ---------------- AI 用量记录（业务侧只读副本） ----------------
--- 网关侧真实用量在网关自己的 model.Log 里；这里留一份业务能直接读到的记录
--- （可选地由 Edge Function webhook 从网关同步）。脚手架最小链路里这张表
--- 只用来展示"我调用过哪些模型"，所有额度判断仍以网关为准。
+-- AI 用量（业务侧只读副本；网关侧真实用量在网关 model.Log）
 create table if not exists public.ai_generations (
   id           uuid primary key default gen_random_uuid(),
   user_id      uuid not null references auth.users(id) on delete cascade,
@@ -53,21 +56,82 @@ create table if not exists public.ai_generations (
 
 create index if not exists idx_ai_generations_user_id
   on public.ai_generations(user_id);
-create index if not exists idx_ai_generations_client_id
-  on public.ai_generations(client_id);
-create index if not exists idx_ai_generations_created_at
-  on public.ai_generations(created_at desc);
 
--- ---------------- 启用 RLS ----------------
-alter table public.app_config        enable row level security;
-alter table public.user_profiles     enable row level security;
-alter table public.ai_generations    enable row level security;
+-- ============================================================================
+-- 第二部分：换装业务表
+-- ============================================================================
 
--- ---------------- RLS 策略 ----------------
--- 所有策略里 client_id 都通过一个 security definer 函数读 app_config 的唯一行
--- 来取，避免把字符串硬编码在策略里。多 App 共用同一个 Supabase 项目时改
--- app_config 即可切换，不需要改策略本身。
+-- 官方服装库：运营维护，所有用户可读。
+-- category: top | bottom | shoes | accessory | fullset
+-- is_active: 运营上下架开关
+create table if not exists public.official_outfits (
+  id            uuid primary key default gen_random_uuid(),
+  client_id     text not null,
+  name          text not null,
+  category      text not null check (category in ('top','bottom','shoes','accessory','fullset')),
+  description   text,
+  image_url     text,
+  tags          text[] default '{}',
+  price_credits int not null default 0,   -- 解锁这套服装要花的"积分"（业务层展示用；真实账单走网关）
+  is_active     boolean not null default true,
+  created_by    uuid references auth.users(id),    -- 运营；可空
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
 
+create index if not exists idx_official_outfits_client_cat
+  on public.official_outfits(client_id, category);
+create index if not exists idx_official_outfits_active
+  on public.official_outfits(is_active) where is_active;
+
+-- 用户服装：从官方库"解锁"过来的 + 自己上传的自定义服装。
+-- source_type: official | custom
+create table if not exists public.user_outfits (
+  id                 uuid primary key default gen_random_uuid(),
+  user_id            uuid not null references auth.users(id) on delete cascade,
+  client_id          text not null,
+  name               text not null,
+  category           text not null check (category in ('top','bottom','shoes','accessory','fullset')),
+  image_url          text,
+  source_type        text not null check (source_type in ('official','custom')),
+  official_outfit_id uuid references public.official_outfits(id) on delete set null,
+  owned              boolean not null default true,
+  unlocked_at        timestamptz,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+
+create index if not exists idx_user_outfits_user
+  on public.user_outfits(user_id);
+create index if not exists idx_user_outfits_user_cat
+  on public.user_outfits(user_id, category);
+
+-- 人物形象 + 搭配结果
+create table if not exists public.character_profiles (
+  id               uuid primary key default gen_random_uuid(),
+  user_id          uuid not null references auth.users(id) on delete cascade,
+  client_id        text not null,
+  name             text not null default '我的角色',
+  avatar_url       text,
+  outfit_top       uuid references public.user_outfits(id) on delete set null,
+  outfit_bottom    uuid references public.user_outfits(id) on delete set null,
+  outfit_shoes     uuid references public.user_outfits(id) on delete set null,
+  outfit_accessory uuid references public.user_outfits(id) on delete set null,
+  background_url   text,
+  favorite         boolean not null default false,
+  saved_at         timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+
+create index if not exists idx_character_profiles_user
+  on public.character_profiles(user_id);
+
+-- ============================================================================
+-- 第三部分：安全函数（必须在所有表之后创建，Postgres 会解析函数体）
+-- ============================================================================
+
+-- 当前 App 的 client_id：从 app_config 里取。多 App 共用同一 Supabase 项目时，
+-- 改 app_config.client_id 即可让 RLS 切换隔离范围，不用改策略本身。
 create or replace function public.current_app_client_id()
 returns text
 language sql stable
@@ -76,42 +140,107 @@ as $$
   select client_id from public.app_config limit 1;
 $$;
 
--- app_config：任意已登录用户可读；auth 已通过 OIDC 校验过身份。
-drop policy if exists "app_config readable by all authenticated users"
+-- ============================================================================
+-- 第四部分：启用 RLS
+-- ============================================================================
+
+alter table public.app_config          enable row level security;
+alter table public.user_profiles       enable row level security;
+alter table public.ai_generations      enable row level security;
+alter table public.official_outfits    enable row level security;
+alter table public.user_outfits        enable row level security;
+alter table public.character_profiles  enable row level security;
+
+-- ============================================================================
+-- 第五部分：RLS 策略
+-- ============================================================================
+
+-- app_config: 所有已登录用户可读；写只允许 service_role
+drop policy if exists "app_config readable by authenticated users"
   on public.app_config;
-create policy "app_config readable by all authenticated users"
+create policy "app_config readable by authenticated users"
   on public.app_config for select
   using (auth.role() = 'authenticated');
 
-drop policy if exists "app_config only editable by service role"
+drop policy if exists "app_config editable only by service_role"
   on public.app_config;
-create policy "app_config only editable by service role"
+create policy "app_config editable only by service_role"
   on public.app_config for all
   using (auth.role() = 'service_role');
 
--- user_profiles：每个用户只看/改自己的 profile；client_id 强制匹配。
-drop policy if exists "user_profiles own row read"
-  on public.user_profiles;
-create policy "user_profiles own row read"
-  on public.user_profiles for select
-  using (id = auth.uid() and client_id = public.current_app_client_id());
-
-drop policy if exists "user_profiles own row insert/update"
-  on public.user_profiles;
-create policy "user_profiles own row insert/update"
+-- user_profiles: 自己行的 CRUD
+drop policy if exists "user_profiles own row" on public.user_profiles;
+create policy "user_profiles own row"
   on public.user_profiles for all
   using (id = auth.uid() and client_id = public.current_app_client_id())
   with check (id = auth.uid() and client_id = public.current_app_client_id());
 
--- ai_generations：读自己 + 写自己。
-drop policy if exists "ai_generations own row read"
-  on public.ai_generations;
-create policy "ai_generations own row read"
-  on public.ai_generations for select
-  using (user_id = auth.uid() and client_id = public.current_app_client_id());
-
-drop policy if exists "ai_generations own row insert"
-  on public.ai_generations;
-create policy "ai_generations own row insert"
-  on public.ai_generations for insert
+-- ai_generations: 自己行的 CRUD
+drop policy if exists "ai_generations own row" on public.ai_generations;
+create policy "ai_generations own row"
+  on public.ai_generations for all
+  using (user_id = auth.uid() and client_id = public.current_app_client_id())
   with check (user_id = auth.uid() and client_id = public.current_app_client_id());
+
+-- official_outfits: 所有已登录用户可读（官方库是公共资产）；运营可写
+drop policy if exists "official_outfits readable by all authenticated"
+  on public.official_outfits;
+create policy "official_outfits readable by all authenticated"
+  on public.official_outfits for select
+  using (client_id = public.current_app_client_id() and auth.role() = 'authenticated');
+
+drop policy if exists "official_outfits editable only by service_role"
+  on public.official_outfits;
+create policy "official_outfits editable only by service_role"
+  on public.official_outfits for all
+  using (client_id = public.current_app_client_id() and auth.role() = 'service_role');
+
+-- user_outfits: 自己的服装 + client_id 匹配
+drop policy if exists "user_outfits own row" on public.user_outfits;
+create policy "user_outfits own row"
+  on public.user_outfits for all
+  using (user_id = auth.uid() and client_id = public.current_app_client_id())
+  with check (user_id = auth.uid() and client_id = public.current_app_client_id());
+
+-- character_profiles: 自己的角色 + client_id 匹配
+drop policy if exists "character_profiles own row" on public.character_profiles;
+create policy "character_profiles own row"
+  on public.character_profiles for all
+  using (user_id = auth.uid() and client_id = public.current_app_client_id())
+  with check (user_id = auth.uid() and client_id = public.current_app_client_id());
+
+-- ============================================================================
+-- 第六部分：Mock Seed 函数（最后创建，因为引用所有业务表）
+-- ============================================================================
+
+create or replace function public.seed_outfit_demo(app_client_id text)
+returns table(official_count int)
+language plpgsql
+security definer set search_path = public
+as $$
+declare
+  v_official int := 0;
+begin
+  -- app_config
+  insert into public.app_config (client_id, app_name)
+  values (app_client_id, 'outfit-demo')
+  on conflict (id) do update set client_id = excluded.client_id;
+
+  -- 官方服装库（8 件）
+  insert into public.official_outfits
+    (client_id, name, category, description, image_url, tags, price_credits, is_active, created_by)
+  values
+    (app_client_id, '纯白 T 恤',      'top',       '经典百搭', 'https://example.com/img/tshirt-white.png',  '{basic,casual}',       0, true, null),
+    (app_client_id, '牛仔夹克',      'top',       '街头风',   'https://example.com/img/denim-jacket.png',  '{street,fashion}',    50, true, null),
+    (app_client_id, '运动短裤',      'bottom',     '舒适日常', 'https://example.com/img/sport-shorts.png',  '{sport,summer}',        0, true, null),
+    (app_client_id, '宽松牛仔裤',    'bottom',     '复古风',   'https://example.com/img/loose-jeans.png',   '{retro,street}',      30, true, null),
+    (app_client_id, '白色运动鞋',    'shoes',      '全能搭',   'https://example.com/img/white-sneakers.png','{basic,sport}',        0, true, null),
+    (app_client_id, '复古皮靴',      'shoes',      '帅气',     'https://example.com/img/leather-boots.png', '{retro,fashion}',     80, true, null),
+    (app_client_id, '黑框眼镜',      'accessory',  '学院风',   'https://example.com/img/glasses.png',       '{academic,basic}',    20, true, null),
+    (app_client_id, '棒球帽',        'accessory',  '街头',     'https://example.com/img/cap.png',           '{street,sport}',       0, true, null)
+  returning count(*) into v_official;
+
+  official_count := v_official;
+  return next;
+end;
+$$;
