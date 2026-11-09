@@ -16,6 +16,8 @@ const (
 	FileName = "config.json"
 	// EnvProfile overrides the active profile name.
 	EnvProfile = "NEWAPI_CLI_PROFILE"
+	// EnvServer overrides the server URL used by `auth login`.
+	EnvServer = "NEWAPI_CLI_SERVER"
 	// DefaultProfile is used when neither --profile nor EnvProfile is set.
 	DefaultProfile = "default"
 )
@@ -61,22 +63,55 @@ func Load(path string) (*Config, error) {
 }
 
 // Save writes the config to path with 0600 permissions inside a 0700
-// directory. Permissions are best-effort on Windows.
+// directory using an atomic replace. Permissions and symlink checks are
+// best-effort on Windows, where symlink creation requires extra privileges.
 func (c *Config) Save(path string) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	// Refuse to follow a symlinked config file: a link planted in the config
+	// directory would otherwise redirect the credentials to an attacker's
+	// file.
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write config: %s is a symbolic link", path)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// WriteFile applies the permission only on creation; enforce it for
-	// pre-existing files too.
-	_ = os.Chmod(path, 0o600)
-	return nil
+	// MkdirAll honours the umask and leaves existing directories untouched,
+	// so enforce the directory mode explicitly.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("cannot secure config directory %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, FileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		// Removing after a successful rename is a harmless no-op.
+		_ = os.Remove(tmpName)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // Profile returns the named profile, or nil when absent.

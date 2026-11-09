@@ -1,0 +1,31 @@
+{
+  "name": "outfit-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Config-driven starter: OIDC login (new-api gateway via Supabase Auth custom provider) + AI relay + 简易支付",
+  "scripts": {
+    "dev": "rsbuild dev",
+    "build": "rsbuild build",
+    "preview": "rsbuild preview",
+    "typecheck": "tsc --noEmit",
+    "supabase:start": "supabase start",
+    "supabase:reset": "supabase db reset",
+    "supabase:functions:serve": "supabase functions serve --env-file supabase/.env.local"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^6.26.0",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@rsbuild/core": "^1.0.0",
+    "@rsbuild/plugin-react": "^1.0.0",
+    "@rsbuild/plugin-tailwindcss": "^2.0.3",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

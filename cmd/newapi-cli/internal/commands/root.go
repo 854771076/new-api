@@ -81,6 +81,15 @@ func mapClientErr(err error) error {
 	return generalErr("%v", err)
 }
 
+// mapClientConfigErr maps an unusable server configuration to a usage error.
+func mapClientConfigErr(err error) *CommandError {
+	var cfgErr *client.ConfigError
+	if errors.As(err, &cfgErr) {
+		return &CommandError{ExitCode: ExitUsage, Code: "config_error", Message: cfgErr.Message}
+	}
+	return generalErr("%v", err)
+}
+
 func profileName() string {
 	if flagProfile != "" {
 		return flagProfile
@@ -117,7 +126,11 @@ func newClient() (*client.Client, error) {
 			Message:  fmt.Sprintf("profile %q is not logged in; run `newapi-cli auth login`", name),
 		}
 	}
-	return client.New(p.Server, p.Token), nil
+	c, err := client.New(p.Server, p.Token)
+	if err != nil {
+		return nil, mapClientConfigErr(err)
+	}
+	return c, nil
 }
 
 // runData performs an authenticated request and writes the unwrapped data to

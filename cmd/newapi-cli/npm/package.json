@@ -1,0 +1,37 @@
+{
+  "name": "@aswless_854771076/newapi-cli",
+  "version": "0.0.0",
+  "description": "Admin CLI for a new-api server",
+  "license": "AGPL-3.0",
+  "bin": {
+    "newapi-cli": "bin/newapi-cli.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "skills/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "prepack": "node scripts/prepare-skill.js",
+    "postinstall": "node lib/install.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QuantumNous/new-api.git"
+  },
+  "homepage": "https://github.com/QuantumNous/new-api",
+  "bugs": {
+    "url": "https://github.com/QuantumNous/new-api/issues"
+  },
+  "keywords": [
+    "new-api",
+    "cli",
+    "admin"
+  ]
+}

@@ -38,7 +38,17 @@ func newAPICmd() *cobra.Command {
 				}
 				body = json.RawMessage(raw)
 			}
-			return runData(cmd, method, path, body)
+			// `api` is the escape hatch for arbitrary endpoints, so it keeps
+			// accepting a non-envelope body that management commands reject.
+			c, err := newClient()
+			if err != nil {
+				return err
+			}
+			data, err := c.DoPassthrough(method, path, body)
+			if err != nil {
+				return mapClientErr(err)
+			}
+			return writeData(cmd, data)
 		},
 	}
 	cmd.Flags().StringVar(&dataFlag, "data", "", "JSON request body, or @file to read it from a file")

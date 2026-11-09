@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -100,15 +101,46 @@ func newTokenCmd() *cobra.Command {
 		},
 	}
 	var name string
+	var unlimitedQuota bool
+	var quota int64
+	var expiresIn string
 	create := &cobra.Command{
 		Use:   "create",
 		Short: "Create a token",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runData(cmd, http.MethodPost, "/api/token/", map[string]string{"name": name})
+			if quota < 0 {
+				return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--quota must not be negative"}
+			}
+			if unlimitedQuota && cmd.Flags().Changed("quota") {
+				return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--quota cannot be combined with --unlimited-quota=true"}
+			}
+			expiredTime := int64(-1)
+			if expiresIn != "" {
+				d, err := time.ParseDuration(expiresIn)
+				if err != nil {
+					return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--expires-in must be a Go duration such as 24h"}
+				}
+				if d <= 0 {
+					return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--expires-in must be positive"}
+				}
+				expiredTime = time.Now().Add(d).Unix()
+			}
+			body := map[string]any{
+				"name":            name,
+				"unlimited_quota": unlimitedQuota,
+				"expired_time":    expiredTime,
+			}
+			if !unlimitedQuota {
+				body["remain_quota"] = quota
+			}
+			return runData(cmd, http.MethodPost, "/api/token/", body)
 		},
 	}
 	create.Flags().StringVar(&name, "name", "", "token name")
+	create.Flags().BoolVar(&unlimitedQuota, "unlimited-quota", true, "ignore --quota and allow unlimited usage")
+	create.Flags().Int64Var(&quota, "quota", 500000, "remaining quota when --unlimited-quota=false")
+	create.Flags().StringVar(&expiresIn, "expires-in", "", "Go duration until expiry (e.g. 24h); empty means never expires")
 	_ = create.MarkFlagRequired("name")
 	cmd.AddCommand(list, get, create)
 	return cmd

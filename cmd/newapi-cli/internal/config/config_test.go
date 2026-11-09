@@ -49,6 +49,56 @@ func TestSavePermissions(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
 }
 
+func TestSaveRejectsSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks on Windows requires extra privileges")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	require.NoError(t, os.WriteFile(target, []byte("{}"), 0o600))
+	link := filepath.Join(dir, "link.json")
+	require.NoError(t, os.Symlink(target, link))
+
+	cfg := &Config{Profiles: map[string]*Profile{}}
+	cfg.SetProfile("default", &Profile{Server: "https://a.example.com", Token: "nap_a"})
+	err := cfg.Save(link)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symbolic link")
+
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, "{}", string(data), "symlink target must stay untouched")
+}
+
+func TestSaveLeavesNoTempFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), DirName)
+	path := filepath.Join(dir, FileName)
+	cfg := &Config{Profiles: map[string]*Profile{}}
+	require.NoError(t, cfg.Save(path))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, FileName, entries[0].Name())
+}
+
+func TestSaveCleansUpTempFileOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName)
+	// A directory at the destination makes the final rename fail after the
+	// temporary file has been written.
+	require.NoError(t, os.Mkdir(path, 0o700))
+
+	cfg := &Config{Profiles: map[string]*Profile{}}
+	require.Error(t, cfg.Save(path))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, FileName, entries[0].Name())
+	assert.True(t, entries[0].IsDir(), "only the blocking directory should remain")
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), DirName, FileName))
 	require.NoError(t, err)
