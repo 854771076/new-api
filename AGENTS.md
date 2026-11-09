@@ -171,6 +171,29 @@ Tasks that touch none of these (for example unrelated frontend work, authenticat
 - **Number formatting and Intl locales (mandatory):** Reuse `@/lib/format` for ordinary number/compact-number display and `@/lib/currency` for monetary values; preserve each formatter's precision and unit semantics. Interface language codes such as `zhCN` / `zhTW` are NOT valid Intl locales. Any interface language passed to `Intl.*`, `toLocaleString` / `toLocaleDateString` / `toLocaleTimeString`, or a locale-aware formatting helper MUST first pass through `toIntlLocale` from `@/i18n/languages`. Do not duplicate language mappings or pass raw language codes through aliases. Follow `web/AGENTS.md` for the lint rule and regression requirements.
 - Follow `web/AGENTS.md` for detailed frontend conventions, including TypeScript, component structure, styling, accessibility, testing, and build checks.
 
+### Post-Feature Audit
+
+- **Every feature, bug fix, or refactor must end with an audit against the branch baseline before it is reported as done.** Use the `open-code-review` skill (`.agents/skills/open-code-review/SKILL.md`) and review the diff against the merge base of the current branch and its base branch (for example `git merge-base origin/main HEAD`), not only uncommitted files.
+- Preferred runner: `ocr review --audience agent --format json --background "<feature context>" --from <base> --to HEAD`. Triage the findings by severity and fix genuine High/Medium defects.
+- `ocr` requires an external LLM provider, which is not configured in this environment, so it fails with "no valid LLM endpoint configured". Do not block on that and do not ask the user to configure a provider: perform the same audit directly by reading the full baseline diff and applying the skill's review dimensions (bug, security, performance, maintainability, test, documentation) and severity levels.
+- Report the audit in the handoff: baseline ref, files reviewed, findings by severity, fixes applied, and unresolved items. Do not declare completion with known High-severity findings unfixed and unexplained.
+- This audit does not replace the verification required elsewhere in this file (build, tests, the database matrix, and OWASP checks).
+
+### Local Acceptance Testing (Public Tunnel + Supabase CLI)
+
+Some acceptance flows (OIDC/OAuth redirects, Supabase Auth callbacks, webhooks) require a public HTTPS origin even though the app runs locally.
+
+- **Expose the local service with a Cloudflare quick tunnel** instead of asking the user to deploy: install `cloudflared` (Windows: `winget install --id Cloudflare.cloudflared`), run `cloudflared tunnel --url http://localhost:<port>`, and use the printed `https://<random>.trycloudflare.com` origin for that session.
+- Quick tunnels are anonymous and temporary; the hostname changes on every start. Re-register the tunnel URL in the OAuth client redirect URIs, the Supabase provider callback, and the gateway's public server address before testing, then remove them afterwards.
+- Tunnel the origin that actually serves the flow. When cookies or redirects span frontend and API, keep both behind the same host (proxy one port through the other) instead of mixing `localhost` and the tunnel URL.
+- Treat the tunnel URL and any acceptance secrets as throwaway; never record a quick-tunnel hostname as a permanent deployment address.
+- **Operate the Supabase side with the Supabase CLI** (verified with CLI 3.x):
+  - Session: `supabase login`, `supabase whoami`, `supabase projects list`, `supabase link --project-ref <ref>`.
+  - Schema and data: `supabase db push`, `supabase db diff`, `supabase db pull`, `supabase db query "<sql>"` for arbitrary SQL (prefer this over ad-hoc connections), `supabase migration new <name>`.
+  - Functions and secrets: `supabase functions deploy <fn>`, `supabase secrets set KEY=value`, `supabase functions serve`.
+  - `supabase status` / `supabase stop` apply to the local stack only. Confirm the linked project before destructive commands and never run `supabase db reset` against a linked remote project.
+- Record the tunnel hostname, the Supabase project ref, and the commands actually run in the acceptance report.
+
 ### Project Governance
 
 **Protected project information:** The following project-related information is strictly protected and MUST NOT be modified, deleted, replaced, or removed under any circumstances:
