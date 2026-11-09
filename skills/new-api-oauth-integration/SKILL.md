@@ -177,6 +177,114 @@ app.post('/logout', async (req, res) => {
 });
 ```
 
+## Supabase Direct Mode (No BFF Required)
+
+When your app uses Supabase as the backend (Auth, PostgREST, Storage, Edge
+Functions), you can skip the BFF entirely. Supabase Auth acts as the OIDC
+client, and the browser talks directly to new-api for AI calls.
+
+### Architecture
+
+```
+Browser / Mini-Program
+  ├─ Supabase Auth ──► new-api OIDC Provider (login, JWT)
+  ├─ Supabase PostgREST ─► PostgreSQL + RLS (business data)
+  └─ new-api /v1/* ─► AI relay (direct, with OAuth token)
+```
+
+### Supabase Dashboard Setup
+
+1. **Auth → Providers → Custom Provider**:
+   - **Provider name**: `new-api`
+   - **Discovery URL**: `https://your-gateway.com/.well-known/openid-configuration`
+   - **Client ID**: `nac_xxxxxxxx` (from new-api OAuth App)
+   - **Client Secret**: (leave empty for PKCE public clients, or set if your
+     gateway requires it)
+   - **Scopes**: `openid profile email api:read api:write`
+   - **Redirect URL**: `https://<project>.supabase.co/auth/v1/callback`
+
+2. **Map claims**: In Supabase Auth settings, ensure `app_metadata` includes
+   `gateway_user_id` and `client_id`. The `user-sync` Edge Function handles
+   this on first login.
+
+3. **RLS**: Every business table must have `client_id text not null` and use
+   `current_app_client_id()` (security definer function) to isolate rows by
+   OAuth app. See `templates/supabase-app-starter/supabase/schema.sql`.
+
+### Client-Side Flow
+
+The browser uses `@supabase/supabase-js` with the custom provider:
+
+```typescript
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// Login redirects to new-api authorize endpoint
+await supabase.auth.signInWithOAuth({
+  provider: 'new-api',
+  options: { redirectTo: window.location.origin + '/auth/callback' },
+});
+
+// After callback, Supabase session contains the OIDC tokens.
+// The access_token is a new-api OAuth token — use it for AI calls:
+const { data: { session } } = await supabase.auth.getSession();
+const gatewayToken = session?.provider_token; // new-api OAuth access token
+
+// Direct AI call (no BFF):
+const res = await fetch('https://your-gateway.com/v1/chat/completions', {
+  method: 'POST',
+  headers: {
+    Authorization: `Bearer ${gatewayToken}`,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({ model: 'gpt-4o-mini', messages: [...] }),
+});
+```
+
+### Key Differences from BFF Mode
+
+| Aspect | BFF Mode | Supabase Direct Mode |
+|--------|----------|----------------------|
+| Token storage | Server-side session / DB | Supabase Auth (encrypted) |
+| Token refresh | BFF handles automatically | Supabase Auth handles |
+| AI calls | Proxied through BFF | Browser direct to gateway |
+| client_secret | Required in BFF env | Not needed (PKCE public client) |
+| Data isolation | Application-level | PostgreSQL RLS + client_id |
+| Business logic | Your backend | Supabase Edge Functions |
+
+### Starter Template
+
+Use `templates/supabase-app-starter/` as the scaffold. It includes:
+- Pre-configured Supabase client with OIDC login
+- `gateway.ts` for direct AI calls (streaming + non-streaming)
+- `schema.sql` with RLS, `current_app_client_id()`, and seed data
+- `user-sync` Edge Function for profile sync
+
+Copy the template, fill `.env.local`, and deploy:
+
+```bash
+cp -r templates/supabase-app-starter my-app
+cd my-app
+cp .env.example .env.local
+# Edit .env.local: SUPABASE_URL, SUPABASE_ANON_KEY, GATEWAY_BASE_URL, GATEWAY_CLIENT_ID
+bun install
+bun run dev
+```
+
+### Model Whitelist per App
+
+Each OAuth App in new-api can restrict which AI models are available:
+
+```sql
+-- In new-api admin, set on the OAuth App:
+ai_model_whitelist = '["gpt-4o-mini","gpt-4o"]'
+```
+
+When set, the relay rejects any model not in the list. Leave empty to allow
+all models. This is enforced in `controller/relay.go` via
+`service.CheckOAuthAppModelWhitelist()`.
+
 ## Scopes Reference
 
 | Scope | Grants access to |
