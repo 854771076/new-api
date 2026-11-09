@@ -29,9 +29,13 @@ import type { AccessTokenCatalog } from '../../security/api'
 // CLI_RECOMMENDED_SCOPES is the grant the CLI needs for day-to-day
 // administration; the user can widen or narrow it before confirming.
 export const CLI_RECOMMENDED_SCOPES = [
+  'profile:read',
   'usage:read',
+  'api_key:read',
+  'api_key:write',
   'user:read',
   'user:write',
+  'channel:read',
   'log:read',
   'model:read',
   'model:write',

@@ -40,7 +40,7 @@ Supabase 项目 `outfit-demo` 已包含：
 | 字段 | 值 |
 |------|-----|
 | Name | outfit-demo |
-| Client ID | `nac_demo_outfit_001` |
+| Client ID | 创建后自动生成（形如 `nac_xxxxxxxx`），复制到 `.env.local` |
 | Redirect URIs | `https://jknkenfhhwpxwwgqmcxv.supabase.co/auth/v1/callback` |
 | Scopes | `openid profile email api:read api:write` |
 

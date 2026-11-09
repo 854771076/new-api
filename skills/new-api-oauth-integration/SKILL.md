@@ -272,6 +272,31 @@ bun install
 bun run dev
 ```
 
+### Reference App: outfit-demo
+
+`references/web/outfit-demo/` is a runnable reference app built on the template.
+Use it to verify the whole chain (OIDC login → RLS data query → AI relay) and
+to copy working page patterns instead of starting from scratch.
+
+It adds two business pages on top of the template:
+
+| Page | File | Shows |
+|------|------|-------|
+| 服装库 | `src/pages/Wardrobe.tsx` | PostgREST read with category filter, RLS isolation by `client_id` + `auth.uid()` |
+| AI 换装 | `src/pages/OutfitGenerate.tsx` | Multi-select from business tables + streaming AI call + write-back to `ai_generations` |
+
+Run it:
+
+```bash
+cd references/web/outfit-demo
+cp .env.example .env.local   # Supabase URL/anon key are pre-filled; set GATEWAY_BASE_URL
+bun install
+bun run dev
+```
+
+Its Supabase project already has the schema and seed data applied, so the
+服装库 page renders 8 official outfits right after login.
+
 ### Model Whitelist per App
 
 Each OAuth App in new-api can restrict which AI models are available:
