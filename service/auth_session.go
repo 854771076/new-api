@@ -322,6 +322,18 @@ func ListLoginSessions(userID int, currentSID string) ([]LoginSessionView, error
 	return views, nil
 }
 
+// sessionCookieSameSite returns the appropriate SameSite attribute for session
+// cookies. OAuth cross-site authorization flows require the cookie to be sent
+// on cross-site requests, so SameSite=None is used when the cookie is Secure.
+// In HTTP development environments where Secure is false, SameSite=None would
+// be rejected by the browser, so Lax is used as a fallback.
+func sessionCookieSameSite() http.SameSite {
+	if common.SessionCookieSecure {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
 func WriteRefreshCookie(c *gin.Context, rawToken string) {
 	expiresAt := time.Now().Add(LoginSessionTTL)
 	if sid, _, ok := splitRefreshToken(rawToken); ok {
@@ -338,7 +350,7 @@ func WriteRefreshCookie(c *gin.Context, rawToken string) {
 		Expires:  expiresAt,
 		HttpOnly: true,
 		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: sessionCookieSameSite(),
 	})
 	writeSessionHintCookie(c, maxAge, expiresAt)
 }
@@ -352,7 +364,7 @@ func ClearRefreshCookie(c *gin.Context) {
 		Expires:  time.Unix(1, 0),
 		HttpOnly: true,
 		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: sessionCookieSameSite(),
 	})
 	clearSessionHintCookie(c)
 }
@@ -383,7 +395,7 @@ func writeSessionHintCookie(c *gin.Context, maxAge int, expiresAt time.Time) {
 		Expires:  expiresAt,
 		HttpOnly: false,
 		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: sessionCookieSameSite(),
 	})
 }
 
@@ -396,7 +408,7 @@ func clearSessionHintCookie(c *gin.Context) {
 		Expires:  time.Unix(1, 0),
 		HttpOnly: false,
 		Secure:   common.SessionCookieSecure,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: sessionCookieSameSite(),
 	})
 }
 

@@ -1,10 +1,11 @@
 // src/pages/Login.tsx — 触发 Supabase Auth custom provider 登录。
 // Supabase 已在 Auth → Configuration → Providers → Custom 上配置好 new-api 作为
-// OIDC Provider。这里只要 signInWithIdTokenCredentials / signInWithOAuth 选到
-// 那个 provider 即可。脚手架默认用 provider slug = "newapi"（运营配置时填的 slug）。
+// OIDC Provider（identifier 形如 "custom:newapi"）。signInWithOAuth 的 provider
+// 参数必须与 identifier 完全一致，包括 custom: 前缀。
 import { getSupabase } from '@/lib/supabase';
 
-const OIDC_PROVIDER = 'newapi'; // ← 改成 Supabase 后台自定义 provider 的 slug
+// ⚠️ Supabase Custom Provider identifier 强制 "custom:" 前缀，必须精确匹配运营配置值
+const OIDC_PROVIDER = 'custom:newapi';
 
 export function Login() {
   async function handleLogin() {

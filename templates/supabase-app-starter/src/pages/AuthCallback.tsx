@@ -1,8 +1,14 @@
 // src/pages/AuthCallback.tsx
 // Supabase Auth → new-api OIDC 登录回调。
-// 页面职责：从 URL hash 里取 Supabase session，把网关发的 access_token
-// （Supabase 会把 custom provider 返回的 extra_access_token 存进 user.identities[0]）
-// 写进 app_metadata.gateway_access_token，然后跳回首页。
+//
+// 关键：Supabase Custom OIDC Provider 走授权码流程时，网关返回的
+// access_token 会被 Supabase **存进 session.provider_token**，
+// id_token 的 claims 会被映射进 user.identities[0].identity_data。
+//
+// 我们需要把：
+//   gateway_access_token = session.provider_token   （网关 access_token）
+//   gateway_user_id      = identity_data.sub        （id_token.sub，网关 User.Id）
+// 持久化到 auth.users.app_metadata，后面所有 gateway client 都从那里读。
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSupabase } from '@/lib/supabase';
@@ -20,27 +26,34 @@ export function AuthCallback() {
 
     const supabase = getSupabase();
     supabase.auth.exchangeCodeForSession(code).then(async ({ data, error }) => {
-      if (error || !data.user) {
-        console.error('exchange failed', error);
+      if (error || !data.session || !data.user) {
+        console.error('[AuthCallback] exchange failed', error);
         navigate('/login', { replace: true });
         return;
       }
 
-      // new-api custom provider 返回的 access_token 在
-      // user.identities[0].identity_data 里（Supabase 的 OIDC 默认映射）。
-      const rawIdentity = data.user.identities?.[0]?.identity_data as
-        | { gateway_access_token?: string; access_token?: string; provider?: string }
+      // ✅ 网关 access_token：Supabase 把 custom provider 返回的上游 access_token
+      //    直接存进 session.provider_token（不是 identity_data 里！）
+      const gatewayAccessToken = data.session.provider_token ?? null;
+
+      // ✅ 网关 User.Id：来自 id_token.sub，Supabase 映射到 identity_data.sub
+      const identityData = data.user.identities?.[0]?.identity_data as
+        | { sub?: string; email?: string; name?: string; username?: string }
         | undefined;
+      const gatewayUserId = identityData?.sub ?? null;
 
-      const gatewayToken = rawIdentity?.gateway_access_token
-        ?? rawIdentity?.access_token;
+      console.info('[AuthCallback]', {
+        gateway_user_id: gatewayUserId,
+        has_gateway_access_token: !!gatewayAccessToken,
+        provider: data.session.provider,
+      });
 
-      // 写进 app_metadata，后面所有 gateway client 都从这里读
+      // 持久化到 app_metadata（幂等，后续登录覆盖）
       await supabase.auth.updateUser({
         data: {
-          gateway_user_id: rawIdentity?.sub,          // 网关 User.Id（来自 id_token.sub）
-          gateway_access_token: gatewayToken ?? null,
-          gateway_provider: rawIdentity?.provider ?? 'newapi',
+          gateway_user_id: gatewayUserId,
+          gateway_access_token: gatewayAccessToken,
+          gateway_provider: data.session.provider,
         },
       });
 

@@ -74,6 +74,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"PATCH /api/user/access_tokens/:id":            accessTokenSessionRule,
 	"DELETE /api/user/access_tokens/:id":           accessTokenSessionRule,
 	"DELETE /api/user/access_tokens/legacy":        accessTokenSessionRule,
+	"POST /api/user/self/cli/auth_codes":           accessTokenSessionRule,
 	"GET /api/user/passkey":                        accessTokenScopeRule("account_security:read"),
 	"POST /api/user/passkey/register/begin":        accessTokenScopeRule("account_security:write"),
 	"POST /api/user/passkey/register/finish":       accessTokenScopeRule("account_security:write"),
@@ -163,6 +164,14 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"POST /api/option/waffo-pancake/save":                        accessTokenScopeRule("option:write"),
 	"POST /api/option/waffo-pancake/subscription-product":        accessTokenScopeRule("option:write"),
 	"GET /api/option/waffo-pancake/subscription-product-options": accessTokenScopeRule("option:read"),
+
+	// router/oauth-app-router.go: /api/oauth-apps
+	"GET /api/oauth-apps/":                   accessTokenScopeRule("option:read"),
+	"POST /api/oauth-apps/":                  accessTokenScopeRule("option:write"),
+	"GET /api/oauth-apps/:id":                accessTokenScopeRule("option:read"),
+	"PUT /api/oauth-apps/:id":                accessTokenScopeRule("option:write"),
+	"POST /api/oauth-apps/:id/rotate-secret": accessTokenScopeRule("option:write"),
+	"DELETE /api/oauth-apps/:id":             accessTokenScopeRule("option:write"),
 
 	// router/api-router.go: /api/custom-oauth-provider, /api/ratio_sync
 	"POST /api/custom-oauth-provider/discovery": accessTokenScopeRule("option:write"),

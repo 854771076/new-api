@@ -10,12 +10,16 @@ import { getSupabase } from './supabase';
 
 async function getGatewayAccessToken(): Promise<string | null> {
   const { data } = await getSupabase().auth.getSession();
-  // Supabase session 里 access_token 是 Supabase 自己签的会话 token；网关 token
-  // 我们需要从登录时的 OAuth custom provider 回调里拿到的 extra_provider_token 取。
-  // 脚手架里约定：在 OAuth 登录回调页（/auth/callback）把网关 token 存到
-  // app_metadata.gateway_access_token；这里读它。
-  const meta = data?.user?.app_metadata as { gateway_access_token?: string } | undefined;
-  return meta?.gateway_access_token ?? null;
+  if (!data?.session) return null;
+
+  // 优先读 AuthCallback 写入的 app_metadata（持久化 + 稳定）
+  const meta = data.user?.app_metadata as Record<string, unknown> | undefined;
+  const fromMeta = (meta?.gateway_access_token as string | undefined) ?? null;
+  if (fromMeta) return fromMeta;
+
+  // Fallback：AuthCallback 还没写（首次登录 + Edge Function 没注册），
+  // 直接用当前 session.provider_token（Supabase Custom OIDC 的网关 access_token）
+  return data.session.provider_token ?? null;
 }
 
 export class GatewayError extends Error {

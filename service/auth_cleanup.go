@@ -52,4 +52,11 @@ func cleanupAuthArtifacts() {
 	if err := model.DeleteExpiredUserAccessTokens(accessTokenExpiredBefore); err != nil {
 		common.SysError(common.LogText("failed to delete expired access tokens: %s", err.Error()))
 	}
+	// Clean up expired OAuth authorization codes and refresh tokens.
+	if err := model.DeleteExpiredOAuthAuthorizationCodes(now.Unix()); err != nil {
+		common.SysError(common.LogText("failed to delete expired oauth authorization codes: %s", err.Error()))
+	}
+	if err := model.DeleteExpiredOAuthRefreshTokens(now.Unix()); err != nil {
+		common.SysError(common.LogText("failed to delete expired oauth refresh tokens: %s", err.Error()))
+	}
 }

@@ -84,6 +84,14 @@ create index if not exists idx_official_outfits_client_cat
 create index if not exists idx_official_outfits_active
   on public.official_outfits(is_active) where is_active;
 
+-- 幂等 seed 保护：同一 App 下服装名+分类唯一
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'official_outfits_unique') then
+    alter table public.official_outfits
+      add constraint official_outfits_unique unique (client_id, name, category);
+  end if;
+end $$;
+
 -- 用户服装：从官方库"解锁"过来的 + 自己上传的自定义服装。
 -- source_type: official | custom
 create table if not exists public.user_outfits (
@@ -238,7 +246,9 @@ begin
     (app_client_id, '复古皮靴',      'shoes',      '帅气',     'https://example.com/img/leather-boots.png', '{retro,fashion}',     80, true, null),
     (app_client_id, '黑框眼镜',      'accessory',  '学院风',   'https://example.com/img/glasses.png',       '{academic,basic}',    20, true, null),
     (app_client_id, '棒球帽',        'accessory',  '街头',     'https://example.com/img/cap.png',           '{street,sport}',       0, true, null)
-  returning count(*) into v_official;
+  on conflict do nothing;
+
+  get diagnostics v_official = row_count;
 
   official_count := v_official;
   return next;

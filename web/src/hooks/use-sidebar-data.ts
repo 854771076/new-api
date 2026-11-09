@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import {
   Activity,
+  AppWindow,
   Box,
   ClipboardList,
   CreditCard,
@@ -156,6 +157,11 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Subscriptions'),
             url: '/subscriptions',
             icon: CreditCard,
+          },
+          {
+            title: t('OAuth Apps'),
+            url: '/oauth-apps',
+            icon: AppWindow,
           },
           {
             title: t('System Info'),

@@ -556,6 +556,17 @@ func TokenAuth() func(c *gin.Context) {
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
+
+		// OAuth 2.0 access tokens (JWT) can be used to call relay APIs on
+		// behalf of the user. Detect them before the sk- token path.
+		if key != "" && service.IsOAuthAccessToken(key) {
+			if setupContextForOAuthToken(c, key) {
+				c.Next()
+				return
+			}
+			return
+		}
+
 		if key == "" || key == "midjourney-proxy" {
 			key = c.Request.Header.Get("mj-api-secret")
 			if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
