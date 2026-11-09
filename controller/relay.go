@@ -137,6 +137,27 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	// OAuthApp-level model whitelist. Only fires for requests authenticated by
+	// an OAuth access token (context key set by middleware.oauth_token_auth).
+	// Dashboard API keys, personal access tokens, and browser sessions do not
+	// carry this context key and bypass the check entirely.
+	// Fail-open on DB/cache trouble — a broken whitelist must never block AI.
+	if clientID := common.GetContextKeyString(c, constant.ContextKeyOAuthAppClientID); clientID != "" {
+		allowed, perr := service.CheckOAuthAppModelWhitelist(clientID, relayInfo.OriginModelName)
+		if perr != nil {
+			common.SysLog(common.LogText("oauth_app_whitelist check failed for client_id=%s model=%s: %v (failing open)", clientID, relayInfo.OriginModelName, perr))
+		} else if !allowed {
+			common.SysLog(common.LogText("oauth_app_whitelist DENY client_id=%s model=%s user_id=%d", clientID, relayInfo.OriginModelName, c.GetInt("id")))
+			newAPIError = types.NewErrorWithStatusCode(
+				fmt.Errorf("insufficient model permission: %s is not in the OAuth app whitelist", relayInfo.OriginModelName),
+				types.ErrorCodeAccessDenied,
+				http.StatusForbidden,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
+	}
+
 	defer func() {
 		recovered := recover()
 		resultErr := newAPIError

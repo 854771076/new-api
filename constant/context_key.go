@@ -85,4 +85,11 @@ const (
 	ContextKeyTokenAuditParams ContextKey = "token_audit_params"
 	// ContextKeyTokenAuditSucceeded disambiguates token responses that exceed the audit buffer.
 	ContextKeyTokenAuditSucceeded ContextKey = "token_audit_succeeded"
+
+	// ContextKeyOAuthAppClientID marks that the current relay request was
+	// authenticated by an OAuth access token and carries its client_id.
+	// Downstream (controller.Relay) reads this key to apply OAuthApp-level
+	// policy such as the model whitelist. It must remain empty for Dashboard
+	// API keys, personal access tokens, and browser sessions.
+	ContextKeyOAuthAppClientID ContextKey = "oauth_app_client_id"
 )
