@@ -140,22 +140,11 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// OAuthApp-level model whitelist. Only fires for requests authenticated by
 	// an OAuth access token (context key set by middleware.oauth_token_auth).
 	// Dashboard API keys, personal access tokens, and browser sessions do not
-	// carry this context key and bypass the check entirely.
-	// Fail-open on DB/cache trouble — a broken whitelist must never block AI.
-	if clientID := common.GetContextKeyString(c, constant.ContextKeyOAuthAppClientID); clientID != "" {
-		allowed, perr := service.CheckOAuthAppModelWhitelist(clientID, relayInfo.OriginModelName)
-		if perr != nil {
-			common.SysLog(common.LogText("oauth_app_whitelist check failed for client_id=%s model=%s: %v (failing open)", clientID, relayInfo.OriginModelName, perr))
-		} else if !allowed {
-			common.SysLog(common.LogText("oauth_app_whitelist DENY client_id=%s model=%s user_id=%d", clientID, relayInfo.OriginModelName, c.GetInt("id")))
-			newAPIError = types.NewErrorWithStatusCode(
-				fmt.Errorf("insufficient model permission: %s is not in the OAuth app whitelist", relayInfo.OriginModelName),
-				types.ErrorCodeAccessDenied,
-				http.StatusForbidden,
-				types.ErrOptionWithSkipRetry(),
-			)
-			return
-		}
+	// carry this context key and bypass the check entirely. The check is
+	// fail-closed when the app record cannot be loaded.
+	if apiErr := checkOAuthAppModelWhitelist(c, relayInfo.OriginModelName); apiErr != nil {
+		newAPIError = apiErr
+		return
 	}
 
 	defer func() {
@@ -372,6 +361,11 @@ func RelayMidjourney(c *gin.Context) {
 		return
 	}
 
+	if apiErr := checkOAuthAppModelWhitelist(c, oauthPolicyModelName(c, relayInfo.OriginModelName)); apiErr != nil {
+		c.JSON(apiErr.StatusCode, gin.H{"error": apiErr.ToOpenAIError()})
+		return
+	}
+
 	var mjErr *taskdto.MidjourneyResponse
 	switch relayInfo.RelayMode {
 	case relayconstant.RelayModeMidjourneyNotify:
@@ -473,6 +467,14 @@ func RelayTaskFetch(c *gin.Context) {
 		})
 		return
 	}
+	// Fetching a task is not a new upstream call, but the stored task still
+	// belongs to a model. Resolve it from the task row when the middleware did
+	// not already put it on the context so a restricted app cannot poll a model
+	// it cannot call.
+	if apiErr := checkOAuthAppModelWhitelist(c, oauthPolicyModelName(c, relayInfo.OriginModelName)); apiErr != nil {
+		respondTaskError(c, taskErrorFromOAuthPolicy(apiErr))
+		return
+	}
 	if taskErr := relay.RelayTaskFetch(c, relayInfo.RelayMode); taskErr != nil {
 		respondTaskError(c, taskErr)
 	}
@@ -500,6 +502,12 @@ func RelayTask(c *gin.Context) {
 
 	if taskErr := relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
 		respondTaskSubmissionError(c, taskErr)
+		return
+	}
+	// Check after ResolveOriginTask so remix submissions are evaluated against
+	// the origin task's model rather than an empty model name.
+	if apiErr := checkOAuthAppModelWhitelist(c, relayInfo.OriginModelName); apiErr != nil {
+		respondTaskSubmissionError(c, taskErrorFromOAuthPolicy(apiErr))
 		return
 	}
 	if taskErr := relay.ApplyOriginTaskAffinity(c, relayInfo); taskErr != nil {

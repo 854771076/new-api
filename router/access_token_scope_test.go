@@ -55,6 +55,10 @@ var accessTokenExemptRoutes = []string{
 	"POST /api/user/auth/refresh",
 	"POST /api/user/auth/logout",
 
+	// CLI authorization exchange: authenticated by the single-use code, not a
+	// dashboard session or personal access token.
+	"POST /api/cli/exchange",
+
 	// Payment callbacks.
 	"POST /api/stripe/webhook",
 	"POST /api/creem/webhook",

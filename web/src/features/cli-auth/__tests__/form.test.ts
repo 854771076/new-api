@@ -22,10 +22,12 @@ import { permissionMatrixToScopes } from '@/lib/admin-permissions'
 
 import type { AccessTokenCatalog } from '../../security/api'
 import {
+  CLI_HIGH_RISK_SCOPES,
   CLI_RECOMMENDED_SCOPES,
   cliAuthorizeFormSchema,
   defaultPermissions,
   grantableScopes,
+  summarizeGrant,
 } from '../lib/form'
 
 function catalogWith(resources: string[]): AccessTokenCatalog {
@@ -61,8 +63,59 @@ describe('cli authorize form', () => {
     expect(permissionMatrixToScopes(matrix)).toEqual([
       'usage:read',
       'user:read',
-      'user:write',
     ])
+  })
+
+  test('never preselects high-risk write scopes', () => {
+    const matrix = defaultPermissions(
+      catalogWith([
+        'api_key',
+        'user',
+        'option',
+        'model',
+        'deployment',
+        'channel',
+      ])
+    )
+    expect(permissionMatrixToScopes(matrix)).toEqual([
+      'api_key:read',
+      'api_key:write',
+      'channel:read',
+      'deployment:read',
+      'model:read',
+      'option:read',
+      'user:read',
+    ])
+    expect(CLI_HIGH_RISK_SCOPES).toEqual(
+      expect.arrayContaining([
+        'user:write',
+        'option:write',
+        'model:write',
+        'deployment:write',
+      ])
+    )
+  })
+
+  test('summarizes the selected scopes with catalog labels', () => {
+    const summary = summarizeGrant(catalogWith(['usage', 'user']), [
+      'usage:read',
+      'user:write',
+      'unknown:read',
+    ])
+    expect(summary.items).toEqual([
+      {
+        scope: 'usage:read',
+        resourceLabelKey: 'usage',
+        actionLabelKey: 'View',
+      },
+      { scope: 'user:write', resourceLabelKey: 'user', actionLabelKey: 'Edit' },
+    ])
+    expect(summary.highRiskCount).toBe(1)
+  })
+
+  test('reports an empty summary when nothing is selected', () => {
+    const summary = summarizeGrant(catalogWith(['usage']), [])
+    expect(summary).toEqual({ items: [], highRiskCount: 0 })
   })
 
   test('preselects nothing when the catalog grants no recommended scope', () => {

@@ -30,6 +30,9 @@ var (
 	ErrOAuthAppNotFound      = errors.New("oauth app not found")
 	ErrOAuthAppDuplicateName = errors.New("oauth app name already exists")
 	ErrOAuthAppInvalid       = errors.New("oauth app is invalid")
+	// ErrOAuthAppPublicClient is returned when a caller tries to rotate a
+	// secret for a public client, which must never hold one.
+	ErrOAuthAppPublicClient = errors.New("public clients do not have a client secret")
 )
 
 // OAuthApp is a registered external application (OAuth 2.0 client).
@@ -57,6 +60,12 @@ type OAuthApp struct {
 	// requests authenticated by an OAuth access token are subject to this
 	// check; Dashboard API keys and personal access tokens bypass it entirely.
 	AIModelWhitelist string `json:"-" gorm:"type:text;column:ai_model_whitelist"`
+
+	// PublicClient marks a public OAuth 2.0 client that cannot keep a secret
+	// (for example a browser SPA). Such a client authenticates with client_id
+	// only; PKCE remains mandatory. False keeps the confidential-client
+	// behavior, so existing rows are unchanged after migration.
+	PublicClient bool `json:"public_client" gorm:"column:public_client"`
 }
 
 func (OAuthApp) TableName() string {
@@ -309,10 +318,13 @@ func ListOAuthApps() ([]OAuthApp, error) {
 	return apps, err
 }
 
-// CreateOAuthApp persists a new app. The caller must set ClientSecretHash
-// before calling; the plaintext secret is never stored.
+// CreateOAuthApp persists a new app. A confidential client must set
+// ClientSecretHash before calling; a public client has no secret at all.
 func CreateOAuthApp(app *OAuthApp) error {
-	if app == nil || app.Name == "" || app.ClientID == "" || app.ClientSecretHash == "" {
+	if app == nil || app.Name == "" || app.ClientID == "" {
+		return ErrOAuthAppInvalid
+	}
+	if !app.PublicClient && app.ClientSecretHash == "" {
 		return ErrOAuthAppInvalid
 	}
 	app.Id = 0
@@ -329,7 +341,7 @@ func CreateOAuthApp(app *OAuthApp) error {
 
 // UpdateOAuthApp updates mutable fields of an existing app. ClientID and
 // ClientSecretHash are immutable here; use RotateOAuthAppSecret for the latter.
-func UpdateOAuthApp(id int, name string, redirectURIs, postLogoutURIs, scopes []string, status int) (*OAuthApp, error) {
+func UpdateOAuthApp(id int, name string, redirectURIs, postLogoutURIs, scopes []string, status int, publicClient *bool) (*OAuthApp, error) {
 	app, err := GetOAuthAppByID(id)
 	if err != nil {
 		return nil, err
@@ -355,6 +367,15 @@ func UpdateOAuthApp(id int, name string, redirectURIs, postLogoutURIs, scopes []
 	if status != 0 {
 		app.Status = status
 	}
+	if publicClient != nil {
+		app.PublicClient = *publicClient
+		// A public client authenticates with PKCE only; keeping a secret hash
+		// would leave a credential that can never be used and could be
+		// mistaken for a required secret.
+		if app.PublicClient {
+			app.ClientSecretHash = ""
+		}
+	}
 	app.UpdatedAt = common.GetTimestamp()
 	if err := DB.Save(app).Error; err != nil {
 		return nil, err
@@ -368,6 +389,9 @@ func RotateOAuthAppSecret(id int) (string, error) {
 	app, err := GetOAuthAppByID(id)
 	if err != nil {
 		return "", err
+	}
+	if app.PublicClient {
+		return "", ErrOAuthAppPublicClient
 	}
 	secret := GenerateOAuthClientSecret()
 	app.ClientSecretHash = OAuthAppSecretHash(secret)

@@ -273,6 +273,11 @@ func serveTaskPluginProtocol(
 		if action := c.GetString("task_action"); action != "" {
 			relayInfo.Action = action
 		}
+		submissionStage = "oauth_whitelist"
+		if apiErr := checkOAuthAppModelWhitelist(c, relayInfo.OriginModelName); apiErr != nil {
+			taskErr = taskErrorFromOAuthPolicy(apiErr)
+			return
+		}
 		submissionStage = "origin_task"
 		if taskErr = relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
 			return

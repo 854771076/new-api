@@ -30,7 +30,8 @@ func setupCLIAuthTest(t *testing.T) *gin.Engine {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, i18n.Init())
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.UserAccessToken{}, &model.Option{}, &model.CLIAuthCode{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Log{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.UserAccessToken{}, &model.Option{}, &model.CLIAuthCode{},
+		&model.AuthFlow{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.UserOAuthBinding{}))
 	model.DB, model.LOG_DB = db, db
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
@@ -64,10 +65,17 @@ func createCLIAuthTestUser(t *testing.T, username string, role int) *model.User 
 }
 
 func cliAuthRequest(router http.Handler, method, path, credential, body string) *httptest.ResponseRecorder {
+	return cliAuthRequestWithHeaders(router, method, path, credential, body, nil)
+}
+
+func cliAuthRequestWithHeaders(router http.Handler, method, path, credential, body string, headers map[string]string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	if credential != "" {
 		request.Header.Set("Authorization", "Bearer "+credential)
+	}
+	for name, value := range headers {
+		request.Header.Set(name, value)
 	}
 	request.RemoteAddr = "192.0.2.9:4567"
 	response := httptest.NewRecorder()
@@ -89,11 +97,15 @@ func cliAuthData(t *testing.T, body map[string]any) map[string]any {
 	return data
 }
 
-func issueCLIAuthCode(t *testing.T, router http.Handler, jwt, name string, scopes ...string) (string, map[string]any) {
+func issueCLIAuthCode(t *testing.T, router http.Handler, jwt, proof, name string, scopes ...string) (string, map[string]any) {
 	t.Helper()
 	payload, err := common.Marshal(gin.H{"name": name, "scopes": scopes})
 	require.NoError(t, err)
-	response := cliAuthRequest(router, http.MethodPost, "/api/user/self/cli/auth_codes", jwt, string(payload))
+	headers := map[string]string{}
+	if proof != "" {
+		headers["X-Security-Proof"] = proof
+	}
+	response := cliAuthRequestWithHeaders(router, http.MethodPost, "/api/user/self/cli/auth_codes", jwt, string(payload), headers)
 	require.Equal(t, http.StatusOK, response.Code, "issue failed: %s", response.Body.String())
 	data := cliAuthData(t, decodeCLIAuthResponse(t, response))
 	code, _ := data["code"].(string)
@@ -111,9 +123,10 @@ func exchangeCLIAuthCode(t *testing.T, router http.Handler, code string) *httpte
 func TestCLIAuthCodeIssueExchangeAndPAT(t *testing.T) {
 	router := setupCLIAuthTest(t)
 	admin := createCLIAuthTestUser(t, "cli-admin", common.RoleAdminUser)
-	_, jwt := createAccessTokenTestSession(t, admin.Id, "cli-admin-session")
+	identity, jwt := createAccessTokenTestSession(t, admin.Id, "cli-admin-session")
 
-	code, data := issueCLIAuthCode(t, router, jwt, "my cli", "user:read", "usage:read")
+	proof := issueAccessTokenGenerateProof(t, identity, 0, "user:read", "usage:read")
+	code, data := issueCLIAuthCode(t, router, jwt, proof, "my cli", "user:read", "usage:read")
 	expiresAt := int64(data["expires_at"].(float64))
 	assert.InDelta(t, time.Now().Unix()+int64(model.CLIAuthCodeTTL/time.Second), expiresAt, 30)
 
@@ -155,6 +168,32 @@ func TestCLIAuthCodeIssueForbiddenScope(t *testing.T) {
 	var count int64
 	require.NoError(t, model.DB.Model(&model.CLIAuthCode{}).Count(&count).Error)
 	assert.Zero(t, count, "a rejected grant must not persist a code")
+}
+
+func TestCLIAuthCodeIssueRequiresSecurityProof(t *testing.T) {
+	router := setupCLIAuthTest(t)
+	admin := createCLIAuthTestUser(t, "cli-proof-admin", common.RoleAdminUser)
+	identity, jwt := createAccessTokenTestSession(t, admin.Id, "cli-proof-session")
+
+	payload := `{"name":"cli","scopes":["usage:read"]}`
+	missing := cliAuthRequest(router, http.MethodPost, "/api/user/self/cli/auth_codes", jwt, payload)
+	assert.Equal(t, http.StatusForbidden, missing.Code)
+	assert.Equal(t, "SECURITY_PROOF_REQUIRED", decodeCLIAuthResponse(t, missing)["code"])
+
+	var count int64
+	require.NoError(t, model.DB.Model(&model.CLIAuthCode{}).Count(&count).Error)
+	assert.Zero(t, count, "a request without a proof must not persist a code")
+
+	proof := issueAccessTokenGenerateProof(t, identity, 0, "usage:read")
+	code, _ := issueCLIAuthCode(t, router, jwt, proof, "cli", "usage:read")
+	require.NotEmpty(t, code)
+
+	// A proof is single use, so replaying it cannot mint a second code.
+	replay := cliAuthRequestWithHeaders(router, http.MethodPost, "/api/user/self/cli/auth_codes", jwt, payload, map[string]string{"X-Security-Proof": proof})
+	assert.Equal(t, http.StatusForbidden, replay.Code)
+	assert.Equal(t, "SECURITY_PROOF_CONSUMED", decodeCLIAuthResponse(t, replay)["code"])
+	require.NoError(t, model.DB.Model(&model.CLIAuthCode{}).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
 }
 
 func TestCLIAuthCodeIssueRejectsPAT(t *testing.T) {
@@ -204,9 +243,10 @@ func TestCLIAuthCodeExchangeFailures(t *testing.T) {
 func TestCLIAuthCodeExchangedPATScopeEnforced(t *testing.T) {
 	router := setupCLIAuthTest(t)
 	admin := createCLIAuthTestUser(t, "cli-scope-admin", common.RoleAdminUser)
-	_, jwt := createAccessTokenTestSession(t, admin.Id, "cli-scope-session")
+	identity, jwt := createAccessTokenTestSession(t, admin.Id, "cli-scope-session")
 
-	code, _ := issueCLIAuthCode(t, router, jwt, "usage only", "usage:read")
+	proof := issueAccessTokenGenerateProof(t, identity, 0, "usage:read")
+	code, _ := issueCLIAuthCode(t, router, jwt, proof, "usage only", "usage:read")
 	response := exchangeCLIAuthCode(t, router, code)
 	require.Equal(t, http.StatusOK, response.Code)
 	rawToken, _ := cliAuthData(t, decodeCLIAuthResponse(t, response))["token"].(string)

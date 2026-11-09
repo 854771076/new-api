@@ -30,10 +30,17 @@ export interface CLIAuthCode {
 }
 
 export function issueCLIAuthCode(
-  input: CLIAuthCodeInput
+  input: CLIAuthCodeInput,
+  proofToken: string,
+  signal: AbortSignal
 ): Promise<CLIAuthCode> {
   return authResult(
-    api.post('/api/user/self/cli/auth_codes', input, authRequestOptions),
+    api.post('/api/user/self/cli/auth_codes', input, {
+      ...authRequestOptions,
+      headers: { 'X-Security-Proof': proofToken },
+      singleUseAuthorization: true,
+      signal,
+    }),
     'Failed to create authorization code'
   )
 }

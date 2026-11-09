@@ -66,6 +66,10 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 		if action := c.GetString("task_action"); action != "" {
 			relayInfo.Action = action
 		}
+		if apiErr := checkOAuthAppModelWhitelist(c, relayInfo.OriginModelName); apiErr != nil {
+			taskErr = taskErrorFromOAuthPolicy(apiErr)
+			return
+		}
 		if taskErr = relay.ResolveOriginTask(c, relayInfo); taskErr != nil {
 			return
 		}

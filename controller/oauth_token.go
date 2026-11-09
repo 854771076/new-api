@@ -20,22 +20,21 @@ func OAuthToken(c *gin.Context) {
 		return
 	}
 
-	clientID, clientSecret, ok := authenticateOAuthClient(c)
-	if !ok {
+	clientID, clientSecret := oauthClientCredentials(c)
+	if clientID == "" {
 		oauthTokenError(c, http.StatusUnauthorized, oauthErrInvalidClient, "client authentication failed")
 		return
 	}
-	c.Set("oauth_client_id", clientID)
-
 	app, err := model.GetOAuthAppByClientID(clientID)
 	if err != nil || !app.IsEnabled() {
 		oauthTokenError(c, http.StatusUnauthorized, oauthErrInvalidClient, "client not found or disabled")
 		return
 	}
-	if !model.VerifyOAuthAppSecret(app, clientSecret) {
+	if !oauthClientAuthenticated(app, clientSecret) {
 		oauthTokenError(c, http.StatusUnauthorized, oauthErrInvalidClient, "client authentication failed")
 		return
 	}
+	c.Set("oauth_client_id", app.ClientID)
 
 	switch grantType {
 	case "authorization_code":
@@ -47,25 +46,35 @@ func OAuthToken(c *gin.Context) {
 	}
 }
 
-// authenticateOAuthClient extracts client_id and client_secret from either the
-// HTTP Basic Auth header or the request body parameters.
-func authenticateOAuthClient(c *gin.Context) (clientID, clientSecret string, ok bool) {
+// oauthClientCredentials extracts client_id and client_secret from either the
+// HTTP Basic Auth header or the request body parameters. client_secret may be
+// empty because public clients authenticate with client_id alone.
+func oauthClientCredentials(c *gin.Context) (clientID, clientSecret string) {
 	// Try HTTP Basic Auth first.
-	if auth := c.GetHeader("Authorization"); auth != "" {
-		if strings.HasPrefix(auth, "Basic ") {
-			decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
-			if err == nil {
-				parts := strings.SplitN(string(decoded), ":", 2)
-				if len(parts) == 2 {
-					return parts[0], parts[1], true
-				}
+	if auth := c.GetHeader("Authorization"); strings.HasPrefix(auth, "Basic ") {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+		if err == nil {
+			if id, secret, found := strings.Cut(string(decoded), ":"); found {
+				return id, secret
 			}
 		}
 	}
 	// Fall back to body parameters.
-	clientID = c.PostForm("client_id")
-	clientSecret = c.PostForm("client_secret")
-	return clientID, clientSecret, clientID != "" && clientSecret != ""
+	return c.PostForm("client_id"), c.PostForm("client_secret")
+}
+
+// oauthClientAuthenticated reports whether the presented credentials
+// authenticate the client. A public client is bound to its client_id only and
+// ignores any presented secret; a confidential client must present the secret
+// that matches the stored hash.
+func oauthClientAuthenticated(app *model.OAuthApp, clientSecret string) bool {
+	if app == nil || !app.IsEnabled() {
+		return false
+	}
+	if app.PublicClient {
+		return true
+	}
+	return clientSecret != "" && model.VerifyOAuthAppSecret(app, clientSecret)
 }
 
 // handleOAuthAuthorizationCodeGrant exchanges an authorization code for tokens.

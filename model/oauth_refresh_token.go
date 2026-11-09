@@ -87,8 +87,11 @@ func GetOAuthRefreshTokenByHash(hash string) (*OAuthRefreshToken, error) {
 }
 
 // RotateOAuthRefreshToken atomically revokes the old token and creates a new
-// one. If the old token was already revoked (replay attempt), the entire chain
-// rooted at that token is revoked. Returns the newly created token row.
+// one. The old row is only consumed when it is still active, so concurrent
+// rotations cannot both succeed. If the old token was already revoked or was
+// rotated by a concurrent request, the entire app+user refresh token chain is
+// revoked and ErrOAuthRefreshTokenRevoked is returned. Returns the newly
+// created token row.
 func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64) (*OAuthRefreshToken, error) {
 	oldHash = strings.TrimSpace(oldHash)
 	if oldHash == "" || newHash == "" {
@@ -106,27 +109,34 @@ func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64) (*OAut
 			}
 			return err
 		}
-		// Replay detection: if the old token was already revoked, revoke the
-		// entire chain (all tokens sharing the same app+user+session). The
+		replay := old.RevokedAt != 0
+		if !replay {
+			if old.ExpiresAt <= now {
+				return ErrOAuthRefreshTokenExpired
+			}
+			// Revoke the old token only if it is still active. The conditional
+			// update is the single atomic gate: concurrent rotations of the same
+			// token race here and exactly one of them observes RowsAffected == 1.
+			result := tx.Model(&OAuthRefreshToken{}).
+				Where("token_hash = ? AND revoked_at = 0", oldHash).
+				Update("revoked_at", now)
+			if result.Error != nil {
+				return result.Error
+			}
+			replay = result.RowsAffected != 1
+		}
+		// Replay detection: a revoked or concurrently rotated token must never
+		// be exchanged again. Revoke the whole chain for this app+user. The
 		// update must commit, so the replay error is reported after the
 		// transaction instead of rolling the revocation back.
-		if old.RevokedAt != 0 {
+		if replay {
 			if err := tx.Model(&OAuthRefreshToken{}).
-				Where("app_id = ? AND user_id = ? AND session_id = ?", old.AppID, old.UserID, old.SessionID).
+				Where("app_id = ? AND user_id = ?", old.AppID, old.UserID).
 				Update("revoked_at", now).Error; err != nil {
 				return err
 			}
 			replayDetected = true
 			return nil
-		}
-		if old.ExpiresAt <= now {
-			return ErrOAuthRefreshTokenExpired
-		}
-		// Revoke the old token.
-		if err := tx.Model(&OAuthRefreshToken{}).
-			Where("token_hash = ?", oldHash).
-			Update("revoked_at", now).Error; err != nil {
-			return err
 		}
 		// Create the new token, linking back to the old one for chain tracing.
 		newToken = OAuthRefreshToken{
@@ -169,6 +179,17 @@ func RevokeOAuthRefreshTokensByAppAndUser(appID, userID int) error {
 	}
 	return DB.Model(&OAuthRefreshToken{}).
 		Where("app_id = ? AND user_id = ? AND revoked_at = 0", appID, userID).
+		Update("revoked_at", common.GetTimestamp()).Error
+}
+
+// RevokeOAuthRefreshTokensByApp revokes all refresh tokens issued to an app
+// across every user. Used when an app is disabled or deleted.
+func RevokeOAuthRefreshTokensByApp(appID int) error {
+	if appID <= 0 {
+		return nil
+	}
+	return DB.Model(&OAuthRefreshToken{}).
+		Where("app_id = ? AND revoked_at = 0", appID).
 		Update("revoked_at", common.GetTimestamp()).Error
 }
 

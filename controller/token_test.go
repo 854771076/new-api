@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -641,6 +642,69 @@ func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
 	}
 }
 
+func TestAddTokenReturnsCreatedTokenData(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+
+	body := map[string]any{
+		"name":            "created-token",
+		"expired_time":    -1,
+		"remain_quota":    321,
+		"unlimited_quota": true,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+	assert.Empty(t, response.Message)
+
+	var created struct {
+		Id             int    `json:"id"`
+		Name           string `json:"name"`
+		Key            string `json:"key"`
+		ExpiredTime    int64  `json:"expired_time"`
+		RemainQuota    int    `json:"remain_quota"`
+		UnlimitedQuota bool   `json:"unlimited_quota"`
+	}
+	require.NoError(t, common.Unmarshal(response.Data, &created))
+	assert.Positive(t, created.Id)
+	assert.Equal(t, "created-token", created.Name)
+	assert.NotEmpty(t, created.Key)
+	assert.Equal(t, int64(-1), created.ExpiredTime)
+	assert.Equal(t, 321, created.RemainQuota)
+	assert.True(t, created.UnlimitedQuota)
+
+	var stored model.Token
+	require.NoError(t, db.First(&stored, created.Id).Error)
+	assert.Equal(t, stored.Key, created.Key)
+	assert.Equal(t, stored.Name, created.Name)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &raw))
+	assert.JSONEq(t, `true`, string(raw["success"]))
+	assert.JSONEq(t, `""`, string(raw["message"]))
+	assert.Contains(t, raw, "data")
+}
+
+func TestAddTokenFailureOmitsData(t *testing.T) {
+	setupTokenControllerTestDB(t)
+
+	body := map[string]any{
+		"name":         "negative-quota-token",
+		"remain_quota": -1,
+	}
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	assert.False(t, response.Success)
+	assert.NotEmpty(t, response.Message)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &raw))
+	assert.NotContains(t, raw, "data")
+}
+
 func TestGetTokenUsageFollowsTheUserQuotaSwitchAndIPWhitelist(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -1014,4 +1078,91 @@ func verifyAPITokenAudit(t *testing.T) {
 		require.NoError(t, model.DB.Model(&model.Token{}).Where("name = ?", "audit-down").Count(&count).Error)
 		assert.EqualValues(t, 1, count)
 	})
+}
+
+func TestBillingEndpointsHandleTokenlessContext(t *testing.T) {
+	db := openTokenControllerTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}))
+
+	user := &model.User{
+		Username:    "billing-tokenless-user",
+		Password:    "placeholder",
+		Role:        common.RoleCommonUser,
+		Status:      common.UserStatusEnabled,
+		Group:       "default",
+		AuthVersion: 1,
+		Quota:       2000,
+		UsedQuota:   500,
+	}
+	require.NoError(t, db.Create(user).Error)
+	token := &model.Token{
+		UserId:         user.Id,
+		Name:           "billing-token",
+		Key:            "billing-token-key",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    1800000000,
+		RemainQuota:    300,
+		UsedQuota:      40,
+		UnlimitedQuota: true,
+		Group:          "default",
+	}
+	require.NoError(t, db.Create(token).Error)
+
+	previousDisplayTokenStat := common.DisplayTokenStatEnabled
+	previousDisplayType := operation_setting.GetGeneralSetting().QuotaDisplayType
+	common.DisplayTokenStatEnabled = true
+	operation_setting.GetGeneralSetting().QuotaDisplayType = operation_setting.QuotaDisplayTypeUSD
+	t.Cleanup(func() {
+		common.DisplayTokenStatEnabled = previousDisplayTokenStat
+		operation_setting.GetGeneralSetting().QuotaDisplayType = previousDisplayType
+	})
+
+	userRemain, err := model.GetUserQuota(user.Id, false)
+	require.NoError(t, err)
+	userUsed, err := model.GetUserUsedQuota(user.Id)
+	require.NoError(t, err)
+
+	for _, testCase := range []struct {
+		name    string
+		tokenID int
+	}{
+		{name: "statistics enabled for a real token", tokenID: token.Id},
+		{name: "oauth context without a token id", tokenID: 0},
+		{name: "token row missing", tokenID: token.Id + 1000},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			subscription := invokeBillingHandler[OpenAISubscriptionResponse](t, GetSubscription, user.Id, testCase.tokenID)
+			assert.Equal(t, "billing_subscription", subscription.Object)
+			usage := invokeBillingHandler[OpenAIUsageResponse](t, GetUsage, user.Id, testCase.tokenID)
+			assert.Equal(t, "list", usage.Object)
+
+			if testCase.tokenID == token.Id {
+				assert.Equal(t, token.ExpiredTime, subscription.AccessUntil)
+				assert.InDelta(t, 100000000.0, subscription.HardLimitUSD, 0.001)
+				assert.InDelta(t, float64(token.UsedQuota)/common.QuotaPerUnit*100, usage.TotalUsage, 0.001)
+				return
+			}
+			// OAuth access tokens and requests whose token row is gone must
+			// report user-level quota instead of panicking on a nil token.
+			assert.Zero(t, subscription.AccessUntil)
+			assert.InDelta(t, float64(userRemain+userUsed)/common.QuotaPerUnit, subscription.HardLimitUSD, 0.001)
+			assert.InDelta(t, float64(userUsed)/common.QuotaPerUnit*100, usage.TotalUsage, 0.001)
+		})
+	}
+}
+
+func invokeBillingHandler[T any](t *testing.T, handler gin.HandlerFunc, userID, tokenID int) T {
+	t.Helper()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/dashboard/billing", nil)
+	c.Set("id", userID)
+	if tokenID > 0 {
+		c.Set("token_id", tokenID)
+	}
+	handler(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response T
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	return response
 }

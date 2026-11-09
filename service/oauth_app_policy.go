@@ -32,7 +32,7 @@ type cachedOAuthApp struct {
 
 var (
 	oauthAppMemoryCacheMu sync.RWMutex
-	oauthAppMemoryCache    = make(map[string]cachedOAuthApp)
+	oauthAppMemoryCache   = make(map[string]cachedOAuthApp)
 )
 
 // LoadOAuthAppByClientID returns the OAuthApp for the given client_id, using
@@ -90,12 +90,13 @@ func LoadOAuthAppByClientID(clientID string) (*model.OAuthApp, error) {
 // clientID is allowed to call the given origin model. When the whitelist is
 // unset (empty) it always returns true — the app has no model restrictions.
 //
-// Load errors are surfaced so callers can decide whether to fail open or fail
-// closed. In the current relay path the caller is expected to fail-open.
-func CheckOAuthAppModelWhitelist(clientID, modelName string) (allowed bool, err error) {
+// The policy is fail-closed: when the app record cannot be loaded the request
+// is rejected (allowed=false) and the load error is returned so callers can
+// distinguish a transient failure from a policy denial.
+func CheckOAuthAppModelWhitelist(clientID, modelName string) (bool, error) {
 	app, err := LoadOAuthAppByClientID(clientID)
 	if err != nil {
-		return true, err // fail-open: DB/cache trouble → allow, log upstream
+		return false, err
 	}
 	return app.AllowsModel(modelName), nil
 }
@@ -148,11 +149,11 @@ func cachedOAuthAppToModel(c cachedOAuthApp) *model.OAuthApp {
 // consistent with the rest of the codebase.
 func serializeCachedOAuthApp(c cachedOAuthApp) string {
 	data, err := common.Marshal(map[string]any{
-		"cid":   c.clientID,
-		"st":    c.status,
-		"wl":    c.aiModelWhitelist,
-		"pr":    c.supabaseProjectRef,
-		"ts":    c.cachedAt.Unix(),
+		"cid": c.clientID,
+		"st":  c.status,
+		"wl":  c.aiModelWhitelist,
+		"pr":  c.supabaseProjectRef,
+		"ts":  c.cachedAt.Unix(),
 	})
 	if err != nil {
 		return ""

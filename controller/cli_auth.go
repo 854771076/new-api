@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -51,6 +52,17 @@ func CreateCLIAuthCode(c *gin.Context) {
 		return
 	case err != nil:
 		writeAccessTokenError(c, http.StatusBadRequest, "ACCESS_TOKEN_SCOPE_INVALID", "Select at least one valid permission.")
+		return
+	}
+	// Issuing a CLI code mints a personal access token outside this browser, so
+	// it needs the same step-up proof as creating the token directly. The proof
+	// is bound to the exact grant the CLI will receive.
+	proofContext, err := common.Marshal(service.AccessTokenGenerateContext{Scopes: scopes, ExpiresAt: 0})
+	if err != nil {
+		writeSecurityOperationError(c, err)
+		return
+	}
+	if middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeAccessTokenGenerate, Context: proofContext}) == nil {
 		return
 	}
 	code := model.GenerateCLIAuthCode()

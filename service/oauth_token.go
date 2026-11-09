@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -300,11 +301,142 @@ func IssueOAuthIDToken(userID int, clientID, nonce string, authTime int64) (stri
 	return signed, expiresAt.Unix(), err
 }
 
+// OAuthConsentCSRFTTL bounds how long the token embedded in the consent page
+// may be submitted with the consent form.
+const OAuthConsentCSRFTTL = 10 * time.Minute
+
+// ErrOAuthConsentCSRFInvalid is returned for a missing, tampered, expired, or
+// session/app-mismatched consent CSRF token.
+var ErrOAuthConsentCSRFInvalid = errors.New("oauth consent csrf token is invalid")
+
+// IssueOAuthConsentCSRFToken binds a consent form submission to the dashboard
+// session and OAuth app that rendered the form. The token is signed with a key
+// derived from common.SessionSecret, so a cross-site attacker cannot mint one
+// for a victim's session.
+func IssueOAuthConsentCSRFToken(sessionID string, appID int) string {
+	return issueOAuthConsentCSRFToken(sessionID, appID, time.Now())
+}
+
+func issueOAuthConsentCSRFToken(sessionID string, appID int, now time.Time) string {
+	payload := fmt.Sprintf("v1:%d:%d:%s", appID, now.Add(OAuthConsentCSRFTTL).Unix(), sessionID)
+	signature := oauthConsentCSRFSignature(payload)
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func oauthConsentCSRFSignature(payload string) []byte {
+	mac := hmac.New(sha256.New, authSigningKey("oauth-consent-csrf"))
+	_, _ = mac.Write([]byte(payload))
+	return mac.Sum(nil)
+}
+
+// ValidateOAuthConsentCSRFToken verifies that token was issued for exactly this
+// dashboard session and OAuth app and has not expired.
+func ValidateOAuthConsentCSRFToken(token, sessionID string, appID int) error {
+	token = strings.TrimSpace(token)
+	if token == "" || sessionID == "" || appID <= 0 || len(token) > 1024 {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	payloadPart, signaturePart, ok := strings.Cut(token, ".")
+	if !ok || strings.Contains(signaturePart, ".") {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadPart)
+	if err != nil {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(signaturePart)
+	if err != nil {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	payload := string(payloadBytes)
+	if !hmac.Equal(signature, oauthConsentCSRFSignature(payload)) {
+		return ErrOAuthConsentCSRFInvalid
+	}
+
+	version, rest, ok := strings.Cut(payload, ":")
+	if !ok || version != "v1" {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	appIDPart, rest, ok := strings.Cut(rest, ":")
+	if !ok {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	expiresAtPart, payloadSessionID, ok := strings.Cut(rest, ":")
+	if !ok || payloadSessionID == "" {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	payloadAppID, err := strconv.Atoi(appIDPart)
+	if err != nil || payloadAppID != appID {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	expiresAt, err := strconv.ParseInt(expiresAtPart, 10, 64)
+	if err != nil || expiresAt <= time.Now().Unix() {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	if payloadSessionID != sessionID {
+		return ErrOAuthConsentCSRFInvalid
+	}
+	return nil
+}
+
+// ParseOAuthIDToken validates an OIDC ID token and returns the user ID and the
+// client ID carried in the audience claim. It checks the RS256 signature,
+// issuer, optional expected audience, and expiry, mirroring
+// ParseOAuthAccessToken's verification options.
+func ParseOAuthIDToken(raw, expectedClientID string) (userID int, clientID string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, "", ErrOAuthTokenInvalid
+	}
+	claims := &idTokenClaims{}
+	options := []jwt.ParserOption{
+		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
+		jwt.WithIssuer(OAuthIssuer()),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(5 * time.Second),
+	}
+	if expectedClientID = strings.TrimSpace(expectedClientID); expectedClientID != "" {
+		options = append(options, jwt.WithAudience(expectedClientID))
+	}
+	parsed, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
+		if token.Method.Alg() != jwt.SigningMethodRS256.Alg() {
+			return nil, fmt.Errorf("%w: unexpected signing method", ErrOAuthTokenInvalid)
+		}
+		key, err := oauthSigningKey()
+		if err != nil {
+			return nil, ErrOAuthTokenInvalid
+		}
+		return &key.PublicKey, nil
+	}, options...)
+	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return 0, "", ErrOAuthTokenExpired
+		}
+		return 0, "", fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
+	}
+	if !parsed.Valid || len(claims.Audience) == 0 {
+		return 0, "", ErrOAuthTokenInvalid
+	}
+	userID, err = strconv.Atoi(claims.Subject)
+	if err != nil || userID <= 0 {
+		return 0, "", ErrOAuthTokenInvalid
+	}
+	clientID = strings.TrimSpace(claims.Audience[0])
+	if clientID == "" {
+		return 0, "", ErrOAuthTokenInvalid
+	}
+	return userID, clientID, nil
+}
+
 // ValidateOAuthAccessToken checks the token signature, whether the owning user
-// account is still active, and whether the token's auth version is current.
-// Returns the user on success.
+// account is still active, whether the issuing OAuth app still exists and is
+// enabled, and whether the token's auth version is current. Returns the user on
+// success. Every check is fail-closed: an unreadable or disabled app
+// invalidates the token immediately, so disabling or deleting an app revokes
+// its unexpired access tokens without waiting for them to expire.
 func ValidateOAuthAccessToken(raw string) (*model.User, string, error) {
-	userID, _, scope, authVersion, err := ParseOAuthAccessToken(raw)
+	userID, clientID, scope, authVersion, err := ParseOAuthAccessToken(raw)
 	if err != nil {
 		return nil, "", err
 	}
@@ -313,6 +445,10 @@ func ValidateOAuthAccessToken(raw string) (*model.User, string, error) {
 		return nil, "", ErrOAuthTokenInvalid
 	}
 	if user.Status != common.UserStatusEnabled || user.AuthVersion != authVersion {
+		return nil, "", ErrOAuthTokenInvalid
+	}
+	app, err := model.GetOAuthAppByClientID(clientID)
+	if err != nil || !app.IsEnabled() {
 		return nil, "", ErrOAuthTokenInvalid
 	}
 	return user, scope, nil

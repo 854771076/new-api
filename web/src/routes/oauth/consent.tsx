@@ -1,33 +1,66 @@
 import { createFileRoute, useSearch } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
+import { z } from 'zod'
 
+import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
 import { OAUTH_SCOPES } from '@/features/oauth-apps/types'
 
-interface ConsentSearch {
-  client_id: string
-  redirect_uri: string
-  scope: string
-  state: string
-  nonce?: string
-  code_challenge: string
-  code_challenge_method: string
+const CONSENT_PARAM_MAX_LENGTH = 2048
+
+function normalizeConsentParam(value: unknown): string {
+  if (typeof value !== 'string') {
+    return ''
+  }
+  if (value.length > CONSENT_PARAM_MAX_LENGTH) {
+    return ''
+  }
+  return value
 }
 
+const consentSearchParams = z.object({
+  client_id: z.preprocess(normalizeConsentParam, z.string()),
+  redirect_uri: z.preprocess(normalizeConsentParam, z.string()),
+  scope: z.preprocess(normalizeConsentParam, z.string()),
+  state: z.preprocess(normalizeConsentParam, z.string()),
+  nonce: z.preprocess(normalizeConsentParam, z.string()),
+  code_challenge: z.preprocess(normalizeConsentParam, z.string()),
+  code_challenge_method: z.preprocess(normalizeConsentParam, z.string()),
+  csrf_token: z.preprocess(normalizeConsentParam, z.string()),
+})
+
 export const Route = createFileRoute('/oauth/consent')({
+  validateSearch: consentSearchParams,
   component: OAuthConsentPage,
 })
 
 function OAuthConsentPage() {
   const { t } = useTranslation()
-  const search = useSearch({ from: '/oauth/consent' }) as unknown as ConsentSearch
+  const search = useSearch({ from: '/oauth/consent' })
 
-  const scopes = (search.scope ?? '').split(' ').filter(Boolean)
+  const missingRequiredParam =
+    search.client_id === '' ||
+    search.redirect_uri === '' ||
+    search.scope === '' ||
+    search.code_challenge === '' ||
+    search.code_challenge_method === '' ||
+    search.csrf_token === ''
+
+  if (missingRequiredParam) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+        <ErrorState
+          title={t('Invalid request')}
+          description={t('Invalid parameters')}
+        />
+      </div>
+    )
+  }
+
+  const scopes = search.scope.split(' ').filter(Boolean)
   const scopeDescriptions = scopes.map(
     (s) => OAUTH_SCOPES.find((o) => o.value === s)?.label ?? s,
   )
-
-  const formAction = '/oauth/authorize'
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
@@ -54,7 +87,7 @@ function OAuthConsentPage() {
           ))}
         </ul>
 
-        <form method="POST" action={formAction}>
+        <form method="POST" action="/oauth/authorize">
           <input type="hidden" name="response_type" value="code" />
           <input type="hidden" name="client_id" value={search.client_id} />
           <input type="hidden" name="redirect_uri" value={search.redirect_uri} />
@@ -67,6 +100,7 @@ function OAuthConsentPage() {
             name="code_challenge_method"
             value={search.code_challenge_method}
           />
+          <input type="hidden" name="csrf_token" value={search.csrf_token} />
           <div className="flex gap-3">
             <Button type="submit" name="consent" value="allow" className="flex-1">
               {t('Allow')}

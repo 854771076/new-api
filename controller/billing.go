@@ -1,11 +1,14 @@
 package controller
 
 import (
+	"errors"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func GetSubscription(c *gin.Context) {
@@ -15,11 +18,24 @@ func GetSubscription(c *gin.Context) {
 	var token *model.Token
 	var expiredTime int64
 	if common.DisplayTokenStatEnabled {
-		tokenId := c.GetInt("token_id")
-		token, err = model.GetTokenById(tokenId)
-		expiredTime = token.ExpiredTime
-		remainQuota = token.RemainQuota
-		usedQuota = token.UsedQuota
+		if tokenId := c.GetInt("token_id"); tokenId > 0 {
+			token, err = model.GetTokenById(tokenId)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				token, err = nil, nil
+			}
+		}
+		if err == nil && token != nil {
+			expiredTime = token.ExpiredTime
+			remainQuota = token.RemainQuota
+			usedQuota = token.UsedQuota
+		} else if err == nil {
+			// OAuth access tokens (token_id == 0) and requests whose token row
+			// no longer exists have no token statistics; report the owning
+			// user's quota instead of dereferencing a nil token.
+			userId := c.GetInt("id")
+			remainQuota, err = model.GetUserQuota(userId, false)
+			usedQuota, err = model.GetUserUsedQuota(userId)
+		}
 	} else {
 		userId := c.GetInt("id")
 		remainQuota, err = model.GetUserQuota(userId, false)
@@ -73,9 +89,17 @@ func GetUsage(c *gin.Context) {
 	var err error
 	var token *model.Token
 	if common.DisplayTokenStatEnabled {
-		tokenId := c.GetInt("token_id")
-		token, err = model.GetTokenById(tokenId)
-		quota = token.UsedQuota
+		if tokenId := c.GetInt("token_id"); tokenId > 0 {
+			token, err = model.GetTokenById(tokenId)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				token, err = nil, nil
+			}
+		}
+		if err == nil && token != nil {
+			quota = token.UsedQuota
+		} else if err == nil {
+			quota, err = model.GetUserUsedQuota(c.GetInt("id"))
+		}
 	} else {
 		userId := c.GetInt("id")
 		quota, err = model.GetUserUsedQuota(userId)

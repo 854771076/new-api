@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# Local environment overrides — never commit secrets
+.env
+.env.local
+.env.*.local
+
+*.log
+supabase/.temp/

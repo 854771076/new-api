@@ -1,6 +1,7 @@
 // src/pages/OutfitGenerate.tsx — AI 换装生成页
 // 选择服装 + 输入形象描述，AI 生成穿搭建议
 import { useEffect, useState } from 'react';
+import { config } from '@/lib/config';
 import { streamChatCompletion } from '@/lib/gateway';
 import { getSupabase } from '@/lib/supabase';
 
@@ -62,13 +63,25 @@ ${selectedOutfits.map((o) => `- ${o.name}（${o.category}）：${o.description}`
       {
         onDelta: (t) => setReply((prev) => prev + t),
         onDone: async (fullText) => {
+          // user_id / client_id 都是 NOT NULL，必须显式写入；PostgREST 的错误
+          // 通过返回值返回而不是抛异常，所以要显式检查。
           try {
-            await getSupabase().from('ai_generations').insert({
-              model: 'gpt-4o-mini',
-              prompt: characterDesc,
-              response: fullText,
-            });
-          } catch { /* ignore */ }
+            const { data: { user } } = await getSupabase().auth.getUser();
+            if (user) {
+              const { error } = await getSupabase().from('ai_generations').insert({
+                user_id: user.id,
+                client_id: config.gatewayClientId,
+                model: 'gpt-4o-mini',
+                prompt: characterDesc,
+                response: fullText,
+              });
+              if (error) {
+                console.error('[OutfitGenerate] failed to save history:', error.message);
+              }
+            }
+          } catch (err) {
+            console.error('[OutfitGenerate] failed to save history:', err);
+          }
           setBusy(false);
         },
         onError: (err) => {

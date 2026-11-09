@@ -216,6 +216,30 @@ func GetUserSessionBySID(sid string) (*UserSession, error) {
 	return &session, nil
 }
 
+// VerifyUserSessionRefreshHash confirms that a presented refresh digest belongs
+// to a live session without rotating it.
+//
+// It reads the authoritative row rather than GetUserSessionCached because the
+// cached snapshot deliberately omits RefreshHash: callers that only need to know
+// who is signed in (for example the OAuth authorize endpoint) must still be able
+// to prove possession of the cookie's secret when Redis is enabled.
+func VerifyUserSessionRefreshHash(sid, presentedHash string) (*UserSession, error) {
+	if sid == "" || presentedHash == "" {
+		return nil, ErrUserSessionInvalid
+	}
+	var session UserSession
+	if err := DB.Where("sid = ?", sid).First(&session).Error; err != nil {
+		return nil, err
+	}
+	if session.Status != UserSessionStatusActive || session.RevokedAt != 0 || session.ExpiresAt <= time.Now().Unix() {
+		return nil, ErrUserSessionInactive
+	}
+	if !hmac.Equal([]byte(session.RefreshHash), []byte(presentedHash)) {
+		return nil, ErrUserSessionRefreshInvalid
+	}
+	return &session, nil
+}
+
 // GetUserSessionCached validates cached state first and falls back to the
 // database on a miss or Redis read failure. A deny tombstone never falls back.
 func GetUserSessionCached(sid string) (*UserSession, error) {

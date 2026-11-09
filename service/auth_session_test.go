@@ -32,7 +32,7 @@ func setupAuthSessionTestDB(t *testing.T) *model.User {
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuthFlow{}, &model.UserAccessToken{}, &model.OAuthAuthorizationCode{}, &model.OAuthRefreshToken{}, &model.Option{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.AuthFlow{}, &model.UserAccessToken{}, &model.OAuthAuthorizationCode{}, &model.OAuthRefreshToken{}, &model.OAuthApp{}, &model.Option{}))
 	model.DB = db
 	common.RedisEnabled = false
 	common.UserSessionActiveLimit = common.DefaultUserSessionActiveLimit
@@ -441,4 +441,35 @@ func TestUserAuthVersionInvalidatesExistingSession(t *testing.T) {
 	assert.ErrorIs(t, err, ErrLoginSessionRevoked)
 	_, err = CreateLoginSessionAtAuthVersion(user.Id, identity.UserAuthVersion, "2fa", "127.0.0.1", "test-agent")
 	assert.ErrorIs(t, err, ErrLoginSessionRevoked, "a pending 2FA flow must not survive an auth-version change")
+}
+
+// TestLoginSessionIdentityFromRefreshToken covers the cookie-only identity path
+// used by the OAuth authorize endpoint, which is a browser navigation that never
+// carries a Bearer token. Redis is enabled here because the cached session
+// snapshot has no refresh digest; verification must still consult the row.
+func TestLoginSessionIdentityFromRefreshToken(t *testing.T) {
+	useTestSessionSecret(t)
+	user := setupAuthSessionTestDB(t)
+	useIndependentAuthSessionRedis(t)
+
+	bundle, err := CreateLoginSession(user.Id, "password", "127.0.0.1", "test-agent")
+	require.NoError(t, err)
+	sid := bundle.Session.SID
+
+	identity, resolvedUser, err := LoginSessionIdentityFromRefreshToken(bundle.RefreshToken)
+	require.NoError(t, err)
+	assert.Equal(t, sid, identity.SessionID)
+	assert.Equal(t, user.Id, identity.UserID)
+	assert.Equal(t, user.Id, resolvedUser.Id)
+
+	_, _, err = LoginSessionIdentityFromRefreshToken(sid + ".not-the-issued-secret")
+	assert.ErrorIs(t, err, ErrRefreshTokenInvalid)
+
+	_, _, err = LoginSessionIdentityFromRefreshToken("malformed")
+	assert.ErrorIs(t, err, ErrRefreshTokenInvalid)
+
+	_, err = model.RevokeUserSession(user.Id, sid, "test")
+	require.NoError(t, err)
+	_, _, err = LoginSessionIdentityFromRefreshToken(bundle.RefreshToken)
+	assert.ErrorIs(t, err, ErrLoginSessionRevoked)
 }

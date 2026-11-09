@@ -1,30 +1,63 @@
-// src/pages/Profile.tsx — 个人中心：用户信息 + 网关额度 + 跳转充值。
+// src/pages/Profile.tsx — 个人中心：用户信息 + 跳转网关查看额度/充值。
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getSupabase } from '@/lib/supabase';
-import { getGatewayQuota } from '@/lib/gateway';
+import { config } from '@/lib/config';
+import { getGatewayRefreshToken } from '@/lib/gatewayAuth';
+
+interface ProfileUser {
+  name?: string;
+  email?: string;
+  gatewayUserId?: string;
+}
 
 export function Profile() {
   const navigate = useNavigate();
-  const [user, setUser] = useState<{ name?: string; email?: string; gatewayUserId?: number } | null>(null);
-  const [quota, setQuota] = useState<{ quota: number; used: number } | null>(null);
+  const [user, setUser] = useState<ProfileUser | null>(null);
 
   useEffect(() => {
-    const sb = getSupabase();
-    sb.auth.getUser().then(async ({ data }) => {
+    getSupabase().auth.getUser().then(({ data }) => {
       if (!data.user) { navigate('/login'); return; }
-      const meta = data.user.app_metadata as Record<string, unknown>;
+
+      // 网关 User.Id 来自 custom provider identity 的 sub；找不到时回退到
+      // identities[0]（邮箱身份可能排在前面，仅作兜底）。
+      const identity =
+        data.user.identities?.find((item) => item.provider === 'custom:newapi') ??
+        data.user.identities?.[0];
+      const identityData = identity?.identity_data as { sub?: string } | undefined;
+      const userMeta = (data.user.user_metadata ?? {}) as Record<string, unknown>;
+
       setUser({
-        name:    (meta.name as string) ?? data.user.user_metadata?.name ?? data.user.email,
-        email:   data.user.email ?? undefined,
-        gatewayUserId: Number(meta.gateway_user_id ?? 0) || undefined,
+        name: (userMeta.name as string | undefined) ?? data.user.email ?? undefined,
+        email: data.user.email ?? undefined,
+        gatewayUserId: identityData?.sub,
       });
-      setQuota(await getGatewayQuota());
     });
   }, [navigate]);
 
   async function handleLogout() {
-    await getSupabase().auth.signOut();
+    const supabase = getSupabase();
+
+    try {
+      // 先把网关 refresh token 撤销（RFC 7009）；公共客户端只带 client_id。
+      // 本地刷新会轮换 refresh token，必须用 gatewayAuth 当前持有的值；
+      // session.provider_refresh_token 可能已被轮换而失效。
+      const refreshToken = await getGatewayRefreshToken();
+      if (refreshToken) {
+        await fetch(`${config.gatewayBaseUrl}/oauth/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            token: refreshToken,
+            client_id: config.gatewayClientId,
+          }).toString(),
+        });
+      }
+    } catch {
+      // 撤销失败不阻断本地登出。
+    }
+
+    await supabase.auth.signOut();
     navigate('/login', { replace: true });
   }
 
@@ -36,18 +69,16 @@ export function Profile() {
       <dl className="divide-y rounded-lg border bg-white">
         <Row k="显示名"          v={user.name} />
         <Row k="邮箱"            v={user.email ?? '—'} />
-        <Row k="网关 User.Id"    v={user.gatewayUserId?.toString() ?? '未同步'} />
-        <Row k="网关额度"
-             v={quota ? `¥${(quota.quota / 10000).toFixed(2)}（已用 ¥${(quota.used / 10000).toFixed(2)}）` : '—'} />
+        <Row k="网关 User.Id"    v={user.gatewayUserId ?? '未同步'} />
       </dl>
 
       <div className="mt-6 space-y-3">
         <a
-          href={import.meta.env.VITE_GATEWAY_BASE_URL + '/app.html#/topup'}
+          href={config.gatewayBaseUrl + '/app.html#/topup'}
           target="_blank" rel="noreferrer"
           className="block text-center py-3 rounded-lg bg-slate-900 text-white hover:bg-slate-700 transition"
         >
-          去网关充值
+          在网关查看额度 / 充值
         </a>
         <button
           onClick={handleLogout}

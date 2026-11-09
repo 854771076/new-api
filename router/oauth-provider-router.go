@@ -17,20 +17,24 @@ func registerOAuthProviderRoutes(router *gin.Engine) {
 
 	// Authorization endpoint: must attempt session authentication but not
 	// require it (unauthenticated users are redirected to sign-in).
+	// TryUserAuth reads the Bearer token used by the dashboard SPA; the cookie
+	// fallback covers the external browser navigation that starts the flow.
 	authorizeGroup := router.Group("/oauth")
-	authorizeGroup.Use(rateLimit, middleware.TryUserAuth())
+	authorizeGroup.Use(rateLimit, middleware.TryUserAuth(), middleware.TryOAuthSessionAuth())
 	{
 		authorizeGroup.GET("/authorize", controller.OAuthAuthorize)
 		authorizeGroup.POST("/authorize", controller.OAuthAuthorizeConsent)
 	}
 
-	// Token, introspect, revoke, and logout endpoints require client
-	// authentication and do not use dashboard session middleware.
+	// Token, introspect, and revoke endpoints require client authentication and
+	// do not use dashboard session middleware. Logout additionally reads the
+	// browser session cookie so it can revoke the caller's own tokens when no
+	// verified id_token_hint is supplied.
 	router.POST("/oauth/token", rateLimit, controller.OAuthToken)
 	router.POST("/oauth/introspect", rateLimit, controller.OAuthIntrospect)
 	router.POST("/oauth/revoke", rateLimit, controller.OAuthRevoke)
-	router.POST("/oauth/logout", rateLimit, controller.OAuthLogout)
-	router.GET("/oauth/logout", rateLimit, controller.OAuthLogout)
+	router.POST("/oauth/logout", rateLimit, middleware.TryOAuthSessionAuth(), controller.OAuthLogout)
+	router.GET("/oauth/logout", rateLimit, middleware.TryOAuthSessionAuth(), controller.OAuthLogout)
 
 	// UserInfo requires a valid access token.
 	router.GET("/oauth/userinfo", rateLimit, controller.OAuthUserInfo)

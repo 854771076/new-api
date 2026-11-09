@@ -1,26 +1,11 @@
 // src/lib/gateway.ts
-// new-api Gateway 客户端封装——AI relay + 额度查询。
-// 核心设计：网关侧 OAuth custom provider 成功登录后，Supabase 会把网关发的
-// access_token 存进 auth.session.access_token（或手动写 app_metadata.gateway_access_token）。
-// 我们把这个 token 当作 Bearer 直接打网关 relay，网关侧 middleware.oauth_token_auth
-// 校验后把 client_id 注入 context，controller.Relay 白名单检查，然后 relay 上游 provider。
+// new-api Gateway 客户端封装——AI relay。
+// 网关 OAuth access_token 由 gatewayAuth 统一持有与自动刷新（public client，
+// 无 client_secret）：网关侧 middleware.oauth_token_auth 校验后把 client_id
+// 注入 context，controller.Relay 白名单检查，然后 relay 上游 provider。
 
 import { config } from './config';
-import { getSupabase } from './supabase';
-
-async function getGatewayAccessToken(): Promise<string | null> {
-  const { data } = await getSupabase().auth.getSession();
-  if (!data?.session) return null;
-
-  // 优先读 AuthCallback 写入的 app_metadata（持久化 + 稳定）
-  const meta = data.user?.app_metadata as Record<string, unknown> | undefined;
-  const fromMeta = (meta?.gateway_access_token as string | undefined) ?? null;
-  if (fromMeta) return fromMeta;
-
-  // Fallback：AuthCallback 还没写（首次登录 + Edge Function 没注册），
-  // 直接用当前 session.provider_token（Supabase Custom OIDC 的网关 access_token）
-  return data.session.provider_token ?? null;
-}
+import { getGatewayAccessToken, refreshGatewayToken } from './gatewayAuth';
 
 export class GatewayError extends Error {
   status: number;
@@ -30,6 +15,38 @@ export class GatewayError extends Error {
     this.status = status;
     this.code = code;
   }
+}
+
+function normalizeError(err: unknown): GatewayError {
+  if (err instanceof GatewayError) return err;
+  return new GatewayError(401, err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * 带 Bearer 的网关 POST。401 时强制刷新一次令牌并重试一次，
+ * 仍失败则把第二个响应原样交给调用方，绝不循环重试。
+ */
+async function postJsonWithAuth(
+  path: string,
+  body: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const send = (token: string) =>
+    fetch(`${config.gatewayBaseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body,
+      signal,
+    });
+
+  const res = await send(await getGatewayAccessToken());
+  if (res.status !== 401) return res;
+
+  await res.body?.cancel().catch(() => undefined);
+  return send(await refreshGatewayToken());
 }
 
 // ===== 1. 对话式 AI（流式） =====
@@ -47,12 +64,6 @@ export async function streamChatCompletion(
   callbacks: ChatStreamCallbacks,
   signal?: AbortSignal,
 ) {
-  const token = await getGatewayAccessToken();
-  if (!token) {
-    callbacks.onError?.(new GatewayError(401, 'gateway OAuth access_token missing — 请先完成 OIDC 登录'));
-    return;
-  }
-
   const body = JSON.stringify({
     model,
     stream: true,
@@ -61,23 +72,17 @@ export async function streamChatCompletion(
 
   let res: Response;
   try {
-    res = await fetch(`${config.gatewayBaseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body,
-      signal,
-    });
+    res = await postJsonWithAuth('/v1/chat/completions', body, signal);
   } catch (e) {
-    callbacks.onError?.(new GatewayError(0, (e as Error).message));
+    callbacks.onError?.(normalizeError(e));
     return;
   }
 
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => '');
-    callbacks.onError?.(new GatewayError(res.status, text || res.statusText));
+    const message =
+      text || (res.status === 401 ? '网关登录已失效，请重新登录' : res.statusText);
+    callbacks.onError?.(new GatewayError(res.status, message));
     return;
   }
 
@@ -112,7 +117,7 @@ export async function streamChatCompletion(
     }
     callbacks.onDone?.(fullText);
   } catch (e) {
-    callbacks.onError?.(new GatewayError(0, (e as Error).message));
+    callbacks.onError?.(normalizeError(e));
   }
 }
 
@@ -121,31 +126,17 @@ export async function chatCompletion(
   model: string,
   messages: ChatMessage[],
 ): Promise<string> {
-  const token = await getGatewayAccessToken();
-  if (!token) throw new GatewayError(401, 'gateway OAuth access_token missing');
+  const res = await postJsonWithAuth(
+    '/v1/chat/completions',
+    JSON.stringify({ model, stream: false, messages }),
+  );
 
-  const res = await fetch(`${config.gatewayBaseUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ model, stream: false, messages }),
-  });
-  if (!res.ok) throw new GatewayError(res.status, await res.text());
+  if (!res.ok) {
+    const text = await res.text();
+    const message = text || (res.status === 401 ? '网关登录已失效，请重新登录' : res.statusText);
+    throw new GatewayError(res.status, message);
+  }
+
   const json = await res.json() as { choices: { message: { content: string } }[] };
   return json.choices[0]?.message?.content ?? '';
-}
-
-// ===== 3. 查询当前用户在网关的额度（用户直充后刷新显示） =====
-export async function getGatewayQuota(): Promise<{ quota: number; used: number; subscription?: number } | null> {
-  // gateway 没有公开的 OAuth 专属 quota 查询端点；用 OAuth access_token 直连
-  // /api/user/amount（需要登录态或 OAuth 放行）。脚手架用 OAuth token 试试，
-  // 失败（401/403）返回 null，UI 降级显示"—"。
-  const token = await getGatewayAccessToken();
-  if (!token) return null;
-  try {
-    const res = await fetch(`${config.gatewayBaseUrl}/api/user/amount`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return null;
-    return (await res.json()).data ?? null;
-  } catch { return null; }
 }

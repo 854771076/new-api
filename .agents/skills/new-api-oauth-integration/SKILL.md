@@ -20,7 +20,11 @@ personal access token; the two credential families are not interchangeable.
 
 1. A new-api instance running and accessible over HTTPS.
 2. Admin access to the new-api dashboard to create an OAuth application.
-3. A backend (BFF) for your system that can securely store `client_secret`.
+3. One of:
+   - a backend (BFF) that can store `client_secret` (confidential client), or
+   - a browser SPA / mini-program that uses PKCE with a **public client**
+     (`public_client = true`, no `client_secret`). Supabase direct mode uses
+     this option.
 
 ## Credential Surfaces
 
@@ -45,13 +49,85 @@ Consequences for the integration:
   endpoint requires a browser session and a security proof, and a PAT cannot
   mint another PAT.
 
+## Step 0: Environment Bootstrap and Self-Check
+
+Before touching any app code, install the toolchain and prove the two sides of
+the trust chain agree. Run every command in the working copy you are building.
+
+### 0.1 Install the CLIs
+
+```bash
+# Bun + Go + Supabase CLI + cloudflared
+winget install Oven-sh.Bun GoLang.Go Supabase.CLI Cloudflare.cloudflared   # Windows
+brew install oven-sh/bun/bun go supabase/tap/supabase cloudflared          # macOS
+
+# new-api admin CLI (bundled with the newapi-cli skill)
+newapi-cli --version
+```
+
+`newapi-cli` is the supported way to create the OAuth app from the terminal:
+
+```bash
+newapi-cli login --server https://your-gateway.com
+newapi-cli oauth-apps create \
+  --name "My App" \
+  --redirect-uri "https://<project>.supabase.co/auth/v1/callback" \
+  --scopes openid,profile,email,api:read,api:write \
+  --public-client
+```
+
+If `oauth-apps` is unavailable in your CLI version, create the app in the
+dashboard instead (Step 1); the result is the same `nac_...` client_id.
+
+### 0.2 Log in and link Supabase
+
+```bash
+supabase login
+supabase link --project-ref <project-ref>
+supabase db push          # applies supabase/migrations (or schema.sql)
+supabase functions deploy user-sync
+```
+
+### 0.3 Run the self-check
+
+The skill ships `scripts/check-env.ps1` (Windows) and `scripts/check-env.sh`
+(macOS/Linux). They verify:
+
+1. `bun`, `go`, `supabase`, `cloudflared`, `newapi-cli` are installed;
+2. `GATEWAY_BASE_URL`, `GATEWAY_PUBLIC_URL`, `SUPABASE_URL`,
+   `SUPABASE_SECRET_KEY` are set;
+3. `discovery.issuer` equals `GATEWAY_PUBLIC_URL`;
+4. the Supabase provider `custom:newapi` exists and its issuer matches;
+5. `GET <supabase>/auth/v1/authorize?provider=custom:newapi` returns a redirect
+   (302/303/307) instead of an error.
+
+```powershell
+$env:GATEWAY_BASE_URL = 'http://localhost:3000'
+$env:GATEWAY_PUBLIC_URL = 'https://your-public-gateway'
+$env:SUPABASE_URL = 'https://<project>.supabase.co'
+$env:SUPABASE_SECRET_KEY = '<secret key>'
+./scripts/check-env.ps1
+```
+
+```bash
+GATEWAY_BASE_URL=http://localhost:3000 \
+GATEWAY_PUBLIC_URL=https://your-public-gateway \
+SUPABASE_URL=https://<project>.supabase.co \
+SUPABASE_SECRET_KEY=... ./scripts/check-env.sh
+```
+
+Any failure exits non-zero and prints the fix. Do not continue to Step 1 until
+the script passes.
+
 ## Step 1: Create an OAuth Application
 
 In the new-api admin dashboard, go to **OAuth Apps** and create an application:
 
 - **Name**: Your application's display name
-- **Redirect URIs**: `https://api.your-app.com/oauth/callback` (your BFF callback)
+- **Redirect URIs**: your callback. Use `https://<project>.supabase.co/auth/v1/callback`
+  for Supabase direct mode, or `https://api.your-app.com/oauth/callback` for a BFF
 - **Post-Logout Redirect URIs**: `https://your-app.com/logout-done`
+- **Public client**: enable for SPAs and mini-programs (PKCE only, no secret)
 - **Scopes**: Select the permissions your app needs:
   - `openid` — required for OIDC (user identity)
   - `profile` — username and display name
@@ -59,8 +135,11 @@ In the new-api admin dashboard, go to **OAuth Apps** and create an application:
   - `api:read` — read-only AI API access (model list, usage)
   - `api:write` — full AI API access (chat, images, etc.)
 
-Save the returned `client_id` and `client_secret`. The secret is shown **only
-once** — store it securely in your backend environment variables.
+A confidential client returns `client_id` and `client_secret`; the secret is
+shown **only once** — store it in backend environment variables. A **public
+client** returns only `client_id`: it never has a secret, authentication relies
+on PKCE, and `code_verifier` stays mandatory. Do not enable public mode for a
+server-side app that can keep a secret.
 
 ## Step 2: Configure Your Backend (BFF)
 
@@ -195,9 +274,15 @@ Browser / Mini-Program
 ### Supabase Custom Provider Setup
 
 Create the provider through the Supabase **Auth admin API** (Dashboard:
-Auth → Sign In / Providers → Custom Providers). The identifier must start with
-`custom:`, and `client_secret` is required, so register the new-api OAuth app as
-a confidential client and store its secret in Supabase:
+Auth → Sign In / Providers → Custom Providers). Two rules are easy to get
+wrong:
+
+- the identifier **must** start with `custom:` — use `custom:newapi`;
+- the gateway app should be a **public client**: Supabase's admin API still
+  requires a non-empty `client_secret` field, so send a throwaway placeholder
+  (for example `ignored-by-public-client`). new-api ignores the secret for public
+  clients and validates PKCE instead. The placeholder is never used as a real
+  credential, and the browser refresh call sends no secret at all.
 
 ```bash
 curl -X POST "https://<project>.supabase.co/auth/v1/admin/custom-providers" \
@@ -205,11 +290,11 @@ curl -X POST "https://<project>.supabase.co/auth/v1/admin/custom-providers" \
   -H "Content-Type: application/json" \
   -d '{
     "provider_type": "oidc",
-    "identifier": "custom:new-api",
+    "identifier": "custom:newapi",
     "name": "new-api",
     "issuer": "https://your-gateway.com",
     "client_id": "nac_xxxxxxxx",
-    "client_secret": "<secret from new-api OAuth App>",
+    "client_secret": "ignored-by-public-client",
     "scopes": ["openid", "profile", "email", "api:read", "api:write"],
     "pkce_enabled": true,
     "email_optional": true
@@ -220,7 +305,8 @@ Notes:
 
 - The Auth service fetches the issuer's discovery document when the provider is
   created, so the gateway must already be publicly reachable over HTTPS and
-  `ServerAddress` must equal the issuer.
+  `ServerAddress` must equal the issuer. `discovery` must list `none` in
+  `token_endpoint_auth_methods_supported` (public client).
 - `supabase config`/`config push` cannot declare custom OIDC providers, and the
   Management API has no provider CRUD. Do not hand-insert into
   `auth.custom_oauth_providers` with a bare identifier — Auth looks up
@@ -228,6 +314,10 @@ Notes:
 - `email_optional: true` is required when the gateway user has no email.
 - Redirect URL registered in the new-api OAuth app:
   `https://<project>.supabase.co/auth/v1/callback`
+- If you must rotate credentials, delete the old provider first
+  (`DELETE /auth/v1/admin/custom-providers/custom:newapi`, identifier with the
+  `custom:` prefix) and create it again; editing the new-api OAuth app from
+  confidential to public does not update Supabase on its own.
 
 **Map claims**: In Supabase Auth settings, ensure `app_metadata` includes
 `gateway_user_id` and `client_id`. The `user-sync` Edge Function handles this on
@@ -235,33 +325,66 @@ first login.
 
 **RLS**: Every business table must have `client_id text not null` and use
 `current_app_client_id()` (security definer function) to isolate rows by
-OAuth app. See `templates/supabase-app-starter/supabase/schema.sql`.
+OAuth app. See `references/web/outfit-demo/supabase/schema.sql`.
 
 ### Client-Side Flow
 
-The browser uses `@supabase/supabase-js` with the custom provider:
+The browser uses `@supabase/supabase-js` with the custom provider. The provider
+id is the full identifier, `custom:newapi`:
 
 ```typescript
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Login redirects to new-api authorize endpoint
+// Login redirects to the gateway authorize endpoint through Supabase.
 await supabase.auth.signInWithOAuth({
-  provider: 'new-api',
+  provider: 'custom:newapi',
   options: { redirectTo: window.location.origin + '/auth/callback' },
 });
 
-// After callback, Supabase session contains the OIDC tokens.
-// The access_token is a new-api OAuth token — use it for AI calls:
+// After the callback, Supabase stores the gateway tokens on the session.
 const { data: { session } } = await supabase.auth.getSession();
-const gatewayToken = session?.provider_token; // new-api OAuth access token
+const gatewayToken = session?.provider_token;          // 1 hour TTL
+const gatewayRefreshToken = session?.provider_refresh_token;
+```
 
+Then, **before** the access token expires, refresh it through the gateway. This
+is mandatory: Supabase does not refresh a custom provider's token.
+
+```typescript
+async function refreshGatewayToken(refreshToken: string): Promise<string> {
+  const res = await fetch(`${GATEWAY_BASE_URL}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: GATEWAY_CLIENT_ID,       // no client_secret for a public client
+      refresh_token: refreshToken,
+    }).toString(),
+  });
+  if (!res.ok) throw new Error(`gateway refresh failed: ${res.status}`);
+  const data = await res.json();
+  // Persist data.refresh_token: every refresh rotates and revokes the old one.
+  return data.access_token;
+}
+```
+
+Keep the token in memory (optionally `sessionStorage` keyed by Supabase user
+id), never in `user_metadata`. The skill ships a complete implementation in
+`references/web/outfit-demo/src/lib/gatewayAuth.ts`:
+
+- parses `exp` from the access token JWT and refreshes when less than 60 s remain;
+- deduplicates concurrent refreshes with one in-flight promise;
+- retries a `401` from the relay exactly once, then surfaces the error;
+- on `invalid_grant`, clears local state and signs the user out.
+
+```typescript
 // Direct AI call (no BFF):
 const res = await fetch('https://your-gateway.com/v1/chat/completions', {
   method: 'POST',
   headers: {
-    Authorization: `Bearer ${gatewayToken}`,
+    Authorization: `Bearer ${await getGatewayAccessToken()}`,
     'Content-Type': 'application/json',
   },
   body: JSON.stringify({ model: 'gpt-4o-mini', messages: [...] }),
@@ -272,8 +395,8 @@ const res = await fetch('https://your-gateway.com/v1/chat/completions', {
 
 | Aspect | BFF Mode | Supabase Direct Mode |
 |--------|----------|----------------------|
-| Token storage | Server-side session / DB | Supabase Auth (encrypted) |
-| Token refresh | BFF handles automatically | Supabase Auth handles |
+| Token storage | Server-side session / DB | Supabase Auth session + app memory |
+| Token refresh | BFF handles automatically | **Your app refreshes** `provider_refresh_token` via `/oauth/token` |
 | AI calls | Proxied through BFF | Browser direct to gateway |
 | client_secret | Required in BFF env | Not needed (PKCE public client) |
 | Data isolation | Application-level | PostgreSQL RLS + client_id |
@@ -281,22 +404,27 @@ const res = await fetch('https://your-gateway.com/v1/chat/completions', {
 
 ### Starter Template
 
-Use `templates/supabase-app-starter/` as the scaffold. It includes:
+Use `references/web/outfit-demo/` as the scaffold (the starter plus two business
+pages). It includes:
 - Pre-configured Supabase client with OIDC login
-- `gateway.ts` for direct AI calls (streaming + non-streaming)
+- `src/lib/gatewayAuth.ts` for gateway token refresh
+- `src/lib/gateway.ts` for direct AI calls (streaming + non-streaming, 401 retry)
 - `schema.sql` with RLS, `current_app_client_id()`, and seed data
 - `user-sync` Edge Function for profile sync
 
-Copy the template, fill `.env.local`, and deploy:
+Copy it, fill `.env.local`, and deploy:
 
 ```bash
-cp -r templates/supabase-app-starter my-app
+cp -r references/web/outfit-demo my-app
 cd my-app
 cp .env.example .env.local
 # Edit .env.local: SUPABASE_URL, SUPABASE_ANON_KEY, GATEWAY_BASE_URL, GATEWAY_CLIENT_ID
 bun install
 bun run dev
 ```
+
+The same scaffold is kept in the repository at `templates/supabase-app-starter/`
+without the demo business pages and without pre-filled project values.
 
 ### Reference App: outfit-demo
 
@@ -371,12 +499,19 @@ tokens use a separate catalog (`profile:read`, `profile:write`,
 
 ## Security Checklist
 
-- [ ] `client_secret` is stored only in backend environment variables, never in frontend code.
-- [ ] `redirect_uri` points to your **backend** (BFF), not the frontend.
-- [ ] PKCE `code_verifier` is stored server-side and matched on callback.
+- [ ] Confidential clients keep `client_secret` only in backend environment
+      variables; public clients have no secret and rely on PKCE.
+- [ ] Public-client mode is enabled only for apps that cannot keep a secret
+      (SPA, mini-program); server-side apps stay confidential.
+- [ ] `redirect_uri` exactly matches a registered URI (BFF callback or
+      `https://<project>.supabase.co/auth/v1/callback`).
+- [ ] PKCE `code_verifier` is matched on callback; a public client without it is
+      rejected.
 - [ ] `state` parameter is validated to prevent CSRF.
-- [ ] Access/refresh tokens are stored encrypted in your database.
-- [ ] AI API calls go through your BFF (frontend never holds new-api tokens).
+- [ ] Gateway tokens are kept in memory (optionally `sessionStorage`) and never
+      written to `user_metadata` or logged.
+- [ ] Refreshed refresh tokens replace the old value; `invalid_grant` ends the
+      session instead of retrying.
 - [ ] HTTPS is enabled in production (required for `SameSite=None` cookies).
 - [ ] OAuth tokens are used only for `/v1/*` and `/oauth/userinfo`; quota and
       payment calls use a dashboard session or a scoped PAT.
@@ -392,9 +527,53 @@ tokens use a separate catalog (`profile:read`, `profile:write`,
 - **Refresh token**: Opaque, 30 day TTL, rotated on each use.
 - **Authorization code**: Single-use, 60 second TTL.
 
+### The provider token is not refreshed for you
+
+Supabase refreshes its own session, but it does **not** refresh a custom
+provider's `provider_token`. After one hour every direct AI call would fail with
+`401`. The application must refresh it:
+
+1. on login, read `session.provider_token` and `session.provider_refresh_token`;
+2. before each gateway call, check the access token's `exp`; refresh when less
+   than 60 s remain;
+3. `POST <gateway>/oauth/token` with `grant_type=refresh_token`, `client_id`, and
+   `refresh_token` (public client: no `client_secret`);
+4. replace the stored refresh token with the rotated value from the response;
+5. on `invalid_grant`, clear local state and send the user through login again.
+
+Refresh is also the recovery path for a relay `401`: retry once with a fresh
+token, never loop. `references/web/outfit-demo/src/lib/gatewayAuth.ts` is the
+reference implementation.
+
 When the user logs out of new-api or changes their password, all their tokens
-are immediately invalidated. Your BFF should handle `401` responses by
-redirecting the user to re-authenticate.
+are immediately invalidated. Handle `401` by re-authenticating; do not keep
+retrying with the same token.
+
+## Long-Running Work and Supabase Limits
+
+Supabase request and function limits change the architecture of any job that
+takes more than a few seconds.
+
+| Surface | Limit | Consequence |
+|---------|-------|-------------|
+| PostgREST as `anon` | 3 s statement timeout | Guest reads must stay trivial |
+| PostgREST as `authenticated` | 8 s statement timeout | No large synchronous aggregation in the browser |
+| PostgREST as `service_role` | No statement timeout | Long SQL only from trusted server code |
+| Edge Function wall clock | 150 s (Free) / 400 s (paid) | A function cannot outlive these bounds |
+| Edge Function CPU time | 2 s | CPU-heavy loops fail even inside the wall clock |
+| Edge Function idle before response | 150 s | No silent work while the client waits |
+
+Recommended patterns:
+
+- **Short work (seconds)**: call the gateway or PostgREST directly from the
+  browser. Keep the OAuth token refresh in the request path.
+- **Medium work (tens of seconds)**: an Edge Function, under both the wall clock
+  and CPU limits. Stream or return a job id.
+- **Long work (minutes+)**: do not hold the HTTP request. Insert a job row,
+  return its id immediately, run the work outside the request (scheduled
+  function / external worker), and let the client poll or subscribe. A gateway
+  AI stream longer than the function limit must be consumed by the client or a
+  worker, not buffered inside an Edge Function.
 
 ## Integrating the User System
 

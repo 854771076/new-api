@@ -6,6 +6,7 @@ export interface OAuthApp {
   post_logout_redirect_uris: string[]
   scopes: string[]
   status: number
+  public_client: boolean
   created_by: number
   created_at: number
   updated_at: number
@@ -16,6 +17,7 @@ export interface CreateOAuthAppRequest {
   redirect_uris: string[]
   post_logout_redirect_uris: string[]
   scopes: string[]
+  public_client: boolean
 }
 
 export interface CreateOAuthAppResponse {

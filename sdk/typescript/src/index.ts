@@ -51,6 +51,8 @@ export interface AuthorizeUrlOptions {
   scope: string;
   /** Opaque value to prevent CSRF; returned in the callback */
   state?: string;
+  /** OIDC nonce, echoed into the ID token when `openid` is requested */
+  nonce?: string;
   /** PKCE code challenge (S256) */
   codeChallenge: string;
   /** PKCE method, must be "S256" */
@@ -62,7 +64,8 @@ export interface TokenResponse {
   token_type: "Bearer";
   expires_in: number;
   refresh_token: string;
-  id_token: string;
+  /** Only returned when the granted scope includes `openid`. */
+  id_token?: string;
   scope: string;
 }
 
@@ -95,11 +98,13 @@ export interface DiscoveryDocument {
   revocation_endpoint: string;
   scopes_supported: string[];
   response_types_supported: string[];
+  response_modes_supported: string[];
   grant_types_supported: string[];
   subject_types_supported: string[];
   id_token_signing_alg_values_supported: string[];
   token_endpoint_auth_methods_supported: string[];
   code_challenge_methods_supported: string[];
+  claims_supported: string[];
 }
 
 /**
@@ -123,6 +128,9 @@ export function createOAuthClient(config: OAuthClientConfig) {
     });
     if (options.state) {
       params.set("state", options.state);
+    }
+    if (options.nonce) {
+      params.set("nonce", options.nonce);
     }
     return `${baseUrl}/oauth/authorize?${params.toString()}`;
   }

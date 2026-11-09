@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useSearch } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
@@ -27,6 +27,7 @@ import { CopyButton } from '@/components/copy-button'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
 import { PermissionMatrix } from '@/components/permission-matrix'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Form,
@@ -37,6 +38,10 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+} from '@/features/auth/secure-verification'
 import { permissionMatrixToScopes } from '@/lib/admin-permissions'
 import { handleServerError } from '@/lib/handle-server-error'
 
@@ -46,6 +51,7 @@ import { issueCLIAuthCode, type CLIAuthCode } from './api'
 import {
   cliAuthorizeFormSchema,
   defaultPermissions,
+  summarizeGrant,
   type CLIAuthorizeFormValues,
 } from './lib/form'
 
@@ -64,6 +70,18 @@ export function CLIAuthorizePage() {
     resolver: zodResolver(cliAuthorizeFormSchema),
     defaultValues: { name: defaultName, permissions: {} },
   })
+  const permissions = form.watch('permissions')
+  const verification = useSecureVerification()
+  const requestVerification = verification.requestVerification
+  const operation = useRef<AbortController | null>(null)
+
+  useEffect(
+    () => () => {
+      operation.current?.abort()
+      operation.current = null
+    },
+    []
+  )
 
   // Preselect the recommended grant once the catalog arrives, without
   // overwriting choices the user has already made.
@@ -78,16 +96,38 @@ export function CLIAuthorizePage() {
   }, [catalog.data, form])
 
   const issue = useMutation({
-    mutationFn: issueCLIAuthCode,
-    onSuccess: (code) => setIssued(code),
+    mutationFn: async (values: CLIAuthorizeFormValues) => {
+      const input = {
+        name: values.name.trim(),
+        scopes: permissionMatrixToScopes(values.permissions),
+      }
+      const controller = new AbortController()
+      operation.current = controller
+      try {
+        // A proof is single use and bound to these exact scopes, so every
+        // attempt starts a new verification. Cancelling it aborts the issue.
+        const proof = await requestVerification({
+          scope: 'access_token.generate',
+          context: { scopes: input.scopes, expires_at: 0 },
+        })
+        if (!proof) return null
+        return await issueCLIAuthCode(
+          input,
+          proof.proof_token,
+          controller.signal
+        )
+      } finally {
+        if (operation.current === controller) operation.current = null
+      }
+    },
+    onSuccess: (code) => {
+      if (code) setIssued(code)
+    },
     onError: (error) => handleServerError(error),
   })
 
   const submit = (values: CLIAuthorizeFormValues) => {
-    issue.mutate({
-      name: values.name.trim(),
-      scopes: permissionMatrixToScopes(values.permissions),
-    })
+    issue.mutate(values)
   }
 
   const startOver = () => {
@@ -100,6 +140,10 @@ export function CLIAuthorizePage() {
     return <ErrorState title={t('Failed to load access tokens')} />
   }
   const groups = accessTokenPermissionGroups(catalog.data)
+  const summary = summarizeGrant(
+    catalog.data,
+    permissionMatrixToScopes(permissions)
+  )
 
   return (
     <div className='mx-auto w-full max-w-2xl p-4 sm:p-6'>
@@ -163,6 +207,29 @@ export function CLIAuthorizePage() {
                 </FormItem>
               )}
             />
+            <div className='bg-muted/40 space-y-2 rounded-md border p-3 text-sm'>
+              <p className='font-medium'>{t('Selected permissions')}</p>
+              {summary.items.length === 0 ? (
+                <p className='text-muted-foreground'>
+                  {t('No permissions selected')}
+                </p>
+              ) : (
+                <div className='flex flex-wrap gap-1.5'>
+                  {summary.items.map((item) => (
+                    <Badge key={item.scope} variant='secondary'>
+                      {t(item.resourceLabelKey)} / {t(item.actionLabelKey)}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              {summary.highRiskCount > 0 && (
+                <p className='text-warning'>
+                  {t('This grant includes {{count}} high-risk permissions.', {
+                    count: summary.highRiskCount,
+                  })}
+                </p>
+              )}
+            </div>
             <Button type='submit' disabled={issue.isPending}>
               {issue.isPending
                 ? t('Generating...')
@@ -171,6 +238,7 @@ export function CLIAuthorizePage() {
           </form>
         </Form>
       )}
+      <SecureVerificationDialog {...verification.dialogProps} />
     </div>
   )
 }

@@ -1,0 +1,30 @@
+# Checklist
+
+- [x] 同意页 POST 对每个 scope 执行格式与 `ScopeAllowed` 校验，篡改 scope 被拒
+- [x] 同意 POST 校验会话绑定 CSRF token 与 Origin / Sec-Fetch-Site
+- [x] 会话 Cookie SameSite 策略不再让跨站 POST 携带凭据，且跨站顶层 GET 授权流程仍可用
+- [x] `/oauth/logout` 仅对已验签且 `iss/aud/exp` 合法的 `id_token_hint` 执行吊销
+- [x] `CreateCLIAuthCode` 要求 `VerificationScopeAccessTokenGenerate`，前端授权页走安全验证
+- [x] OAuth 模型白名单覆盖 RelayTask、视频与任务插件入口
+- [x] access token 校验要求 app 存在且启用；禁用/删除后缓存与令牌即时失效
+- [x] `user_profiles` 客户端不可写，`gateway_user_id` 仅 service_role 可写
+- [x] `seed_outfit_demo` 仅 service_role 可执行，`app_config` 为单行
+- [x] `user-sync` 只信任 Authorization JWT，伪造 body 身份被拒
+- [x] 模板 `ai_generations` 插入包含 `user_id`/`client_id` 且检查错误
+- [x] 模板额度查询端点/凭据与后端一致，openapi/SDK 契约一致，`.env.local` 被忽略
+- [x] CLI 非 loopback 强制 HTTPS，拒绝 scheme 降级与跨 origin 重定向
+- [x] CLI 2xx 非 JSON 响应按错误返回，响应体超限报错
+- [x] CLI `--quota` 冲突与 `--expires-in <= 0` 返回 `usage_error`
+- [x] CLI `--pretty` 保留完整列、原始数字字面量与 CJK/emoji 对齐
+- [x] CLI 配置拒绝符号链接、收敛权限并原子写入
+- [x] `oauth-apps` 校验 `success` 并提供错误态；`consent` 路由参数有 Zod 校验
+- [x] CLI 授权默认 scope 不含高危写权限，提交前展示最终 scope 摘要
+- [x] refresh token 轮换原子且重放时吊销整条链
+- [x] OAuth 路径 billing 端点不再因 `token_id=0` panic
+- [x] `POST /api/token/` 响应带 `Cache-Control: no-store`
+- [x] `docker-compose.yml` 与 workflow 恢复官方镜像与 cosign 签名
+- [x] 7 个 locale 的项目标识键恢复为明文 `newapi`
+- [x] `go build ./...`、相关测试、`gofmt -l`、`go vet` 全部通过
+- [x] refresh/授权码 DB 行为在 SQLite、MySQL、PostgreSQL 验证通过（含并发重放）
+- [x] 前端 `bun run build` 通过，CLI 实机回测通过
+- [x] 负向端到端用例（scope 提权、跨站同意、伪造 logout、禁用应用、伪造 user-sync）全部被拒

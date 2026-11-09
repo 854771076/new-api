@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -51,13 +52,13 @@ func OAuthUserInfo(c *gin.Context) {
 // OAuthIntrospect handles POST /oauth/introspect (RFC 7662).
 // Requires client authentication. Returns the active state of the token.
 func OAuthIntrospect(c *gin.Context) {
-	clientID, clientSecret, ok := authenticateOAuthClient(c)
-	if !ok {
+	clientID, clientSecret := oauthClientCredentials(c)
+	if clientID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient, "error_description": "client authentication required"})
 		return
 	}
 	app, err := model.GetOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() || !model.VerifyOAuthAppSecret(app, clientSecret) {
+	if err != nil || !oauthClientAuthenticated(app, clientSecret) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient, "error_description": "client authentication failed"})
 		return
 	}
@@ -118,13 +119,13 @@ func introspectToken(app *model.OAuthApp, token, typeHint string) gin.H {
 // OAuthRevoke handles POST /oauth/revoke (RFC 7009).
 // Requires client authentication. Revokes a refresh token.
 func OAuthRevoke(c *gin.Context) {
-	clientID, clientSecret, ok := authenticateOAuthClient(c)
-	if !ok {
+	clientID, clientSecret := oauthClientCredentials(c)
+	if clientID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient})
 		return
 	}
 	app, err := model.GetOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() || !model.VerifyOAuthAppSecret(app, clientSecret) {
+	if err != nil || !oauthClientAuthenticated(app, clientSecret) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient})
 		return
 	}
@@ -155,48 +156,40 @@ func OAuthRevoke(c *gin.Context) {
 // Revokes all refresh tokens for the user within the requesting app and
 // redirects to the post-logout redirect URI if provided and whitelisted.
 func OAuthLogout(c *gin.Context) {
-	var clientID, clientSecret string
-	var ok bool
-
-	// Logout can be initiated with an id_token_hint (no client auth needed) or
-	// with explicit client credentials.
 	idTokenHint := strings.TrimSpace(c.Query("id_token_hint"))
 	if idTokenHint == "" {
 		idTokenHint = strings.TrimSpace(c.PostForm("id_token_hint"))
 	}
 
-	if idTokenHint != "" {
-		// Extract client_id from the id_token claims without verification
-		// (logout is advisory; revocation is scoped to the app).
-		clientID = extractJWTClientID(idTokenHint)
-	} else {
-		clientID, clientSecret, ok = authenticateOAuthClient(c)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient})
-			return
+	var app *model.OAuthApp
+	userID := 0
+
+	// A verified id_token_hint identifies both the client and the user without
+	// client credentials. An invalid or expired hint is ignored entirely.
+	hintUserID, hintClientID, hintErr := service.ParseOAuthIDToken(idTokenHint, "")
+	if idTokenHint != "" && hintErr == nil {
+		if resolved, err := model.GetOAuthAppByClientID(hintClientID); err == nil {
+			app = resolved
+			userID = hintUserID
 		}
 	}
 
-	app, err := model.GetOAuthAppByClientID(clientID)
-	if err != nil {
-		c.String(http.StatusBadRequest, "invalid client")
-		return
-	}
-	if clientSecret != "" && !model.VerifyOAuthAppSecret(app, clientSecret) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": oauthErrInvalidClient})
-		return
-	}
-
-	// Determine the user from the access token or id_token.
-	userID := extractJWTSubject(c.Query("access_token"))
-	if userID <= 0 {
-		userID = extractJWTSubject(c.PostForm("access_token"))
-	}
-	if userID <= 0 && idTokenHint != "" {
-		userID = extractJWTSubject(idTokenHint)
+	if app == nil {
+		// Without a trusted hint, revocation additionally requires client
+		// authentication and the browser session that owns the tokens.
+		clientID, clientSecret := oauthClientCredentials(c)
+		if clientID != "" && clientSecret != "" {
+			resolved, err := model.GetOAuthAppByClientID(clientID)
+			if err == nil && model.VerifyOAuthAppSecret(resolved, clientSecret) {
+				app = resolved
+				if identity, ok := middleware.GetSessionAuthIdentity(c); ok {
+					userID = identity.UserID
+				}
+			}
+		}
 	}
 
-	if userID > 0 {
+	if app != nil && userID > 0 {
 		_ = model.RevokeOAuthRefreshTokensByAppAndUser(app.Id, userID)
 		recordOAuthAudit(c, userID, oauthAuditActorRole(userID), "oauth.logout", true, http.StatusOK, map[string]any{
 			"client_id": app.ClientID,
@@ -208,7 +201,7 @@ func OAuthLogout(c *gin.Context) {
 	if postLogoutURI == "" {
 		postLogoutURI = strings.TrimSpace(c.PostForm("post_logout_redirect_uri"))
 	}
-	if postLogoutURI != "" && app.HasPostLogoutRedirectURI(postLogoutURI) {
+	if app != nil && postLogoutURI != "" && app.HasPostLogoutRedirectURI(postLogoutURI) {
 		state := c.Query("state")
 		sep := "?"
 		if strings.Contains(postLogoutURI, "?") {

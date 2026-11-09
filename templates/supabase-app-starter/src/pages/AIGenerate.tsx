@@ -1,6 +1,7 @@
 // src/pages/AIGenerate.tsx — AI 流式生成页。
 // 直接直连网关 relay；Supabase 侧只用做 RLS 隔离和历史存储（可选）。
 import { useState } from 'react';
+import { config } from '@/lib/config';
 import { streamChatCompletion } from '@/lib/gateway';
 import { getSupabase } from '@/lib/supabase';
 
@@ -24,13 +25,25 @@ export function AIGenerate() {
       {
         onDelta: (t) => setReply((prev) => prev + t),
         onDone: async (fullText) => {
-          // 可选：把生成存到 ai_generations 表（RLS 自动隔离）
+          // 可选：把生成存到 ai_generations 表（RLS 自动隔离）。
+          // user_id / client_id 都是 NOT NULL，必须显式写入。
           try {
-            await getSupabase().from('ai_generations').insert({
-              model, prompt, response: fullText,
-              // client_id 由 RLS 的 current_app_client_id() 注入
-            });
-          } catch { /* 历史存储不阻塞主流程 */ }
+            const { data: { user } } = await getSupabase().auth.getUser();
+            if (user) {
+              const { error } = await getSupabase().from('ai_generations').insert({
+                user_id: user.id,
+                client_id: config.gatewayClientId,
+                model,
+                prompt,
+                response: fullText,
+              });
+              if (error) {
+                console.error('[AIGenerate] failed to save history:', error.message);
+              }
+            }
+          } catch (err) {
+            console.error('[AIGenerate] failed to save history:', err);
+          }
           setBusy(false);
         },
         onError: (err) => {

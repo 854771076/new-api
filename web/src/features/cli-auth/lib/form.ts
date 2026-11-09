@@ -26,23 +26,42 @@ import {
 
 import type { AccessTokenCatalog } from '../../security/api'
 
+// CLI_HIGH_RISK_SCOPES are administrative writes that can change other users,
+// billing, or system-wide behavior. They are never preselected; the user must
+// opt in explicitly.
+export const CLI_HIGH_RISK_SCOPES = [
+  'user:write',
+  'option:write',
+  'model:write',
+  'deployment:write',
+  'channel:operate',
+  'channel:write',
+  'channel:sensitive_write',
+  'billing:write',
+  'redemption:write',
+  'group:write',
+  'plugin:write',
+  'ops:write',
+  'task_plugin:bind',
+  'account_security:write',
+  'wallet:write',
+]
+
 // CLI_RECOMMENDED_SCOPES is the grant the CLI needs for day-to-day
-// administration; the user can widen or narrow it before confirming.
+// administration. It stays read-only apart from API key management, which is
+// the CLI's basic operation; the user can widen or narrow it before
+// confirming.
 export const CLI_RECOMMENDED_SCOPES = [
   'profile:read',
   'usage:read',
   'api_key:read',
   'api_key:write',
   'user:read',
-  'user:write',
   'channel:read',
   'log:read',
   'model:read',
-  'model:write',
   'deployment:read',
-  'deployment:write',
   'option:read',
-  'option:write',
 ]
 
 export const cliAuthorizeFormSchema = z
@@ -82,13 +101,54 @@ export function grantableScopes(catalog: AccessTokenCatalog): Set<string> {
 }
 
 // defaultPermissions preselects the recommended grant the user's role can
-// actually grant; scopes outside the catalog stay unchecked.
+// actually grant, minus high-risk writes. Scopes outside the catalog stay
+// unchecked.
 export function defaultPermissions(
   catalog: AccessTokenCatalog
 ): AdminPermissionMatrix {
   const available = grantableScopes(catalog)
-  const recommended = CLI_RECOMMENDED_SCOPES.filter((scope) =>
-    available.has(scope)
+  const recommended = CLI_RECOMMENDED_SCOPES.filter(
+    (scope) => available.has(scope) && !CLI_HIGH_RISK_SCOPES.includes(scope)
   )
   return scopesToPermissionMatrix(recommended)
+}
+
+export interface CLIGrantSummaryItem {
+  scope: string
+  resourceLabelKey: string
+  actionLabelKey: string
+}
+
+export interface CLIGrantSummary {
+  items: CLIGrantSummaryItem[]
+  highRiskCount: number
+}
+
+// summarizeGrant resolves the selected scopes to the catalog labels shown to
+// the user before they confirm, and counts the high-risk ones still included.
+export function summarizeGrant(
+  catalog: AccessTokenCatalog,
+  scopes: readonly string[]
+): CLIGrantSummary {
+  const labels = new Map<string, Omit<CLIGrantSummaryItem, 'scope'>>()
+  for (const group of catalog.groups) {
+    for (const resource of group.resources) {
+      for (const action of resource.actions) {
+        labels.set(`${resource.resource}:${action.action}`, {
+          resourceLabelKey: resource.label_key,
+          actionLabelKey: action.label_key,
+        })
+      }
+    }
+  }
+  const items = scopes.flatMap((scope) => {
+    const label = labels.get(scope)
+    return label ? [{ scope, ...label }] : []
+  })
+  return {
+    items,
+    highRiskCount: scopes.filter((scope) =>
+      CLI_HIGH_RISK_SCOPES.includes(scope)
+    ).length,
+  }
 }

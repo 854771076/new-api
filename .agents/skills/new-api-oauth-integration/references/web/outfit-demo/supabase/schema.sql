@@ -14,16 +14,14 @@
 --    再创建。本文件按此顺序组织。
 -- ============================================================================
 
--- ---------------- 扩展 ----------------
-create extension if not exists pgcrypto with schema extensions;
-
 -- ============================================================================
 -- 第一部分：脚手架通用底座
 -- ============================================================================
 
 -- App 配置（每个 Supabase 项目共用一个 client_id）
+-- 单行表：id 固定为 1，避免 `limit 1` 取到不确定的行。
 create table if not exists public.app_config (
-  id           uuid primary key default gen_random_uuid(),
+  id           int primary key default 1 check (id = 1),
   client_id    text not null,   -- 网关 OAuthApp.client_id
   app_name     text,
   created_at   timestamptz not null default now()
@@ -138,15 +136,21 @@ create index if not exists idx_character_profiles_user
 -- 第三部分：安全函数（必须在所有表之后创建，Postgres 会解析函数体）
 -- ============================================================================
 
--- 当前 App 的 client_id：从 app_config 里取。多 App 共用同一 Supabase 项目时，
--- 改 app_config.client_id 即可让 RLS 切换隔离范围，不用改策略本身。
+-- 当前 App 的 client_id：从 app_config 的唯一行（id = 1）里取。多 App 共用
+-- 同一 Supabase 项目时，改 app_config.client_id 即可让 RLS 切换隔离范围，
+-- 不用改策略本身。
 create or replace function public.current_app_client_id()
 returns text
 language sql stable
-security definer set search_path = public
+security definer set search_path = public, pg_temp
 as $$
-  select client_id from public.app_config limit 1;
+  select client_id from public.app_config where id = 1;
 $$;
+
+-- 该函数只服务于 RLS：匿名用户无权调用，已登录用户与 service_role 可调用。
+revoke execute on function public.current_app_client_id() from public;
+revoke execute on function public.current_app_client_id() from anon;
+grant execute on function public.current_app_client_id() to authenticated, service_role;
 
 -- ============================================================================
 -- 第四部分：启用 RLS
@@ -176,12 +180,17 @@ create policy "app_config editable only by service_role"
   on public.app_config for all
   using (auth.role() = 'service_role');
 
--- user_profiles: 自己行的 CRUD
+-- user_profiles: 客户端只读自己的行。写入（尤其 gateway_user_id）只能由
+-- service_role / Edge Function 完成，防止用户改写自己的网关身份映射。
 drop policy if exists "user_profiles own row" on public.user_profiles;
-create policy "user_profiles own row"
-  on public.user_profiles for all
-  using (id = auth.uid() and client_id = public.current_app_client_id())
-  with check (id = auth.uid() and client_id = public.current_app_client_id());
+drop policy if exists "user_profiles own row read" on public.user_profiles;
+create policy "user_profiles own row read"
+  on public.user_profiles for select
+  using (id = auth.uid() and client_id = public.current_app_client_id());
+
+-- 表级授权兜底：撤销客户端所有写权限，只保留 SELECT。
+revoke all on public.user_profiles from anon, authenticated;
+grant select on public.user_profiles to authenticated;
 
 -- ai_generations: 自己行的 CRUD
 drop policy if exists "ai_generations own row" on public.ai_generations;
@@ -221,18 +230,22 @@ create policy "character_profiles own row"
 -- 第六部分：Mock Seed 函数（最后创建，因为引用所有业务表）
 -- ============================================================================
 
+-- 仅 service_role 可执行的演示数据初始化（SQL Editor 以 postgres 身份运行，
+-- 或由运维显式调用）。anon / authenticated 直接调用会被拒绝。
 create or replace function public.seed_outfit_demo(app_client_id text)
 returns table(official_count int)
 language plpgsql
-security definer set search_path = public
+security definer set search_path = public, pg_temp
 as $$
 declare
   v_official int := 0;
 begin
-  -- app_config
-  insert into public.app_config (client_id, app_name)
-  values (app_client_id, 'outfit-demo')
-  on conflict (id) do update set client_id = excluded.client_id;
+  -- app_config：单行表，固定写 id = 1
+  insert into public.app_config (id, client_id, app_name)
+  values (1, app_client_id, 'outfit-demo')
+  on conflict (id) do update
+    set client_id = excluded.client_id,
+        app_name  = excluded.app_name;
 
   -- 官方服装库（8 件）
   insert into public.official_outfits
@@ -254,3 +267,8 @@ begin
   return next;
 end;
 $$;
+
+-- seed 函数可以写 app_config 和官方数据，必须只允许 service_role 执行。
+revoke all on function public.seed_outfit_demo(text) from public;
+revoke all on function public.seed_outfit_demo(text) from anon, authenticated;
+grant execute on function public.seed_outfit_demo(text) to service_role;

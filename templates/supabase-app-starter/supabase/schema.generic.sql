@@ -7,14 +7,12 @@
 -- 保证同一 Supabase 项目可以被多个 App 复用而不互相穿透。
 -- ============================================================================
 
--- ---------------- 扩展 ----------------
-create extension if not exists pgcrypto with schema extensions;
-
 -- ---------------- 通用 App 配置表 ----------------
 -- 每个 App 在网关侧已有独立 client_id；在 Supabase 侧 client_id 只是业务表的
 -- 普通字段，RLS 强制把所有写入/读取限制在一个固定 client_id 上。
+-- 单行表：id 固定为 1，避免 `limit 1` 取到不确定的行。
 create table if not exists public.app_config (
-  id           uuid primary key default gen_random_uuid(),
+  id           int primary key default 1 check (id = 1),
   client_id    text not null,            -- 网关 OAuthApp.client_id（如 nac_xxxxx）
   app_name     text,
   created_at   timestamptz not null default now()
@@ -71,10 +69,15 @@ alter table public.ai_generations    enable row level security;
 create or replace function public.current_app_client_id()
 returns text
 language sql stable
-security definer set search_path = public
+security definer set search_path = public, pg_temp
 as $$
-  select client_id from public.app_config limit 1;
+  select client_id from public.app_config where id = 1;
 $$;
+
+-- 该函数只服务于 RLS：匿名用户无权调用，已登录用户与 service_role 可调用。
+revoke execute on function public.current_app_client_id() from public;
+revoke execute on function public.current_app_client_id() from anon;
+grant execute on function public.current_app_client_id() to authenticated, service_role;
 
 -- app_config：任意已登录用户可读；auth 已通过 OIDC 校验过身份。
 drop policy if exists "app_config readable by all authenticated users"
@@ -89,7 +92,8 @@ create policy "app_config only editable by service role"
   on public.app_config for all
   using (auth.role() = 'service_role');
 
--- user_profiles：每个用户只看/改自己的 profile；client_id 强制匹配。
+-- user_profiles：客户端只读自己的行。写入（尤其 gateway_user_id）只能由
+-- service_role / Edge Function 完成，防止用户改写自己的网关身份映射。
 drop policy if exists "user_profiles own row read"
   on public.user_profiles;
 create policy "user_profiles own row read"
@@ -98,10 +102,11 @@ create policy "user_profiles own row read"
 
 drop policy if exists "user_profiles own row insert/update"
   on public.user_profiles;
-create policy "user_profiles own row insert/update"
-  on public.user_profiles for all
-  using (id = auth.uid() and client_id = public.current_app_client_id())
-  with check (id = auth.uid() and client_id = public.current_app_client_id());
+drop policy if exists "user_profiles own row" on public.user_profiles;
+
+-- 表级授权兜底：撤销客户端所有写权限，只保留 SELECT。
+revoke all on public.user_profiles from anon, authenticated;
+grant select on public.user_profiles to authenticated;
 
 -- ai_generations：读自己 + 写自己。
 drop policy if exists "ai_generations own row read"

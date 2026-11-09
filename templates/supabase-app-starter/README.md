@@ -92,21 +92,27 @@ Signing Algorithm 保持 `RS256`（网关签发 id_token 用的就是 RS256）�
 ### Step 3：Supabase Schema + Edge Function
 
 ```bash
-# 1. 把 schema.sql 推到 Supabase（或直接在 SQL Editor 里执行）
-supabase db push
+# 1. 在 Supabase SQL Editor 执行 supabase/schema.sql（或放进 migrations 后
+#    supabase db push）。schema.sql / schema.generic.sql 二选一。
 
-# 2. 首次运行时把当前 App 的 client_id 写进 app_config（一次性）
+# 2. 首次运行时把当前 App 的 client_id 写进 app_config（单行表，id 固定为 1）
 #    （Schema 里 current_app_client_id() 从这张表取）
-supabase sql "insert into public.app_config (client_id) values ('nac_xxxxxxxxxxxxxxxx')"
+insert into public.app_config (id, client_id)
+values (1, 'nac_xxxxxxxxxxxxxxxx')
+on conflict (id) do update set client_id = excluded.client_id;
 
-# 3. 部署 user-sync Edge Function
-cd supabase/functions/user-sync
-supabase functions deploy user-sync \
-  --env-file <(echo GATEWAY_BASE_URL=https://gateway.example.com; echo GATEWAY_CLIENT_ID=nac_xxxxxxxxxxxxxxxx)
+# 3. 配置 Edge Function secrets 并部署 user-sync
+supabase secrets set \
+  GATEWAY_BASE_URL=https://gateway.example.com \
+  GATEWAY_CLIENT_ID=nac_xxxxxxxxxxxxxxxx \
+  GATEWAY_OIDC_PROVIDER=newapi \
+  APP_ORIGIN=https://your-app.example.com
+supabase functions deploy user-sync
 
-# 4. （可选）Supabase Auth → Hooks → Access Token Hook
-#    把 user-sync 注册为 Access Token Hook，每次签发会话自动调用
-#    不注册也能跑通——脚手架的 AuthCallback.tsx 里有兜底
+# 4. user-sync 已由 AuthCallback.tsx 在登录回调里自动调用：
+#    Authorization: Bearer <Supabase access_token>
+#    函数用 supabase.auth.getUser(jwt) 校验身份；缺失/无效 token 返回 401。
+#    请勿把请求 body 里的 user 当作身份来源——函数会完全忽略它。
 ```
 
 ### Step 4：前端模板填配置
@@ -120,14 +126,14 @@ cp .env.example .env.local
 #   VITE_GATEWAY_CLIENT_ID = nac_xxxxxxxxxxxxxxxx
 ```
 
-然后改 `src/pages/Login.tsx` 里的 `OIDC_PROVIDER`（Supabase Custom Provider 的 slug，默认脚手架用 `newapi`）。
+然后改 `src/pages/Login.tsx` 里的 `OIDC_PROVIDER`（Supabase Custom Provider 的 slug，默认脚手架用 `newapi`），并让 Edge Function 的 `GATEWAY_OIDC_PROVIDER` 与它一致。
 
 ```bash
 bun install         # 或 npm / pnpm
 bun run dev         # http://localhost:5173
 ```
 
-首次启动时脚手架会尝试把 `client_id` 写入 `app_config`（如果已存在则 upsert）。
+`.env.local` 已在 `.gitignore` 中忽略，不要提交。`app_config` 由 Step 3 的 SQL 初始化；Edge Function 在缺失时可用 `GATEWAY_CLIENT_ID` 兜底 upsert `id = 1`。
 
 ---
 
@@ -138,7 +144,7 @@ bun run dev         # http://localhost:5173
 | 1 | 创建网关 OAuthApp，拿到 client_id + secret | 网关后台 | 5 min |
 | 2 | Supabase Custom Provider 填 client_id/secret | Supabase Dashboard | 5 min |
 | 3 | 把 `schema.sql` 推到新 Supabase 项目 | CLI / SQL Editor | 2 min |
-| 4 | 写一条 `insert into app_config` 把 client_id 放进去 | SQL Editor | 1 min |
+| 4 | 写一条 `insert into app_config (id, client_id) values (1, …)` | SQL Editor | 1 min |
 | 5 | 部署 user-sync Edge Function | CLI | 2 min |
 | 6 | 填 `.env.local` 四个值 | 脚手架 repo | 1 min |
 | 7 | `bun install && bun run dev`，验证登录 → AI → 历史 → Profile | 本地 | 5 min |
@@ -155,8 +161,9 @@ bun run dev         # http://localhost:5173
    → 用户在网关同意
    → 网关发 code → Supabase 换 id_token + access_token
    → Supabase 自己签会话 JWT（会话存 Supabase）
-   → user-sync Edge Function 写 gateway_user_id + client_id 到 user_profiles
-   → AuthCallback.tsx 把 gateway_access_token 写进 app_metadata
+   → AuthCallback.tsx 调用 user-sync（Bearer = Supabase access_token）
+   → user-sync 用 supabase.auth.getUser(jwt) 校验身份后，以 service_role 写 gateway_user_id + client_id 到 user_profiles
+   → AuthCallback.tsx 把 gateway_access_token 写进 user_metadata
 
 ② App 直连网关 AI
    POST https://gateway/v1/chat/completions
@@ -171,12 +178,17 @@ bun run dev         # http://localhost:5173
 ④ 用户充值（沿用网关）
    App 跳转 网关 /app.html#/topup
    Stripe/Creem/Waffo/Epay → CompleteSubscriptionOrder → 用户 Quota 增加
-   App 侧 Profile 页调 gateway /api/user/amount 轮询显示
+   App 侧 Profile 页用 OAuth access_token 调
+     GET /v1/dashboard/billing/subscription  (scope api:read)
+     GET /v1/dashboard/billing/usage
+   轮询显示额度（/api/user/* 是管理端路由，OAuth token 不能访问）
 ```
 
 ## 5. 注意事项
 
 - **App 级白名单默认不生效**：OAuthApp 不填 `ai_model_whitelist` 时，脚手架 App 能调该用户账户有权限的所有模型。要按 App 隔离，在网关后台给 OAuthApp 填 JSON 数组（每个元素是 model_name 精确值）。
 - **网关直连要求业务域名在网关 CORS / 业务域名白名单里**；小程序也要在网关后台加业务域名。
-- **Supabase schema.sql 里 RLS 用 `current_app_client_id()`** 从 `app_config` 取 client_id；多 App 共用同一个 Supabase 项目时改 `app_config.client_id` 即可切换隔离，不用改 SQL 策略。
-- **脚手架代码里 `newapi`（OIDC provider slug）是默认值**，如果运营在 Supabase 后台给 Custom Provider 起了别的 slug，去 `src/pages/Login.tsx` 改一行常量。
+- **Supabase schema.sql 里 RLS 用 `current_app_client_id()`** 从单行 `app_config`（`id = 1`）取 client_id；多 App 共用同一个 Supabase 项目时改 `app_config.client_id` 即可切换隔离，不用改 SQL 策略。
+- **`user_profiles` 对客户端只读**：authenticated 只有 SELECT 权限，INSERT/UPDATE/DELETE 全部撤销；`gateway_user_id` 只能由 user-sync Edge Function（service_role）写入，用户无法改写自己的网关身份映射。
+- **`seed_outfit_demo()` 仅 service_role 可执行**：anon / authenticated 调用会被拒绝；`app_config` 通过 `id = 1` 主键 + CHECK 约束保证单行。
+- **脚手架代码里 `newapi`（OIDC provider slug）是默认值**，如果运营在 Supabase 后台给 Custom Provider 起了别的 slug，去 `src/pages/Login.tsx` 改一行常量，并同步 Edge Function 的 `GATEWAY_OIDC_PROVIDER`。

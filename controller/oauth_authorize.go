@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -111,15 +112,7 @@ func OAuthAuthorize(c *gin.Context) {
 		return
 	}
 
-	requestedScopes := strings.Fields(req.Scope)
-	for _, s := range requestedScopes {
-		if !model.IsValidOAuthScope(s) {
-			redirectWithOAuthError(c, req.RedirectURI, req.State, oauthErrInvalidScope, "unknown scope: "+s)
-			return
-		}
-	}
-	if !app.ScopeAllowed(requestedScopes) {
-		redirectWithOAuthError(c, req.RedirectURI, req.State, oauthErrInvalidScope, "requested scope is not allowed for this client")
+	if !validateOAuthRequestedScope(c, app, req) {
 		return
 	}
 
@@ -137,7 +130,7 @@ func OAuthAuthorize(c *gin.Context) {
 		return
 	}
 	if !consented {
-		redirectToConsent(c, app, req)
+		redirectToConsent(c, app, req, identity)
 		return
 	}
 
@@ -146,6 +139,11 @@ func OAuthAuthorize(c *gin.Context) {
 
 // OAuthAuthorizeConsent handles POST /oauth/authorize for consent submission.
 func OAuthAuthorizeConsent(c *gin.Context) {
+	if !isSameOriginOAuthRequest(c) {
+		c.String(http.StatusForbidden, "request origin is not allowed")
+		return
+	}
+
 	req, err := parseOAuthAuthorizeRequest(c)
 	if err != nil {
 		c.String(http.StatusBadRequest, "Invalid authorization request: %s", err.Error())
@@ -166,9 +164,18 @@ func OAuthAuthorizeConsent(c *gin.Context) {
 		return
 	}
 
+	if !validateOAuthRequestedScope(c, app, req) {
+		return
+	}
+
 	identity, ok := middleware.GetSessionAuthIdentity(c)
 	if !ok {
 		redirectToLogin(c, req)
+		return
+	}
+
+	if err := service.ValidateOAuthConsentCSRFToken(c.PostForm("csrf_token"), identity.SessionID, app.Id); err != nil {
+		c.String(http.StatusForbidden, "invalid csrf token")
 		return
 	}
 
@@ -184,6 +191,64 @@ func OAuthAuthorizeConsent(c *gin.Context) {
 	}
 
 	issueOAuthCode(c, app, identity, req)
+}
+
+// validateOAuthRequestedScope rejects unknown or app-disallowed scopes. The GET
+// authorize endpoint and the POST consent submission must apply exactly the
+// same rule so a tampered form cannot escalate its grant.
+func validateOAuthRequestedScope(c *gin.Context, app *model.OAuthApp, req *OAuthAuthorizeRequest) bool {
+	requestedScopes := strings.Fields(model.NormalizeScopeString(req.Scope))
+	for _, s := range requestedScopes {
+		if !model.IsValidOAuthScope(s) {
+			redirectWithOAuthError(c, req.RedirectURI, req.State, oauthErrInvalidScope, "unknown scope: "+s)
+			return false
+		}
+	}
+	if !app.ScopeAllowed(requestedScopes) {
+		redirectWithOAuthError(c, req.RedirectURI, req.State, oauthErrInvalidScope, "requested scope is not allowed for this client")
+		return false
+	}
+	return true
+}
+
+// isSameOriginOAuthRequest enforces the browser request metadata that keeps the
+// consent form from being submitted cross-site. Fetch Metadata is checked when
+// present, and an Origin header must match the request's own scheme and host.
+// The CSRF token is the primary control; this rejects hostile browsers early.
+func isSameOriginOAuthRequest(c *gin.Context) bool {
+	switch strings.ToLower(strings.TrimSpace(c.GetHeader("Sec-Fetch-Site"))) {
+	case "", "same-origin", "none":
+	default:
+		return false
+	}
+
+	originValues := c.Request.Header.Values("Origin")
+	if len(originValues) > 1 {
+		return false
+	}
+	origin := ""
+	if len(originValues) == 1 {
+		origin = strings.TrimSpace(originValues[0])
+		if strings.Contains(origin, ",") {
+			return false
+		}
+	}
+	if origin == "" {
+		return true
+	}
+	normalizedOrigin, err := common.NormalizeOrigin(origin)
+	if err != nil {
+		return false
+	}
+	scheme := "http"
+	if c.Request.TLS != nil || common.SessionCookieSecure {
+		scheme = "https"
+	}
+	requestOrigin, err := common.NormalizeOrigin(scheme + "://" + c.Request.Host)
+	if err != nil {
+		return false
+	}
+	return normalizedOrigin == requestOrigin
 }
 
 // issueOAuthCode generates a single-use authorization code and redirects the
@@ -239,8 +304,9 @@ func redirectToLogin(c *gin.Context, req *OAuthAuthorizeRequest) {
 	c.Redirect(http.StatusFound, loginURL.String())
 }
 
-// redirectToConsent redirects the user to the frontend consent page.
-func redirectToConsent(c *gin.Context, app *model.OAuthApp, req *OAuthAuthorizeRequest) {
+// redirectToConsent redirects the user to the frontend consent page with a
+// CSRF token bound to the current dashboard session and app.
+func redirectToConsent(c *gin.Context, app *model.OAuthApp, req *OAuthAuthorizeRequest, identity service.AuthIdentity) {
 	consentURL := url.URL{
 		Path: "/oauth/consent",
 	}
@@ -256,6 +322,7 @@ func redirectToConsent(c *gin.Context, app *model.OAuthApp, req *OAuthAuthorizeR
 	}
 	q.Set("code_challenge", req.CodeChallenge)
 	q.Set("code_challenge_method", req.CodeChallengeMethod)
+	q.Set("csrf_token", service.IssueOAuthConsentCSRFToken(identity.SessionID, app.Id))
 	consentURL.RawQuery = q.Encode()
 	c.Redirect(http.StatusFound, consentURL.String())
 }

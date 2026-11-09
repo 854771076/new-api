@@ -3,15 +3,15 @@
 //
 // 关键：Supabase Custom OIDC Provider 走授权码流程时，网关返回的
 // access_token 会被 Supabase **存进 session.provider_token**，
-// id_token 的 claims 会被映射进 user.identities[0].identity_data。
+// refresh_token 存在 session.provider_refresh_token；id_token 的 claims
+// 会被映射进 user.identities[].identity_data。
 //
-// 我们需要把：
-//   gateway_access_token = session.provider_token   （网关 access_token）
-//   gateway_user_id      = identity_data.sub        （id_token.sub，网关 User.Id）
-// 持久化到 auth.users.app_metadata，后面所有 gateway client 都从那里读。
+// 网关令牌只由 gatewayAuth 在本地持有（内存 + sessionStorage）并自动轮换，
+// 不写入 user_metadata / app_metadata。
 import { useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { getSupabase } from '@/lib/supabase';
+import { seedGatewayTokensFromSession } from '@/lib/gatewayAuth';
 
 export function AuthCallback() {
   const navigate = useNavigate();
@@ -32,30 +32,23 @@ export function AuthCallback() {
         return;
       }
 
-      // ✅ 网关 access_token：Supabase 把 custom provider 返回的上游 access_token
-      //    直接存进 session.provider_token（不是 identity_data 里！）
-      const gatewayAccessToken = data.session.provider_token ?? null;
+      // session.provider_token / provider_refresh_token 是网关签发的令牌，
+      // 交给 gatewayAuth 持有并在过期前自动刷新。
+      seedGatewayTokensFromSession(data.session);
 
-      // ✅ 网关 User.Id：来自 id_token.sub，Supabase 映射到 identity_data.sub
-      const identityData = data.user.identities?.[0]?.identity_data as
-        | { sub?: string; email?: string; name?: string; username?: string }
-        | undefined;
-      const gatewayUserId = identityData?.sub ?? null;
-
-      console.info('[AuthCallback]', {
-        gateway_user_id: gatewayUserId,
-        has_gateway_access_token: !!gatewayAccessToken,
-        provider: data.session.provider,
-      });
-
-      // 持久化到 app_metadata（幂等，后续登录覆盖）
-      await supabase.auth.updateUser({
-        data: {
-          gateway_user_id: gatewayUserId,
-          gateway_access_token: gatewayAccessToken,
-          gateway_provider: data.session.provider,
-        },
-      });
+      try {
+        // 让 Edge Function 用当前 Supabase access_token 校验身份并写入
+        // user_profiles（user_profiles 的客户端写权限已撤销）。
+        const { error: syncError } = await supabase.functions.invoke('user-sync', {
+          method: 'POST',
+        });
+        if (syncError) {
+          console.warn('[AuthCallback] user-sync failed', syncError.message);
+        }
+      } catch (e) {
+        // 同步失败不阻断登录。
+        console.warn('[AuthCallback] user-sync failed', e);
+      }
 
       navigate('/', { replace: true });
     });

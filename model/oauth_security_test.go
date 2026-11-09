@@ -3,12 +3,18 @@ package model
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
+	"fmt"
+	"os"
 	"testing"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
 
 func TestVerifyPKCE(t *testing.T) {
@@ -212,6 +218,156 @@ func TestOAuthRefreshTokenAppIsolation(t *testing.T) {
 	assert.Zero(t, otherToken.RevokedAt)
 }
 
+func TestOAuthRefreshTokenConcurrentRotationIsAtomic(t *testing.T) {
+	db := setupOAuthTestDB(t)
+	app := createTestOAuthApp(t, db)
+
+	oldHash := OAuthRefreshTokenHash("concurrent-old-token")
+	require.NoError(t, CreateOAuthRefreshToken(&OAuthRefreshToken{
+		TokenHash: oldHash,
+		AppID:     app.Id,
+		UserID:    1,
+		SessionID: "session-1",
+		Scope:     "openid",
+		ExpiresAt: 9999999999,
+	}))
+	// A second chain for the same app+user: replay detection must revoke the
+	// whole app+user chain, not only the session that owned the rotated token.
+	otherHash := OAuthRefreshTokenHash("concurrent-other-session")
+	require.NoError(t, CreateOAuthRefreshToken(&OAuthRefreshToken{
+		TokenHash: otherHash,
+		AppID:     app.Id,
+		UserID:    1,
+		SessionID: "session-2",
+		Scope:     "openid",
+		ExpiresAt: 9999999999,
+	}))
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for i := range 2 {
+		go func(i int) {
+			<-start
+			_, err := RotateOAuthRefreshToken(oldHash, fmt.Sprintf("concurrent-new-%d", i), 9999999999)
+			results <- err
+		}(i)
+	}
+	close(start)
+
+	var succeeded, replayed int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrOAuthRefreshTokenRevoked):
+			replayed++
+		default:
+			require.Failf(t, "unexpected rotation error", "%v", err)
+		}
+	}
+	require.Equal(t, 1, succeeded, "exactly one concurrent rotation must win")
+	require.Equal(t, 1, replayed, "the losing rotation must be reported as a replay")
+
+	otherToken, err := GetOAuthRefreshTokenByHash(otherHash)
+	require.NoError(t, err)
+	assert.NotZero(t, otherToken.RevokedAt, "replay must revoke the app+user chain")
+}
+
+// TestOAuthRefreshTokenRotationDatabaseMatrix proves the conditional rotation
+// gate is atomic on every supported database, not only SQLite.
+func TestOAuthRefreshTokenRotationDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+
+			db, err := gorm.Open(driver, &gorm.Config{
+				NamingStrategy: schema.NamingStrategy{TablePrefix: "oauth_matrix_"},
+			})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			if dialect == "sqlite" {
+				sqlDB.SetMaxOpenConns(1)
+			}
+			previousDB := DB
+			DB = db
+			t.Cleanup(func() {
+				require.NoError(t, db.Migrator().DropTable(&OAuthRefreshToken{}, &OAuthApp{}))
+				DB = previousDB
+				require.NoError(t, sqlDB.Close())
+			})
+			require.NoError(t, db.AutoMigrate(&OAuthApp{}, &OAuthRefreshToken{}))
+
+			app := createTestOAuthApp(t, db)
+			oldHash := OAuthRefreshTokenHash("matrix-old-token")
+			require.NoError(t, CreateOAuthRefreshToken(&OAuthRefreshToken{
+				TokenHash: oldHash,
+				AppID:     app.Id,
+				UserID:    1,
+				SessionID: "matrix-session-1",
+				Scope:     "openid",
+				ExpiresAt: 9999999999,
+			}))
+			otherHash := OAuthRefreshTokenHash("matrix-other-session")
+			require.NoError(t, CreateOAuthRefreshToken(&OAuthRefreshToken{
+				TokenHash: otherHash,
+				AppID:     app.Id,
+				UserID:    1,
+				SessionID: "matrix-session-2",
+				Scope:     "openid",
+				ExpiresAt: 9999999999,
+			}))
+
+			start := make(chan struct{})
+			results := make(chan error, 2)
+			for i := range 2 {
+				go func(i int) {
+					<-start
+					_, err := RotateOAuthRefreshToken(oldHash, fmt.Sprintf("matrix-new-%d", i), 9999999999)
+					results <- err
+				}(i)
+			}
+			close(start)
+
+			var succeeded, replayed int
+			for range 2 {
+				err := <-results
+				switch {
+				case err == nil:
+					succeeded++
+				case errors.Is(err, ErrOAuthRefreshTokenRevoked):
+					replayed++
+				default:
+					require.Failf(t, "unexpected rotation error", "%v", err)
+				}
+			}
+			require.Equal(t, 1, succeeded, "exactly one concurrent rotation must win")
+			require.Equal(t, 1, replayed, "the losing rotation must be reported as a replay")
+
+			otherToken, err := GetOAuthRefreshTokenByHash(otherHash)
+			require.NoError(t, err)
+			assert.NotZero(t, otherToken.RevokedAt, "replay must revoke the app+user chain")
+		})
+	}
+}
+
 func TestOAuthConsentNormalization(t *testing.T) {
 	// Equivalent scope sets normalize to the same string.
 	assert.Equal(t,
@@ -254,6 +410,11 @@ func setupOAuthTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
+	// A single connection keeps every goroutine on the same in-memory database
+	// and serializes writes, matching how SQLite deployments behave.
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, db.AutoMigrate(
 		&OAuthApp{},
 		&OAuthAuthorizationCode{},

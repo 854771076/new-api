@@ -15,6 +15,16 @@ import (
 
 const RefreshCookieName = "new_api_refresh"
 
+// RefreshCookiePath is "/" because the OAuth authorize endpoint is a browser
+// top-level navigation from an external application, not an /api/* XHR: it has
+// no Authorization header and can only see the login state through this cookie.
+const RefreshCookiePath = "/"
+
+// legacyRefreshCookiePath is where the refresh cookie lived before the OAuth
+// authorize flow needed it on a non-/api navigation. Only used to expire that
+// stale scope; never written with a value.
+const legacyRefreshCookiePath = "/api/user/auth"
+
 // SessionHintCookieName is the script-readable companion to RefreshCookieName.
 // See writeSessionHintCookie for why it exists and what it is not.
 const SessionHintCookieName = "new_api_has_session"
@@ -310,6 +320,41 @@ func RefreshTokenSID(rawRefreshToken string) (string, bool) {
 	return sid, ok
 }
 
+// LoginSessionIdentityFromRefreshToken resolves the dashboard login session
+// that a refresh cookie belongs to without rotating it.
+//
+// The OAuth authorize endpoint is reached by a browser top-level navigation from
+// an external application, so it receives cookies but never an Authorization
+// header. This helper is the cookie-only counterpart of TryUserAuth's header
+// path and is deliberately read-only: rotating here would invalidate the
+// browser's cookie on a request that only needs to know who is signed in.
+func LoginSessionIdentityFromRefreshToken(rawRefreshToken string) (AuthIdentity, *model.UserBase, error) {
+	sid, secret, ok := splitRefreshToken(rawRefreshToken)
+	if !ok {
+		return AuthIdentity{}, nil, ErrRefreshTokenInvalid
+	}
+	// The cached session snapshot carries no refresh digest, so the presented
+	// secret is verified against the authoritative row.
+	session, err := model.VerifyUserSessionRefreshHash(sid, hashRefreshSecret(secret))
+	if err != nil {
+		if errors.Is(err, model.ErrUserSessionInactive) {
+			return AuthIdentity{}, nil, ErrLoginSessionRevoked
+		}
+		return AuthIdentity{}, nil, ErrRefreshTokenInvalid
+	}
+	identity := AuthIdentity{
+		UserID:          session.UserID,
+		SessionID:       sid,
+		UserAuthVersion: session.UserAuthVersion,
+		SessionVersion:  session.Version,
+	}
+	_, user, err := ValidateLoginSession(identity)
+	if err != nil {
+		return AuthIdentity{}, nil, err
+	}
+	return identity, user, nil
+}
+
 func ListLoginSessions(userID int, currentSID string) ([]LoginSessionView, error) {
 	sessions, err := model.ListActiveUserSessions(userID, currentSID, time.Now().Unix())
 	if err != nil {
@@ -322,15 +367,11 @@ func ListLoginSessions(userID int, currentSID string) ([]LoginSessionView, error
 	return views, nil
 }
 
-// sessionCookieSameSite returns the appropriate SameSite attribute for session
-// cookies. OAuth cross-site authorization flows require the cookie to be sent
-// on cross-site requests, so SameSite=None is used when the cookie is Secure.
-// In HTTP development environments where Secure is false, SameSite=None would
-// be rejected by the browser, so Lax is used as a fallback.
+// sessionCookieSameSite returns the SameSite attribute for session cookies.
+// The OAuth authorize flow reaches the consent screen through a top-level
+// cross-site GET, which Lax still allows; cross-site form posts must not carry
+// the session cookie.
 func sessionCookieSameSite() http.SameSite {
-	if common.SessionCookieSecure {
-		return http.SameSiteNoneMode
-	}
 	return http.SameSiteLaxMode
 }
 
@@ -345,13 +386,14 @@ func WriteRefreshCookie(c *gin.Context, rawToken string) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     RefreshCookieName,
 		Value:    rawToken,
-		Path:     "/api/user/auth",
+		Path:     RefreshCookiePath,
 		MaxAge:   maxAge,
 		Expires:  expiresAt,
 		HttpOnly: true,
 		Secure:   common.SessionCookieSecure,
 		SameSite: sessionCookieSameSite(),
 	})
+	clearLegacyRefreshCookie(c)
 	writeSessionHintCookie(c, maxAge, expiresAt)
 }
 
@@ -359,14 +401,34 @@ func ClearRefreshCookie(c *gin.Context) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     RefreshCookieName,
 		Value:    "",
-		Path:     "/api/user/auth",
+		Path:     RefreshCookiePath,
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),
 		HttpOnly: true,
 		Secure:   common.SessionCookieSecure,
 		SameSite: sessionCookieSameSite(),
 	})
+	clearLegacyRefreshCookie(c)
 	clearSessionHintCookie(c)
+}
+
+// clearLegacyRefreshCookie expires the cookie as it was scoped before the path
+// moved to "/". Browsers key cookies by (name, domain, path), so a browser that
+// signed in under the old build still sends its stale refresh token to
+// /api/user/auth alongside the current one, and rotation would keep failing
+// against it. Every write path clears the old scope so existing sessions heal on
+// their next refresh.
+func clearLegacyRefreshCookie(c *gin.Context) {
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     RefreshCookieName,
+		Value:    "",
+		Path:     legacyRefreshCookiePath,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+		HttpOnly: true,
+		Secure:   common.SessionCookieSecure,
+		SameSite: sessionCookieSameSite(),
+	})
 }
 
 // writeSessionHintCookie mirrors the Refresh Cookie's lifetime with a

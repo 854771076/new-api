@@ -147,6 +147,41 @@ func RootAuth() func(c *gin.Context) {
 	}
 }
 
+// TryOAuthSessionAuth lets the OAuth authorize endpoint see a dashboard login
+// made in this browser. That endpoint is reached by a top-level navigation from
+// an external application, so it carries the refresh cookie but never a Bearer
+// token; without this fallback every authorize request looks anonymous and loops
+// back to /sign-in.
+//
+// It runs after TryUserAuth and only fills the context when nothing authenticated
+// yet. The cookie stays read-only here: no session rotation, and failure leaves
+// the request anonymous so the handler keeps its "redirect to sign-in" behavior.
+// Scope it to the authorize route; state-changing APIs must not accept it.
+func TryOAuthSessionAuth() func(c *gin.Context) {
+	return func(c *gin.Context) {
+		if _, ok := GetAuthIdentity(c); ok {
+			c.Next()
+			return
+		}
+		rawRefreshToken, err := c.Cookie(service.RefreshCookieName)
+		if err != nil || rawRefreshToken == "" {
+			c.Next()
+			return
+		}
+		identity, user, err := service.LoginSessionIdentityFromRefreshToken(rawRefreshToken)
+		if err != nil {
+			c.Next()
+			return
+		}
+		if user.Status != common.UserStatusEnabled {
+			c.Next()
+			return
+		}
+		setDashboardAuthContext(c, user, identity, false)
+		c.Next()
+	}
+}
+
 // GetAuthIdentity returns a dashboard session identity. PAT-authenticated
 // requests intentionally have no SessionID and cannot manage browser sessions.
 func GetAuthIdentity(c *gin.Context) (service.AuthIdentity, bool) {
