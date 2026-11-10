@@ -81,7 +81,7 @@ func oauthSigningKey() (*rsa.PrivateKey, error) {
 func loadOrCreateOAuthSigningKey() (*rsa.PrivateKey, error) {
 	if model.DB != nil {
 		var option model.Option
-		err := model.DB.Where("key = ?", oauthSigningKeyOption).First(&option).Error
+		err := model.DB.Where(&model.Option{Key: oauthSigningKeyOption}).First(&option).Error
 		switch {
 		case err == nil:
 			if key, parseErr := decodeOAuthPrivateKey(option.Value); parseErr == nil {
@@ -106,7 +106,7 @@ func loadOrCreateOAuthSigningKey() (*rsa.PrivateKey, error) {
 		}
 		// Another instance stored the key first; use that one.
 		var existing model.Option
-		if readErr := model.DB.Where("key = ?", oauthSigningKeyOption).First(&existing).Error; readErr == nil {
+		if readErr := model.DB.Where(&model.Option{Key: oauthSigningKeyOption}).First(&existing).Error; readErr == nil {
 			if existingKey, parseErr := decodeOAuthPrivateKey(existing.Value); parseErr == nil {
 				return existingKey, nil
 			}
