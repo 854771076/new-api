@@ -131,11 +131,22 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#[vV]}"
+          DIST_TAG=latest
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::tag '$TAG' is not a semver version; npm packages require tags like v1.2.3"
-            exit 1
+            # Date tags (vYYYY.MM.DD.N) are releases, not semver. Turn the
+            # release counter into a prerelease so npm accepts the version.
+            if [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}-${BASH_REMATCH[4]}"
+            else
+              echo "::error::tag '$TAG' cannot be converted to a semver npm version; use v1.2.3 or vYYYY.MM.DD.N"
+              exit 1
+            fi
+          elif [[ "$VERSION" == *-* ]]; then
+            DIST_TAG=next
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "DIST_TAG=$DIST_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -185,8 +196,9 @@ jobs:
           npm pkg set name="$NPM_PACKAGE_NAME"
           npm pkg set version="$VERSION"
           npm pkg set "config.downloadBase=https://github.com/${GITHUB_REPOSITORY}/releases/download"
-          DIST_TAG=latest
-          if [[ "$VERSION" == *-* ]]; then DIST_TAG=next; fi
+          # The npm version differs from the git tag for date releases, so the
+          # installer must download binaries from the tag that actually exists.
+          npm pkg set "config.releaseTag=$RELEASE_TAG"
           npm publish --access public --tag "$DIST_TAG"
           rm -f .npmrc
 

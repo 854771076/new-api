@@ -26,11 +26,15 @@ function downloadBase() {
 }
 
 // releaseTags lists the tag shapes to try. Published packages normally use
-// "v<version>", but releases tagged without the prefix must work too.
+// "v<version>", but date releases use a different git tag than the npm
+// version, so config.releaseTag is checked first.
 function releaseTags() {
   const tags = [];
   if (process.env.NEWAPI_CLI_RELEASE_TAG) {
     tags.push(process.env.NEWAPI_CLI_RELEASE_TAG);
+  }
+  if (pkg.config && pkg.config.releaseTag) {
+    tags.push(pkg.config.releaseTag);
   }
   tags.push(`v${pkg.version}`, pkg.version);
   return [...new Set(tags)];
