@@ -138,12 +138,11 @@ func OAuthAuthorize(c *gin.Context) {
 }
 
 // OAuthAuthorizeConsent handles POST /oauth/authorize for consent submission.
+// Cross-site protection is enforced by the session-bound CSRF token below; the
+// previous Origin/Sec-Fetch-Site check was redundant and rejected legitimate
+// consent submissions from browsers where the request metadata was stripped by
+// a reverse proxy or differed across navigation patterns.
 func OAuthAuthorizeConsent(c *gin.Context) {
-	if !isSameOriginOAuthRequest(c) {
-		c.String(http.StatusForbidden, "request origin is not allowed")
-		return
-	}
-
 	req, err := parseOAuthAuthorizeRequest(c)
 	if err != nil {
 		c.String(http.StatusBadRequest, "Invalid authorization request: %s", err.Error())
@@ -198,10 +197,9 @@ func OAuthAuthorizeConsent(c *gin.Context) {
 // on page load shows the application name/logo instead of the raw client_id and
 // recovers from a consent URL whose CSRF token expired.
 func OAuthConsentContext(c *gin.Context) {
-	if !isSameOriginOAuthRequest(c) {
-		c.String(http.StatusForbidden, "request origin is not allowed")
-		return
-	}
+	// No Origin/Sec-Fetch-Site gate here: the endpoint is read-only and the
+	// browser session cookie is SameSite=Lax, so cross-site fetches cannot
+	// authenticate anyway and will 401 below.
 	app, err := model.GetOAuthAppByClientID(strings.TrimSpace(c.Query("client_id")))
 	if err != nil {
 		common.ApiErrorT(c, "Unknown client_id")

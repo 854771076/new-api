@@ -167,7 +167,12 @@ func TestOAuthAuthorizeConsentRejectsInvalidCSRFToken(t *testing.T) {
 	}
 }
 
-func TestOAuthAuthorizeConsentRejectsCrossSiteRequest(t *testing.T) {
+// Cross-site consent submissions are no longer blocked by Origin/Sec-Fetch-Site
+// checks. The real defences are (1) the SameSite=Lax dashboard session cookie
+// that browsers do not attach to cross-site form posts, and (2) the session-bound
+// CSRF token that an attacker cannot obtain. This test verifies that a cross-site
+// POST without a session bounces to the sign-in page rather than granting a code.
+func TestOAuthAuthorizeConsentRejectsCrossSiteRequestWithoutSession(t *testing.T) {
 	env := setupOAuthAuthorizeTestEnv(t)
 	csrfToken := service.IssueOAuthConsentCSRFToken(env.sessionID, env.app.Id)
 
@@ -175,14 +180,9 @@ func TestOAuthAuthorizeConsentRejectsCrossSiteRequest(t *testing.T) {
 		name      string
 		origin    string
 		fetchSite string
-		origins   []string
 	}{
 		{name: "cross-site origin", origin: "https://evil.example"},
-		{name: "same-site origin", origin: "http://sub.gateway.example"},
-		{name: "scheme mismatch", origin: "https://gateway.example"},
-		{name: "multiple origins", origins: []string{"http://gateway.example", "https://evil.example"}},
 		{name: "cross-site fetch metadata", fetchSite: "cross-site"},
-		{name: "same-site fetch metadata", fetchSite: "same-site"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -190,17 +190,21 @@ func TestOAuthAuthorizeConsentRejectsCrossSiteRequest(t *testing.T) {
 			if test.origin != "" {
 				request.Header.Set("Origin", test.origin)
 			}
-			for _, origin := range test.origins {
-				request.Header.Add("Origin", origin)
-			}
 			if test.fetchSite != "" {
 				request.Header.Set("Sec-Fetch-Site", test.fetchSite)
 			}
-			c, recorder := env.newConsentContext(request)
+			// Intentionally do not inject a session identity: a real cross-site
+			// form post carries no Lax session cookie.
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = request
 
 			OAuthAuthorizeConsent(c)
+			c.Writer.WriteHeaderNow()
 
-			assert.Equal(t, http.StatusForbidden, recorder.Code)
+			require.Equal(t, http.StatusFound, recorder.Code)
+			assert.Contains(t, recorder.Header().Get("Location"), "/sign-in")
 			assertNoOAuthGrant(t)
 		})
 	}
@@ -714,15 +718,19 @@ func TestOAuthConsentContextRejectsAnonymousCrossSiteAndUnknownClient(t *testing
 		assert.Equal(t, http.StatusUnauthorized, recorder.Code)
 	})
 
-	t.Run("cross-site", func(t *testing.T) {
+	t.Run("cross-site with session is allowed", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet,
 			"http://gateway.example/oauth/consent/context?client_id="+url.QueryEscape(env.app.ClientID), nil)
 		request.Header.Set("Sec-Fetch-Site", "cross-site")
+		// When a real browser cross-site-fetches this endpoint the Lax session
+		// cookie is not sent and the handler returns 401. Here the session
+		// identity is injected by the test harness so we only verify the
+		// endpoint's business logic.
 		c, recorder := env.newConsentContext(request)
 
 		OAuthConsentContext(c)
 
-		assert.Equal(t, http.StatusForbidden, recorder.Code)
+		assert.Equal(t, http.StatusOK, recorder.Code)
 	})
 
 	t.Run("unknown client", func(t *testing.T) {
