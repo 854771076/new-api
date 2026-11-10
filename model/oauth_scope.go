@@ -25,7 +25,7 @@ var OAuthScopeDescriptions = map[string]string{
 	OAuthScopeOpenID:   "Verify your identity",
 	OAuthScopeProfile:  "View your username and display name",
 	OAuthScopeEmail:    "View your email address",
-	OAuthScopeAPIRead:  "Read AI models and usage data on your behalf",
+	OAuthScopeAPIRead:  "Read AI models, usage data, and your quota/usage on your behalf",
 	OAuthScopeAPIWrite: "Make AI API requests on your behalf",
 }
 

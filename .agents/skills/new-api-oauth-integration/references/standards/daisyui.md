@@ -198,3 +198,61 @@ is the exception.
       DaisyUI classes.
 - [ ] No hardcoded hex/rgb or raw palette colors for semantic meaning.
 - [ ] Backgrounds always pair with their `-content` foreground token.
+
+## 8. 强制使用与验收
+
+以下条款对消费端路由（`src/app/**`、`src/components/**`）强制生效；`src/app/admin/**` 是唯一例外，后台固定使用 Ant Design + Refine，不得改成 DaisyUI，也不得与消费端共用布局。验证基线：DaisyUI 5.7.50 + Tailwind CSS 4.3.3，`globals.css` 仅含 `@import "tailwindcss";` 与 `@plugin "daisyui";`，无 `tailwind.config.js/ts`。
+
+### 8.1 DaisyUI 4 → 5 迁移对照
+
+旧类名在 DaisyUI 5 中**不存在**，写了不会报错，但没有任何效果。
+
+| DaisyUI 4 | DaisyUI 5 | 说明 |
+|-----------|-----------|------|
+| `input-bordered` | `input` | 5.x 的 `input` 自带边框，附加 `-bordered` 无效果 |
+| `textarea-bordered` | `textarea` | 同上 |
+| `select-bordered` | `select` | 同上 |
+| `card-compact` | `card-sm` | 紧凑卡片改用尺寸修饰符 |
+| `card-bordered` | `card-border` | 需显式描边时使用 |
+| `join` / `join-item` | `flex gap-*` 或 `label.input` | **整个组件在 5.x 被移除**；输入框+图标用 `<label class="input"><svg/><input class="grow"/></label>` |
+| `tabs-boxed` | `tabs-box` / `tabs-border` | `tabs-boxed` 已移除，`tabs-box` 为分段容器，`tabs-border` 为下划线 |
+| `chip` / `chip-primary` / `chip-outline` | `btn btn-xs` / `badge` | 从未存在于 DaisyUI；筛选标签用 `btn btn-xs`（选中 `btn-primary`，未选 `btn-ghost bg-base-200`） |
+| `alert-sm` / `alert-xs` | `alert` + `text-sm` | alert 没有尺寸修饰符，写了无效 |
+| `form-control` / `label-text` | `fieldset` + `fieldset-legend` | 5.x 表单组结构已替换 |
+| `btn-block` | `btn-block` | 仍然有效 |
+| `table-zebra` | `table-zebra` | 仍然有效 |
+| `badge-soft` | `badge-soft` | 仍然有效 |
+
+### 8.2 手写 → DaisyUI 对照
+
+| 手写实现 | 替换为 |
+|----------|--------|
+| `rounded-box` + `shadow` + `p-*` 面板 | `card` + `card-body` |
+| 裸错误 `<div>`（无角色、无样式） | `alert alert-error alert-soft`（配 `role="alert"`） |
+| 自定义 `fixed inset-0` 弹层 + 手写遮罩 | `<dialog class="modal">` + `modal-box` |
+| 自定义 `@keyframes` 旋转动画 | `loading loading-spinner` |
+| 自定义圆角小标签 `<span>` | `badge`（`badge-primary` / `badge-soft` / `badge-outline`） |
+| `<ul>` + 手写链接列表作为导航 | `menu`（`menu-horizontal` 或 `menu-sm`） |
+
+### 8.3 验收命令
+
+新改动或修改的消费端页面必须通过，**无输出即通过**（命中即存在禁用类）。
+
+```powershell
+# Windows / PowerShell — 排除 admin 路由树
+Get-ChildItem -Path src -Recurse -Include *.tsx |
+  Where-Object { $_.FullName -notmatch '\\admin\\' } |
+  Select-String -Pattern 'input-bordered|textarea-bordered|select-bordered|card-compact|card-bordered|alert-sm|\bjoin-item\b|tabs-boxed|chip-|form-control|label-text'
+```
+
+```bash
+# macOS / Linux
+grep -rn "input-bordered\|textarea-bordered\|select-bordered\|card-compact\|card-bordered\|alert-sm\|join-item\|tabs-boxed\|chip-\|form-control\|label-text" src --exclude-dir=admin
+```
+
+### 8.4 交付检查项
+
+- [ ] 容器、输入、提示、弹窗、加载、标签均优先复用 DaisyUI 组件，未用工具类重造其视觉。
+- [ ] 无 `input-bordered` / `textarea-bordered` / `select-bordered` / `card-compact` / `card-bordered` / `join-item` / `tabs-boxed` / `chip-*`。
+- [ ] 无原始调色板（`bg-gray-*`、`text-blue-*` 等）、无 `#hex`、无 `rgb()`；背景与 `-content` 前景成对出现。
+- [ ] 上述验收命令无输出，且结果已写入交付说明（改动的页面 + 复用的组件 + 命令实际输出）。

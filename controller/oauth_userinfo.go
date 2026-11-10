@@ -45,6 +45,12 @@ func OAuthUserInfo(c *gin.Context) {
 	if _, ok := scopeSet[model.OAuthScopeEmail]; ok {
 		response["email"] = user.Email
 	}
+	if _, ok := scopeSet[model.OAuthScopeAPIRead]; ok {
+		response["quota"] = user.Quota
+		response["used_quota"] = user.UsedQuota
+		response["request_count"] = user.RequestCount
+		response["group"] = user.Group
+	}
 
 	c.JSON(http.StatusOK, response)
 }

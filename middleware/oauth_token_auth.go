@@ -53,6 +53,7 @@ func setupContextForOAuthToken(c *gin.Context, rawToken string) bool {
 	c.Set("token_quota", user.Quota)
 	c.Set("token_model_limit_enabled", false)
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, user.Group)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, user.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, false)
 
 	// Surface the OAuth client_id so downstream relay code can apply

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,93 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/thanhpk/randstr"
 )
+
+// waffoPancakeCheckoutResult is the outcome of generateWaffoPancakeCheckout.
+// It is consumed by both the dashboard handler and the OAuth topup endpoint.
+type waffoPancakeCheckoutResult struct {
+	CheckoutURL    string
+	OrderID        string
+	ExpiresAt      string
+	SessionID      string
+	Token          string
+	TokenExpiresAt string
+	TopUpID        int64
+}
+
+// generateWaffoPancakeCheckout is the pure (no gin.Context, no response-
+// writing) core of Waffo Pancake checkout. The dashboard handler and the
+// OAuth access-token endpoint both delegate to it.
+func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount int64) (*waffoPancakeCheckoutResult, error) {
+	if !isWaffoPancakeTopUpEnabled() {
+		return nil, common.NewMessage("Waffo Pancake configuration is incomplete")
+	}
+	if user == nil {
+		return nil, common.NewMessage("User does not exist")
+	}
+	if amount < int64(setting.WaffoPancakeMinTopUp) {
+		return nil, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": setting.WaffoPancakeMinTopUp})
+	}
+
+	payMoney := getWaffoPancakePayMoney(amount, user.Group)
+	if payMoney < 0.01 {
+		return nil, common.NewMessage("Payment amount is too low")
+	}
+
+	// Validate top-up quota capacity against the user's current stored quota.
+	creditedQuota, err := validateTopUpQuota(amount)
+	if err != nil {
+		return nil, err
+	}
+	if err := model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota); err != nil {
+		return nil, err
+	}
+
+	tradeNo := fmt.Sprintf("WAFFO_PANCAKE-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
+	topUp := &model.TopUp{
+		UserId:          user.Id,
+		Amount:          normalizeWaffoPancakeTopUpAmount(amount),
+		Money:           payMoney,
+		TradeNo:         tradeNo,
+		PaymentMethod:   model.PaymentMethodWaffoPancake,
+		PaymentProvider: model.PaymentProviderWaffoPancake,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusPending,
+	}
+	if err := topUp.Insert(); err != nil {
+		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create top-up order user_id=%d trade_no=%s amount=%d error=%q", user.Id, tradeNo, amount, err.Error()))
+		return nil, common.NewMessage("Failed to create order")
+	}
+
+	expiresInSeconds := 45 * 60
+	session, err := service.CreateWaffoPancakeCheckoutSession(ctx, &service.WaffoPancakeCreateSessionParams{
+		ProductID:     setting.WaffoPancakeProductID,
+		BuyerIdentity: getWaffoPancakeBuyerIdentity(user),
+		PriceSnapshot: &service.WaffoPancakePriceSnapshot{
+			Amount:      formatWaffoPancakeAmount(payMoney),
+			TaxCategory: "saas",
+		},
+		BuyerEmail:              getWaffoPancakeBuyerEmail(user),
+		ExpiresInSeconds:        &expiresInSeconds,
+		OrderMerchantExternalID: tradeNo,
+	})
+	if err != nil {
+		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create checkout session user_id=%d trade_no=%s error=%q", user.Id, tradeNo, err.Error()))
+		topUp.Status = common.TopUpStatusFailed
+		_ = topUp.Update()
+		return nil, common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText("Waffo Pancake top-up order created user_id=%d trade_no=%s session_id=%s amount=%d money=%.2f", user.Id, tradeNo, session.SessionID, amount, payMoney))
+
+	return &waffoPancakeCheckoutResult{
+		CheckoutURL:    session.CheckoutURL,
+		OrderID:        tradeNo,
+		ExpiresAt:      session.ExpiresAt,
+		SessionID:      session.SessionID,
+		Token:          session.Token,
+		TokenExpiresAt: session.TokenExpiresAt,
+		TopUpID:        int64(topUp.Id),
+	}, nil
+}
 
 type WaffoPancakePayRequest struct {
 	Amount int64 `json:"amount"`
@@ -340,90 +428,33 @@ func getWaffoPancakeBuyerIdentity(user *model.User) string {
 }
 
 func RequestWaffoPancakePay(c *gin.Context) {
-	if !isWaffoPancakeTopUpEnabled() {
-		paymentError(c, common.NewMessage("Waffo Pancake configuration is incomplete"))
-		return
-	}
-
 	var req WaffoPancakePayRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		paymentError(c, common.NewMessage("Invalid parameters"))
 		return
 	}
-	if req.Amount < int64(setting.WaffoPancakeMinTopUp) {
-		paymentError(c, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": setting.WaffoPancakeMinTopUp}))
-		return
-	}
 	id := c.GetInt("id")
-	if rejectInvalidTopUpQuota(c, id, req.Amount) {
-		return
-	}
-
 	user, err := model.GetUserById(id, false)
 	if err != nil || user == nil {
 		paymentError(c, common.NewMessage("User does not exist"))
 		return
 	}
 
-	group, err := model.GetUserGroup(id, true)
+	result, err := generateWaffoPancakeCheckout(c.Request.Context(), user, req.Amount)
 	if err != nil {
-		paymentError(c, common.NewMessage("Failed to get the user group"))
+		paymentError(c, err)
 		return
 	}
-
-	payMoney := getWaffoPancakePayMoney(req.Amount, group)
-	if payMoney < 0.01 {
-		paymentError(c, common.NewMessage("Payment amount is too low"))
-		return
-	}
-
-	tradeNo := fmt.Sprintf("WAFFO_PANCAKE-%d-%d-%s", id, time.Now().UnixMilli(), randstr.String(6))
-	topUp := &model.TopUp{
-		UserId:          id,
-		Amount:          normalizeWaffoPancakeTopUpAmount(req.Amount),
-		Money:           payMoney,
-		TradeNo:         tradeNo,
-		PaymentMethod:   model.PaymentMethodWaffoPancake,
-		PaymentProvider: model.PaymentProviderWaffoPancake,
-		CreateTime:      time.Now().Unix(),
-		Status:          common.TopUpStatusPending,
-	}
-	if err := topUp.Insert(); err != nil {
-		logger.LogError(c.Request.Context(), common.LogText("Waffo Pancake failed to create top-up order user_id=%d trade_no=%s amount=%d error=%q", id, tradeNo, req.Amount, err.Error()))
-		paymentError(c, common.NewMessage("Failed to create order"))
-		return
-	}
-
-	expiresInSeconds := 45 * 60
-	session, err := service.CreateWaffoPancakeCheckoutSession(c.Request.Context(), &service.WaffoPancakeCreateSessionParams{
-		ProductID:     setting.WaffoPancakeProductID,
-		BuyerIdentity: getWaffoPancakeBuyerIdentity(user),
-		PriceSnapshot: &service.WaffoPancakePriceSnapshot{
-			Amount:      formatWaffoPancakeAmount(payMoney),
-			TaxCategory: "saas",
-		},
-		BuyerEmail:              getWaffoPancakeBuyerEmail(user),
-		ExpiresInSeconds:        &expiresInSeconds,
-		OrderMerchantExternalID: tradeNo,
-	})
-	if err != nil {
-		logger.LogError(c.Request.Context(), common.LogText("Waffo Pancake failed to create checkout session user_id=%d trade_no=%s error=%q", id, tradeNo, err.Error()))
-		topUp.Status = common.TopUpStatusFailed
-		_ = topUp.Update()
-		paymentError(c, common.NewMessage("Failed to start payment"))
-		return
-	}
-	logger.LogInfo(c.Request.Context(), common.LogText("Waffo Pancake top-up order created user_id=%d trade_no=%s session_id=%s amount=%d money=%.2f", id, tradeNo, session.SessionID, req.Amount, payMoney))
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "success",
 		"data": gin.H{
-			"checkout_url":     session.CheckoutURL,
-			"session_id":       session.SessionID,
-			"expires_at":       session.ExpiresAt,
-			"order_id":         tradeNo,
-			"token":            session.Token,
-			"token_expires_at": session.TokenExpiresAt,
+			"checkout_url":     result.CheckoutURL,
+			"session_id":       result.SessionID,
+			"expires_at":       result.ExpiresAt,
+			"order_id":         result.OrderID,
+			"token":            result.Token,
+			"token_expires_at": result.TokenExpiresAt,
 		},
 	})
 }

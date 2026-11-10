@@ -1,0 +1,182 @@
+import { redirect } from 'next/navigation';
+import Link from 'next/link';
+import { createServerSupabase } from '@/lib/supabase/server';
+import { MediaCard } from '@/components/MediaCard';
+import { getSignedUrls } from '@/lib/media-urls';
+
+export const dynamic = 'force-dynamic';
+
+const PAGE_SIZE = 20;
+
+export default async function WardrobePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ category?: string; q?: string; page?: string }>;
+}) {
+  const supabase = await createServerSupabase();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) redirect('/login');
+
+  const sp = await searchParams;
+  const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1);
+  const from = (page - 1) * PAGE_SIZE;
+  const q = sp.q?.trim();
+  const activeCategory = sp.category?.trim();
+
+  // 1. category 列表
+  const { data: catRows } = await supabase
+    .from('outfits')
+    .select('category')
+    .eq('is_active', true)
+    .not('category', 'is', null);
+  const categories = Array.from(new Set((catRows ?? []).map((r) => r.category).filter(Boolean))) as string[];
+
+  // 2. outfits 查询
+  let query = supabase
+    .from('outfits')
+    .select('id, name_zh, name_en, description_zh, description_en, category, bucket, thumb_path, sort_order', { count: 'exact' })
+    .eq('is_active', true);
+  if (activeCategory) query = query.eq('category', activeCategory);
+  if (q) {
+    const pattern = `%${q}%`;
+    query = query.or(
+      `name_zh.ilike.${pattern},name_en.ilike.${pattern},description_zh.ilike.${pattern},description_en.ilike.${pattern}`,
+    );
+  }
+
+  const { data: rows, count: total, error: err } = await query
+    .order('sort_order', { ascending: true })
+    .range(from, from + PAGE_SIZE - 1);
+
+  if (err) {
+    return (
+      <div className="alert alert-error">
+        <span>读取服装库失败：{err.message}</span>
+      </div>
+    );
+  }
+
+  const totalPages = Math.max(1, Math.ceil((total ?? 0) / PAGE_SIZE));
+
+  // 3. signed URL
+  const paths = (rows ?? []).map((o) => o.thumb_path);
+  const signedMap = await getSignedUrls('media-official', paths);
+
+  // 公共的 q= 表单（Server Component，直接 form POST 会刷新成 q= 链接——改用 form GET）
+  const buildHref = (overrides: Record<string, string | undefined>) => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries({ q, category: activeCategory, ...overrides })) {
+      if (v) params.set(k, v);
+    }
+    const s = params.toString();
+    return s ? `/wardrobe?${s}` : '/wardrobe';
+  };
+
+  // 4. Empty state
+  if (!rows || rows.length === 0) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold">服装库</h1>
+
+        {/* 搜索表单 */}
+        <form action="/wardrobe" method="get" className="flex w-full max-w-md gap-2">
+          <input type="hidden" name="category" value={activeCategory ?? ''} />
+          <input
+            name="q"
+            type="text"
+            defaultValue={q ?? ''}
+            placeholder="搜索服装名 / 描述"
+            className="input flex-1"
+          />
+          <button type="submit" className="btn btn-primary">搜索</button>
+        </form>
+
+        {/* category tabs */}
+        {categories.length > 0 ? (
+          <div role="tablist" className="tabs tabs-border flex-wrap">
+            <a role="tab" className={`tab ${!activeCategory ? 'tab-active' : ''}`} href={buildHref({ category: undefined, page: '1' })}>全部</a>
+            {categories.map((c) => (
+              <a key={c} role="tab" className={`tab ${activeCategory === c ? 'tab-active' : ''}`} href={buildHref({ category: c, page: '1' })}>{c}</a>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="alert alert-warning alert-soft">
+          <div>
+            <h3 className="font-bold">没找到匹配的服装</h3>
+            <p>试试清除筛选条件或换个关键词</p>
+          </div>
+          <div className="flex gap-2">
+            <Link href="/wardrobe" className="btn btn-sm btn-ghost">清除筛选</Link>
+            <Link href="/poses" className="btn btn-sm btn-primary">去姿势库</Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h1 className="text-2xl font-bold">服装库</h1>
+        <span className="badge badge-ghost ml-auto">{total ?? 0} 套</span>
+      </div>
+
+      {/* 搜索表单 */}
+      <form action="/wardrobe" method="get" className="flex w-full max-w-md gap-2">
+        <input type="hidden" name="category" value={activeCategory ?? ''} />
+        <input
+          name="q"
+          type="text"
+          defaultValue={q ?? ''}
+          placeholder="搜索服装名 / 描述"
+          className="input flex-1"
+        />
+        <button type="submit" className="btn btn-primary">搜索</button>
+        {q ? (
+          <Link href={buildHref({ q: undefined, page: '1' })} className="btn btn-outline">清除</Link>
+        ) : null}
+      </form>
+
+      {/* category tabs */}
+      {categories.length > 0 ? (
+        <div role="tablist" className="tabs tabs-border flex-wrap">
+          <a role="tab" className={`tab ${!activeCategory ? 'tab-active' : ''}`} href={buildHref({ category: undefined, page: '1' })}>全部</a>
+          {categories.map((c) => (
+            <a key={c} role="tab" className={`tab ${activeCategory === c ? 'tab-active' : ''}`} href={buildHref({ category: c, page: '1' })}>{c}</a>
+          ))}
+        </div>
+      ) : null}
+
+      {/* 图片网格 */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+        {rows.map((o) => (
+          <MediaCard
+            key={o.id}
+            title={o.name_zh}
+            subtitle={o.category ?? null}
+            signedUrl={signedMap[o.thumb_path]}
+            aspectRatio="aspect-[3/4]"
+            compact
+          />
+        ))}
+      </div>
+
+      {/* 分页 */}
+      {totalPages > 1 ? (
+        <div className="flex flex-wrap justify-center gap-1">
+          {Array.from({ length: Math.min(7, totalPages) }, (_, i) => i + 1).map((p) => (
+            <Link
+              key={p}
+              href={buildHref({ page: String(p) })}
+              className={`btn btn-sm ${p === page ? 'btn-primary' : 'btn-outline'}`}
+            >
+              {p}
+            </Link>
+          ))}
+          <span className="btn btn-sm btn-ghost">共 {total} 套</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}

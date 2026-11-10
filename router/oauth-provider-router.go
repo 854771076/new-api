@@ -40,6 +40,12 @@ func registerOAuthProviderRoutes(router *gin.Engine) {
 	// UserInfo requires a valid access token.
 	router.GET("/oauth/userinfo", rateLimit, controller.OAuthUserInfo)
 
+	// Top-up checkout requires a valid access token with the api:write scope.
+	router.POST("/oauth/topup/checkout", rateLimit, controller.OAuthTopupCheckout)
+
+	// Logs list requires a valid access token with the api:read scope.
+	router.GET("/oauth/logs", rateLimit, controller.OAuthLogsList)
+
 	// OIDC discovery and JWKS.
 	router.GET("/.well-known/openid-configuration", controller.OAuthDiscovery)
 	router.GET("/oauth/jwks", controller.OAuthJWKS)

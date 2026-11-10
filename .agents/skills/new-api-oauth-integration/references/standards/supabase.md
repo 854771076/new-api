@@ -258,3 +258,64 @@ Component renders cannot set cookies (middleware does the refresh).
 - [ ] Private buckets are read through short-lived signed URLs, and
       `storage.objects` policies enforce `client_id` and owner.
 - [ ] Upload MIME type and size are validated server-side.
+
+## Long-Running Work and Supabase Limits
+
+Supabase request and function limits change the architecture of any job that
+takes more than a few seconds.
+
+| Surface | Limit | Consequence |
+|---------|-------|-------------|
+| PostgREST as `anon` | 3 s statement timeout | Guest reads must stay trivial |
+| PostgREST as `authenticated` | 8 s statement timeout | No large synchronous aggregation in the browser |
+| PostgREST as `service_role` | No statement timeout | Long SQL only from trusted server code |
+| Edge Function wall clock | 150 s (Free) / 400 s (paid) | A function cannot outlive these bounds |
+| Edge Function CPU time | 2 s | CPU-heavy loops fail even inside the wall clock |
+| Edge Function idle before response | 150 s | No silent work while the client waits |
+
+- A gateway AI stream longer than the function limit must be consumed by the
+  client or a worker, not buffered inside an Edge Function.
+
+| Work size | Pattern |
+|-----------|---------|
+| Seconds | Call the gateway or PostgREST directly from the browser; keep token refresh in the request path |
+| Tens of seconds | Run an Edge Function under both the wall clock and CPU limits; stream or return a job id |
+| Minutes+ | Insert a job row, return its id, run the work outside the request, and let the client poll or subscribe |
+
+## Seeding the Asset Packs
+
+`scripts/seed-assets.ts` uploads a local `pack.json` library to Storage and
+upserts the metadata tables. It is idempotent per `(client_id, provider_id)`,
+writes in batches of 100, counts and skips individual file problems, and aborts
+on a missing pack directory or missing credentials.
+
+```bash
+# from the project root, with .env.local loaded
+bun run scripts/seed-assets.ts --pack-root <dir> --client-id <oauth-app-id>
+```
+
+- Requires `SUPABASE_URL` (or `NEXT_PUBLIC_SUPABASE_URL`) plus
+  `SUPABASE_SECRET_KEY`; the secret key never leaves the server.
+- Expected layout: `<dir>/costume-library/pack.json` and
+  `<dir>/pose-library/pack.json`, with image paths resolved relative to each
+  library directory. `<dir>` may be absolute or relative, on any platform.
+- Bucket `media-official`; object keys are
+  `{client_id}/outfits-thumbs/<id>.<ext>`, `{client_id}/outfits/<id>.<ext>`,
+  `{client_id}/poses-thumbs/<id>.<ext>`, and `{client_id}/poses/<id>.<ext>`.
+  When a costume thumb is missing, the preview file is uploaded under the thumb
+  key instead.
+- Tables `outfits` and `poses`, conflict target `client_id,provider_id`. Rows
+  carry `name_zh` / `name_en`, descriptions, keywords or tags, `category`, and
+  the `bucket` + `thumb_path` + `preview_path` trio; poses also carry
+  `pose_set`, `system`, and `angle`.
+- `bootstrap.ps1 -PackRoot <dir>` and `bootstrap.sh --pack-root <dir>` run this
+  step after the provider and admin checks.
+
+### 人物上传 Route Handler 标准实现（Service Role）
+
+- Endpoint: `POST /api/characters` （multipart/form-data；`DELETE ?id=...`；`PATCH ?id=...`）
+- 文件校验（**必须服务端再次校验，前端校验只是 UX**）：size ≤ 8MB；MIME ∈ `image/jpeg, image/png, image/webp`。
+- 用 `createAdminSupabase()`（service_role client）写 Storage bucket `media-user/{user_id}/{uuid}.{ext}`。Service role 绕过 RLS 写入；**绝对不要把 service_role key 吐给前端**。
+- Upsert `public.characters (id, client_id, user_id, name, description, bucket, image_path)`。主键/冲突键 `id`；owner 约束靠 RLS（`auth.uid() = user_id`）。
+- 删除前**先查 `user_id = auth.uid()`** 再删 Storage 对象与 DB 行，避免 service_role 下 RLS 失效越权。
+- 推荐 uploader 组件：`src/components/CharacterUploader.tsx`（`'use client'`；drag-drop + click-to-upload + `XMLHttpRequest` 进度 + 预览；成功后 `router.refresh()`）。
