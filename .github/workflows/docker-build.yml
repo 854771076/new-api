@@ -96,8 +96,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: mode=max
-          sbom: true
+          # OCI attestations are only supported by Docker Hub; private
+          # registries like ACR personal reject the empty-v1 manifest.
+          provenance: ${{ vars.DOCKER_REGISTRY == '' && 'mode=max' || 'false' }}
+          sbom: ${{ vars.DOCKER_REGISTRY == '' }}
 
       # Cosign keyless signing targets the upstream Docker Hub image; private
       # registries (e.g. ACR personal) may not support OCI referrers.
