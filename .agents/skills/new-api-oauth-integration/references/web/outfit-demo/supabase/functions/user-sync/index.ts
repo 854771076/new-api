@@ -12,8 +12,14 @@
 //
 // gateway_user_id 来源（按顺序，全部由服务端控制或已验证）：
 //   1. auth.users.app_metadata.gateway_user_id（只有 service_role / Admin API 可写）
-//   2. 用 app_metadata.gateway_access_token 调网关 /oauth/userinfo 得到的 sub
-//   3. 已验证的 OIDC identity_data.sub（GATEWAY_OIDC_PROVIDER 指定的 provider）
+//   2. 已验证的 OIDC identity_data.sub（GATEWAY_OIDC_PROVIDER 指定的 provider）
+//   3. 用 app_metadata.gateway_access_token 调网关 /oauth/userinfo 得到的 sub
+//      （该令牌由 service_role 写入，可信）
+//
+// display_name 来自网关 /oauth/userinfo（需要 profile scope）。Supabase 不会把
+// provider_token 写进 app_metadata，因此回调页会把 session.provider_token 放在
+// 请求体里传进来；这种客户端提供的令牌必须先调 userinfo 校验，且 sub 与上面
+// 已验证的 gateway_user_id 相同才会被采用。
 //
 // 环境变量：
 //   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY  —— Edge Function 运行时自动提供
@@ -97,22 +103,13 @@ Deno.serve(async (req) => {
 
     const gatewayUrl = Deno.env.get('GATEWAY_BASE_URL') || '';
     const gatewayProvider = Deno.env.get('GATEWAY_OIDC_PROVIDER') || 'newapi';
-    const gatewayAccessToken =
+    const appMetadataToken =
       typeof user.app_metadata?.gateway_access_token === 'string'
         ? user.app_metadata.gateway_access_token
         : '';
 
-    let gatewayProfile: GatewayProfile | null = null;
-    if (gatewayUrl && gatewayAccessToken) {
-      gatewayProfile = await fetchGatewayProfile(gatewayUrl, gatewayAccessToken);
-    }
-
-    // gateway_user_id 只能来自服务端事实：app_metadata、已验证的 OIDC sub，
-    // 或网关 userinfo 的校验结果。
+    // gateway_user_id 只能来自服务端事实：app_metadata 或已验证的 OIDC sub。
     let gatewayUserId = positiveInt(user.app_metadata?.gateway_user_id);
-    if (!gatewayUserId && gatewayProfile) {
-      gatewayUserId = gatewayProfile.sub;
-    }
     if (!gatewayUserId) {
       const identity = user.identities?.find(
         (item) =>
@@ -121,6 +118,31 @@ Deno.serve(async (req) => {
       );
       gatewayUserId = positiveInt(identity?.identity_data?.sub);
     }
+
+    let gatewayProfile: GatewayProfile | null = null;
+    if (gatewayUrl) {
+      if (appMetadataToken) {
+        gatewayProfile = await fetchGatewayProfile(gatewayUrl, appMetadataToken);
+        gatewayUserId ??= gatewayProfile?.sub ?? null;
+      }
+      // 客户端提供的令牌（回调页的 session.provider_token）只有在其 sub 与
+      // 已验证的 gateway_user_id 一致时才可信，避免把别人的网关资料绑定过来。
+      if (!gatewayProfile && gatewayUserId) {
+        let bodyToken = '';
+        try {
+          const payload = await req.json() as { gateway_access_token?: unknown };
+          bodyToken =
+            typeof payload?.gateway_access_token === 'string' ? payload.gateway_access_token : '';
+        } catch {
+          // 没有 body 或不是 JSON：跳过，仅同步 gateway_user_id。
+        }
+        if (bodyToken) {
+          const profile = await fetchGatewayProfile(gatewayUrl, bodyToken);
+          if (profile?.sub === gatewayUserId) gatewayProfile = profile;
+        }
+      }
+    }
+
     if (!gatewayUserId) {
       return json({ ok: true, skipped: 'no gateway_user_id' });
     }

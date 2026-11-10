@@ -68,6 +68,7 @@ create table if not exists public.official_outfits (
   name          text not null,
   category      text not null check (category in ('top','bottom','shoes','accessory','fullset')),
   description   text,
+  -- 仅演示占位。生产环境所有媒体必须存 Supabase Storage，库里保存 bucket + path。
   image_url     text,
   tags          text[] default '{}',
   price_credits int not null default 0,   -- 解锁这套服装要花的"积分"（业务层展示用；真实账单走网关）

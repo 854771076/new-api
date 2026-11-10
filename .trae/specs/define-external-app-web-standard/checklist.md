@@ -1,0 +1,22 @@
+# Checklist
+
+- [x] `references/vendor/` 下存在 `nextjs-react-typescript`、`vercel-react-best-practices`、`ui-ux-pro-max` 三份内置资料，均保留 LICENSE/README 与来源版本说明
+- [x] `references/vendor/README.md` 说明来源路径、版本、许可证、排除项（字体/二进制）与更新方法
+- [x] `references/standards/nextjs.md` 覆盖 App Router、Server/Client 边界、取数缓存、环境变量、loading/error、TypeScript 严格模式
+- [x] `references/standards/daisyui.md` 说明 Tailwind v4 `@plugin "daisyui"` 接入、主题/暗色切换、组件优先与自定义边界
+- [x] `references/standards/vercel.md` 包含 CLI 命令、预览/生产环境变量、部署后三处地址同步（OAuth 回调、Supabase allowlist、应用环境变量）
+- [x] `references/standards/supabase.md` 覆盖 CLI 工作流、custom OIDC provider、RLS + `client_id` 隔离、Edge Function `service_role` 使用边界、`@supabase/ssr`
+- [x] `references/standards/ui-ux.md` 覆盖设计 token、可访问性、loading/空/错误态、响应式、动效克制
+- [x] `SKILL.md` 开头已改为「外部应用开发统一规范（Web）」，含技术栈矩阵与从 0 到上线步骤
+- [x] `SKILL.md` 含「参考资料索引」，每条指向实际存在的 references 文件
+- [x] `SKILL.md` 中原 OAuth/OIDC 与计费内容完整保留（scope、令牌生命周期、安全约束、计费接口）
+- [x] `SKILL.md` 示例代码为 Next.js 版本，且与 outfit-demo 实现一致
+- [x] outfit-demo 使用 Next.js App Router + DaisyUI，`app/` 下存在 `/`、`/wardrobe`、`/history`、`/profile`、`/login`、`/auth/callback`
+- [x] outfit-demo 保留网关令牌持有/刷新、`user-sync` 调用、额度/充值入口与生成调用
+- [x] Rsbuild 相关文件与依赖已移除，`package.json` 脚本为 `next dev` / `next build`
+- [x] `bun run build` 成功，`tsc --noEmit` 无错误
+- [x] 本地登录闭环验证通过：Supabase custom provider → 回调兑换 → user-sync → 个人中心显示显示名与网关 User.Id
+- [x] `check-env.ps1` 支持 `-Install`，缺少 CLI 时按平台安装并复验；不带参数时只检查
+- [x] `check-env.sh` 支持 `--install`，行为与 PowerShell 版一致
+- [x] 自检项包含 `vercel` 版本检查，输出 PASS/FAIL 汇总且失败退出码非 0
+- [x] demo `README.md` 更新为 Next.js 命令、环境变量与 Vercel 部署步骤

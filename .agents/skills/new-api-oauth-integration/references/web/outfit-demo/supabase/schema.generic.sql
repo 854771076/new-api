@@ -2,7 +2,7 @@
 -- supabase/schema.sql — Supabase 通用表结构 + RLS（可反复执行，所有 CREATE
 -- 用 IF NOT EXISTS，所有策略只作用于新建表）。
 -- ============================================================================
--- 约定：所有业务表携带 client_id（固定字符串，来自脚手架 VITE_GATEWAY_CLIENT_ID）。
+-- 约定：所有业务表携带 client_id（固定字符串，来自脚手架 NEXT_PUBLIC_GATEWAY_CLIENT_ID）。
 -- RLS 策略同时匹配 auth.uid() = 当前会话用户 AND client_id = App 固定值，
 -- 保证同一 Supabase 项目可以被多个 App 复用而不互相穿透。
 -- ============================================================================
