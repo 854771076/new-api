@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -669,6 +670,103 @@ func TestOAuthRevokePublicClientWithoutSecret(t *testing.T) {
 	stored, err := model.GetOAuthRefreshTokenByHash(model.OAuthRefreshTokenHash(rawRefreshToken))
 	require.NoError(t, err)
 	assert.NotZero(t, stored.RevokedAt)
+}
+
+func TestOAuthConsentContextReturnsDisplayMetadataAndFreshCSRFToken(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	env.app.LogoURL = "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("logo"))
+	require.NoError(t, model.DB.Save(env.app).Error)
+
+	request := httptest.NewRequest(http.MethodGet,
+		"http://gateway.example/oauth/consent/context?client_id="+url.QueryEscape(env.app.ClientID), nil)
+	c, recorder := env.newConsentContext(request)
+
+	OAuthConsentContext(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var body struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Name      string `json:"name"`
+			LogoURL   string `json:"logo_url"`
+			CSRFToken string `json:"csrf_token"`
+		} `json:"data"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &body))
+	assert.True(t, body.Success)
+	assert.Equal(t, env.app.Name, body.Data.Name)
+	assert.Equal(t, env.app.LogoURL, body.Data.LogoURL)
+	require.NoError(t, service.ValidateOAuthConsentCSRFToken(body.Data.CSRFToken, env.sessionID, env.app.Id))
+}
+
+func TestOAuthConsentContextRejectsAnonymousCrossSiteAndUnknownClient(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	gin.SetMode(gin.TestMode)
+
+	t.Run("anonymous", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet,
+			"http://gateway.example/oauth/consent/context?client_id="+url.QueryEscape(env.app.ClientID), nil)
+
+		OAuthConsentContext(c)
+
+		assert.Equal(t, http.StatusUnauthorized, recorder.Code)
+	})
+
+	t.Run("cross-site", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet,
+			"http://gateway.example/oauth/consent/context?client_id="+url.QueryEscape(env.app.ClientID), nil)
+		request.Header.Set("Sec-Fetch-Site", "cross-site")
+		c, recorder := env.newConsentContext(request)
+
+		OAuthConsentContext(c)
+
+		assert.Equal(t, http.StatusForbidden, recorder.Code)
+	})
+
+	t.Run("unknown client", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodGet,
+			"http://gateway.example/oauth/consent/context?client_id=unknown", nil)
+		c, recorder := env.newConsentContext(request)
+
+		OAuthConsentContext(c)
+
+		var body struct {
+			Success bool `json:"success"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &body))
+		assert.False(t, body.Success)
+	})
+}
+
+func TestValidateOAuthAppLogo(t *testing.T) {
+	validPNG := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("png"))
+	tests := []struct {
+		name    string
+		logo    string
+		wantErr bool
+	}{
+		{name: "empty means no logo", logo: ""},
+		{name: "https URL", logo: "https://cdn.example.com/logo.png"},
+		{name: "inline PNG", logo: validPNG},
+		{name: "inline WebP", logo: "data:image/webp;base64," + base64.StdEncoding.EncodeToString([]byte("webp"))},
+		{name: "plain http is rejected", logo: "http://cdn.example.com/logo.png", wantErr: true},
+		{name: "javascript scheme is rejected", logo: "javascript:alert(1)", wantErr: true},
+		{name: "SVG data URI is rejected", logo: "data:image/svg+xml;base64," + base64.StdEncoding.EncodeToString([]byte("<svg/>")), wantErr: true},
+		{name: "invalid base64 is rejected", logo: "data:image/png;base64,***", wantErr: true},
+		{name: "oversized value is rejected", logo: "https://cdn.example.com/" + strings.Repeat("a", model.OAuthAppLogoMaxLength), wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateOAuthAppLogo(test.logo)
+			if test.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
 }
 
 func TestOAuthDiscoveryAdvertisesNoneAuthMethod(t *testing.T) {

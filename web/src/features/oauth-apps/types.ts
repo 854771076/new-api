@@ -1,6 +1,7 @@
 export interface OAuthApp {
   id: number
   name: string
+  logo_url: string
   client_id: string
   redirect_uris: string[]
   post_logout_redirect_uris: string[]
@@ -14,6 +15,7 @@ export interface OAuthApp {
 
 export interface CreateOAuthAppRequest {
   name: string
+  logo_url: string
   redirect_uris: string[]
   post_logout_redirect_uris: string[]
   scopes: string[]
@@ -24,6 +26,12 @@ export interface CreateOAuthAppResponse {
   success: boolean
   data: OAuthApp
   client_secret: string
+}
+
+export interface OAuthConsentContext {
+  name: string
+  logo_url: string
+  csrf_token: string
 }
 
 export const OAUTH_SCOPES = [

@@ -24,6 +24,11 @@ const (
 	OAuthAppPostLogoutURIMax     = 10
 	OAuthAppScopeMaxLength       = 512
 	OAuthAppRedirectURIMaxLength = 1024
+
+	// OAuthAppLogoMaxLength bounds the stored logo. The value is a data URI or
+	// URL stored in a TEXT column, so it must stay under MySQL's 64 KB TEXT
+	// limit to remain compatible with every supported database.
+	OAuthAppLogoMaxLength = 60 * 1024
 )
 
 var (
@@ -40,6 +45,7 @@ var (
 type OAuthApp struct {
 	Id                     int    `json:"id" gorm:"primaryKey"`
 	Name                   string `json:"name" gorm:"type:varchar(100);not null;index"`
+	LogoURL                string `json:"logo_url" gorm:"type:text;column:logo_url"`
 	ClientID               string `json:"client_id" gorm:"type:varchar(64);uniqueIndex;not null;column:client_id"`
 	ClientSecretHash       string `json:"-" gorm:"type:varchar(64);not null;column:client_secret_hash"`
 	RedirectURIs           string `json:"-" gorm:"type:text"` // JSON array of allowed redirect URIs

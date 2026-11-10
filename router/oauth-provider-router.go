@@ -24,6 +24,7 @@ func registerOAuthProviderRoutes(router *gin.Engine) {
 	{
 		authorizeGroup.GET("/authorize", controller.OAuthAuthorize)
 		authorizeGroup.POST("/authorize", controller.OAuthAuthorizeConsent)
+		authorizeGroup.GET("/consent/context", controller.OAuthConsentContext)
 	}
 
 	// Token, introspect, and revoke endpoints require client authentication and

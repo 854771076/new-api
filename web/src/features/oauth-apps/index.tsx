@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useId, useState } from 'react'
+import { type ChangeEvent, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -158,6 +158,13 @@ export function OAuthAppsPage() {
                 <tr key={app.id} className='border-b last:border-0'>
                   <td className='px-4 py-3 font-medium'>
                     <div className='flex items-center gap-2'>
+                      {app.logo_url ? (
+                        <img
+                          src={app.logo_url}
+                          alt=''
+                          className='size-6 shrink-0 rounded border object-contain'
+                        />
+                      ) : null}
                       {app.name}
                       {app.public_client && (
                         <Badge variant='secondary'>{t('Public Client')}</Badge>
@@ -296,10 +303,41 @@ export function OAuthAppsPage() {
 
 interface AppFormData {
   name: string
+  logo_url: string
   redirect_uris: string[]
   post_logout_redirect_uris: string[]
   scopes: string[]
   public_client: boolean
+}
+
+// Logos are stored in a TEXT column, so the encoded data URI must stay under
+// 64 KB. The browser downscales the image and re-encodes it before checking.
+const LOGO_MAX_DATA_URL_LENGTH = 60 * 1024
+const LOGO_MAX_FILE_BYTES = 2 * 1024 * 1024
+const LOGO_MAX_DIMENSION = 256
+const LOGO_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+
+async function encodeLogoDataUrl(file: File): Promise<string> {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(
+    1,
+    LOGO_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height)
+  )
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+  canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+  const context = canvas.getContext('2d')
+  if (!context) {
+    throw new Error('Canvas is not available')
+  }
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+  bitmap.close()
+  // WebP keeps logos small; browsers without canvas WebP encoding fall back to
+  // PNG, which the size check below may reject for large images.
+  const webp = canvas.toDataURL('image/webp', 0.85)
+  return webp.startsWith('data:image/webp')
+    ? webp
+    : canvas.toDataURL('image/png')
 }
 
 function AppForm({
@@ -315,6 +353,10 @@ function AppForm({
 }) {
   const { t } = useTranslation()
   const [name, setName] = useState(defaultValues?.name ?? '')
+  const [logoUrl, setLogoUrl] = useState(defaultValues?.logo_url ?? '')
+  const [logoError, setLogoError] = useState('')
+  const logoInputRef = useRef<HTMLInputElement>(null)
+  const logoInputId = useId()
   const [redirectUris, setRedirectUris] = useState(
     defaultValues?.redirect_uris?.join('\n') ?? ''
   )
@@ -327,10 +369,37 @@ function AppForm({
   )
   const publicClientId = useId()
 
+  const handleLogoChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setLogoError('')
+    if (!LOGO_TYPES.includes(file.type)) {
+      setLogoError(t('Logo must be a PNG, JPEG or WebP image'))
+      return
+    }
+    if (file.size > LOGO_MAX_FILE_BYTES) {
+      setLogoError(t('Logo is too large. Please choose a smaller image.'))
+      return
+    }
+    void encodeLogoDataUrl(file)
+      .then((dataUrl) => {
+        if (dataUrl.length > LOGO_MAX_DATA_URL_LENGTH) {
+          setLogoError(t('Logo is too large. Please choose a smaller image.'))
+          return
+        }
+        setLogoUrl(dataUrl)
+      })
+      .catch(() => {
+        setLogoError(t('Logo must be a PNG, JPEG or WebP image'))
+      })
+  }
+
   const handleSubmit = () => {
     if (loading) return
     onSubmit({
       name,
+      logo_url: logoUrl,
       redirect_uris: redirectUris
         .split('\n')
         .map((s) => s.trim())
@@ -346,6 +415,62 @@ function AppForm({
 
   return (
     <div className='space-y-4'>
+      <div>
+        <Label htmlFor={logoInputId} className='mb-1 block text-sm font-medium'>
+          {t('App Logo')}
+        </Label>
+        <div className='flex items-center gap-3'>
+          {logoUrl ? (
+            <img
+              src={logoUrl}
+              alt=''
+              className='size-12 shrink-0 rounded-md border bg-background object-contain'
+            />
+          ) : (
+            <div
+              aria-hidden='true'
+              className='flex size-12 shrink-0 items-center justify-center rounded-md border bg-muted text-lg font-semibold'
+            >
+              {(name || '?').slice(0, 1).toUpperCase()}
+            </div>
+          )}
+          <input
+            id={logoInputId}
+            ref={logoInputRef}
+            type='file'
+            accept={LOGO_TYPES.join(',')}
+            className='sr-only'
+            disabled={loading}
+            onChange={handleLogoChange}
+          />
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            disabled={loading}
+            onClick={() => logoInputRef.current?.click()}
+          >
+            {t('Upload')}
+          </Button>
+          {logoUrl ? (
+            <Button
+              type='button'
+              variant='ghost'
+              size='sm'
+              disabled={loading}
+              onClick={() => {
+                setLogoUrl('')
+                setLogoError('')
+              }}
+            >
+              {t('Remove')}
+            </Button>
+          ) : null}
+        </div>
+        {logoError ? (
+          <p className='text-destructive mt-1 text-xs'>{logoError}</p>
+        ) : null}
+      </div>
       <div>
         <label className='mb-1 block text-sm font-medium'>
           {t('App Name')}
@@ -494,6 +619,7 @@ function EditAppDialog({
         <AppForm
           defaultValues={{
             name: app.name,
+            logo_url: app.logo_url,
             redirect_uris: app.redirect_uris,
             post_logout_redirect_uris: app.post_logout_redirect_uris,
             scopes: app.scopes,

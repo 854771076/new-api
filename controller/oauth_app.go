@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 type OAuthAppResponse struct {
 	Id                     int      `json:"id"`
 	Name                   string   `json:"name"`
+	LogoURL                string   `json:"logo_url"`
 	ClientID               string   `json:"client_id"`
 	RedirectURIs           []string `json:"redirect_uris"`
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
@@ -39,6 +41,7 @@ func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
 	return &OAuthAppResponse{
 		Id:                     app.Id,
 		Name:                   app.Name,
+		LogoURL:                app.LogoURL,
 		ClientID:               app.ClientID,
 		RedirectURIs:           app.GetRedirectURIs(),
 		PostLogoutRedirectURIs: app.GetPostLogoutRedirectURIs(),
@@ -55,6 +58,7 @@ func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
 // CreateOAuthAppRequest is the request body for creating an OAuth app.
 type CreateOAuthAppRequest struct {
 	Name                   string   `json:"name" binding:"required"`
+	LogoURL                string   `json:"logo_url"`
 	RedirectURIs           []string `json:"redirect_uris" binding:"required"`
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
 	Scopes                 []string `json:"scopes" binding:"required"`
@@ -73,9 +77,14 @@ func CreateOAuthApp(c *gin.Context) {
 	}
 
 	req.Name = strings.TrimSpace(req.Name)
+	req.LogoURL = strings.TrimSpace(req.LogoURL)
 	req.SupabaseProjectRef = strings.TrimSpace(req.SupabaseProjectRef)
 	if req.Name == "" {
 		common.ApiErrorT(c, "App name is required")
+		return
+	}
+	if err := validateOAuthAppLogo(req.LogoURL); err != nil {
+		common.ApiError(c, err)
 		return
 	}
 	if len(req.SupabaseProjectRef) > 64 {
@@ -111,6 +120,7 @@ func CreateOAuthApp(c *gin.Context) {
 
 	app := &model.OAuthApp{
 		Name:               req.Name,
+		LogoURL:            req.LogoURL,
 		ClientID:           clientID,
 		ClientSecretHash:   secretHash,
 		Status:             model.OAuthAppStatusEnabled,
@@ -184,6 +194,7 @@ func GetOAuthApp(c *gin.Context) {
 // UpdateOAuthAppRequest is the request body for updating an OAuth app.
 type UpdateOAuthAppRequest struct {
 	Name                   *string  `json:"name"`
+	LogoURL                *string  `json:"logo_url"`
 	RedirectURIs           []string `json:"redirect_uris"`
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
 	Scopes                 []string `json:"scopes"`
@@ -215,6 +226,14 @@ func UpdateOAuthApp(c *gin.Context) {
 	if req.Status != nil {
 		status = *req.Status
 	}
+	if req.LogoURL != nil {
+		logo := strings.TrimSpace(*req.LogoURL)
+		req.LogoURL = &logo
+		if err := validateOAuthAppLogo(logo); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 
 	if err := validateOAuthRedirectURIs(req.RedirectURIs); err != nil {
 		common.ApiError(c, err)
@@ -240,6 +259,10 @@ func UpdateOAuthApp(c *gin.Context) {
 	}
 
 	changed := false
+	if req.LogoURL != nil && app.LogoURL != *req.LogoURL {
+		app.LogoURL = *req.LogoURL
+		changed = true
+	}
 	if req.SupabaseProjectRef != nil {
 		ref := strings.TrimSpace(*req.SupabaseProjectRef)
 		if len(ref) > 64 {
@@ -390,6 +413,44 @@ func taskErrorFromOAuthPolicy(apiErr *types.NewAPIError) *taskdto.TaskError {
 	taskErr := service.TaskErrorFromAPIError(apiErr)
 	taskErr.LocalError = true
 	return taskErr
+}
+
+// validateOAuthAppLogo accepts an empty value, an https URL, or an inline image
+// data URI. The consent page renders the value with an <img> element, so only
+// raster image MIME types are accepted and the stored value is bounded.
+func validateOAuthAppLogo(logo string) error {
+	logo = strings.TrimSpace(logo)
+	if logo == "" {
+		return nil
+	}
+	if len(logo) > model.OAuthAppLogoMaxLength {
+		return common.NewMessage("Logo is too large")
+	}
+	for _, prefix := range []string{
+		"data:image/png;base64,",
+		"data:image/jpeg;base64,",
+		"data:image/webp;base64,",
+	} {
+		data, ok := strings.CutPrefix(logo, prefix)
+		if !ok {
+			continue
+		}
+		data = strings.TrimSpace(data)
+		if data == "" {
+			return common.NewMessage("Logo data is invalid")
+		}
+		if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+			if _, rawErr := base64.RawStdEncoding.DecodeString(data); rawErr != nil {
+				return common.NewMessage("Logo data is invalid")
+			}
+		}
+		return nil
+	}
+	parsed, err := url.Parse(logo)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" {
+		return common.NewMessage("Logo must be an https URL or a PNG, JPEG, or WebP image")
+	}
+	return nil
 }
 
 // validateOAuthRedirectURIs checks that each URI is an absolute HTTPS/HTTP URL

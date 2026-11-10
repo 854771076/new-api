@@ -193,6 +193,39 @@ func OAuthAuthorizeConsent(c *gin.Context) {
 	issueOAuthCode(c, app, identity, req)
 }
 
+// OAuthConsentContext returns the metadata the consent page needs to render,
+// plus a CSRF token freshly bound to the current dashboard session. Fetching it
+// on page load shows the application name/logo instead of the raw client_id and
+// recovers from a consent URL whose CSRF token expired.
+func OAuthConsentContext(c *gin.Context) {
+	if !isSameOriginOAuthRequest(c) {
+		c.String(http.StatusForbidden, "request origin is not allowed")
+		return
+	}
+	app, err := model.GetOAuthAppByClientID(strings.TrimSpace(c.Query("client_id")))
+	if err != nil {
+		common.ApiErrorT(c, "Unknown client_id")
+		return
+	}
+	if !app.IsEnabled() {
+		common.ApiErrorT(c, "Client is disabled")
+		return
+	}
+	identity, ok := middleware.GetSessionAuthIdentity(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": "a dashboard login session is required",
+		})
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"name":       app.Name,
+		"logo_url":   app.LogoURL,
+		"csrf_token": service.IssueOAuthConsentCSRFToken(identity.SessionID, app.Id),
+	})
+}
+
 // validateOAuthRequestedScope rejects unknown or app-disallowed scopes. The GET
 // authorize endpoint and the POST consent submission must apply exactly the
 // same rule so a tampered form cannot escalate its grant.
