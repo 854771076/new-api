@@ -271,8 +271,8 @@ func isSameOriginOAuthRequest(c *gin.Context) bool {
 	if err != nil {
 		return false
 	}
-	scheme := "http"
-	if c.Request.TLS != nil || common.SessionCookieSecure {
+	scheme := common.DetectRequestScheme(c.Request)
+	if scheme != "https" && common.SessionCookieSecure {
 		scheme = "https"
 	}
 	requestOrigin, err := common.NormalizeOrigin(scheme + "://" + c.Request.Host)

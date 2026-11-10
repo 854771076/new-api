@@ -3,10 +3,35 @@ package common
 import (
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
 )
+
+
+// DetectRequestScheme returns the scheme the browser used to reach the app,
+// honoring reverse-proxy headers before falling back to the direct connection.
+// X-Forwarded-Proto is authoritative when present (TLS is typically terminated
+// at the proxy, so r.TLS is nil inside the container).
+func DetectRequestScheme(r *http.Request) string {
+	if r == nil {
+		return "http"
+	}
+	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto != "" {
+		return strings.ToLower(proto)
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	if r.URL != nil && r.URL.Scheme != "" {
+		return strings.ToLower(r.URL.Scheme)
+	}
+	if proto := strings.TrimSpace(r.Header.Get("X-Forwarded-Protocol")); proto != "" {
+		return strings.ToLower(proto)
+	}
+	return "http"
+}
 
 // NormalizeOrigin validates and canonicalizes a browser origin. Only an exact
 // scheme/host/effective-port match is meaningful; paths and wildcards are not
