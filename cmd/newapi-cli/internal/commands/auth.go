@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -58,8 +57,11 @@ func newAuthLoginCmd() *cobra.Command {
 			if !strings.HasPrefix(server, "https://") && !strings.HasPrefix(server, "http://") {
 				return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "server must start with http:// or https://"}
 			}
-			if strings.HasPrefix(server, "http://") && !isLoopbackServer(server) {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s is not HTTPS; the authorization code and token will be sent in plaintext.\n", server)
+			// Reject an insecure server before printing the authorize URL, so a
+			// non-loopback plaintext endpoint never receives the code.
+			c, err := client.New(server, "")
+			if err != nil {
+				return mapClientConfigErr(err)
 			}
 
 			authURL := server + "/cli/authorize"
@@ -73,10 +75,6 @@ func newAuthLoginCmd() *cobra.Command {
 				return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "authorization code is required"}
 			}
 
-			c, err := client.New(server, "")
-			if err != nil {
-				return mapClientConfigErr(err)
-			}
 			data, err := c.Do(http.MethodPost, "/api/cli/exchange", map[string]string{"code": code})
 			if err != nil {
 				return mapClientErr(err)
@@ -118,21 +116,6 @@ func loginServer(explicit string, profile *config.Profile) string {
 		return profile.Server
 	}
 	return buildinfo.DefaultServer
-}
-
-// isLoopbackServer reports whether the URL targets the local machine, where
-// plaintext HTTP does not leave the host.
-func isLoopbackServer(server string) bool {
-	u, err := url.Parse(server)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func newAuthStatusCmd() *cobra.Command {

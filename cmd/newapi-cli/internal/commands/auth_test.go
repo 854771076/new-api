@@ -1,9 +1,12 @@
 package commands
 
 import (
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/buildinfo"
 	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/config"
@@ -37,15 +40,16 @@ func TestLoginServerPrecedence(t *testing.T) {
 	})
 }
 
-func TestIsLoopbackServer(t *testing.T) {
-	cases := map[string]bool{
-		"http://localhost:3001":    true,
-		"http://127.0.0.1:3001":    true,
-		"http://[::1]:3001":        true,
-		"http://192.168.1.10:3001": false,
-		"https://api.example.com":  false,
-	}
-	for server, want := range cases {
-		assert.Equal(t, want, isLoopbackServer(server), server)
-	}
+func TestLoginRejectsPlaintextRemoteServer(t *testing.T) {
+	cmd := newAuthCmd()
+	cmd.SetArgs([]string{"login", "--server", "http://api.example.com"})
+	cmd.SetIn(strings.NewReader(""))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+	var cmdErr *CommandError
+	require.ErrorAs(t, err, &cmdErr)
+	assert.Equal(t, ExitUsage, cmdErr.ExitCode)
+	assert.Equal(t, "config_error", cmdErr.Code)
 }
