@@ -16,7 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -24,6 +25,8 @@ import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { getOAuthApps } from '@/features/oauth-apps/api'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -42,9 +45,20 @@ interface UserQuotaDialogProps {
 
 export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const { t } = useTranslation()
+  const { appId, isPlatform } = useActiveApp()
   const [mode, setMode] = useState<QuotaAdjustMode>('add')
   const [amount, setAmount] = useState('')
   const [loading, setLoading] = useState(false)
+
+  const { data: oauthAppsData } = useQuery({
+    queryKey: ['oauth-apps'],
+    queryFn: async () => (await getOAuthApps()).data || [],
+    enabled: !isPlatform,
+  })
+  const appName = useMemo(
+    () => oauthAppsData?.find((app) => app.id === appId)?.name,
+    [oauthAppsData, appId]
+  )
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
@@ -83,6 +97,7 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
         action: 'add_quota',
         mode,
         value: mode === 'override' ? value : Math.abs(value),
+        app_id: appId,
       })
       if (result.success) {
         toast.success(t('Quota adjusted successfully'))
@@ -109,13 +124,20 @@ export function UserQuotaDialog(props: UserQuotaDialogProps) {
   const placeholder = tokensOnly
     ? t('Enter amount in tokens')
     : t('Enter amount in {{currency}}', { currency: currencyLabel })
+  const appLabel = appName || `#${appId}`
 
   return (
     <Dialog
       open={props.open}
       onOpenChange={props.onOpenChange}
-      title={t('Adjust Quota')}
-      description={t('Select an operation mode and enter the amount')}
+      title={
+        isPlatform ? t('Adjust Quota') : `${t('Adjust Quota')} · ${appLabel}`
+      }
+      description={
+        isPlatform
+          ? t('Select an operation mode and enter the amount')
+          : t('Adjusting quota for {{app}}', { app: appLabel })
+      }
       contentHeight='auto'
       bodyClassName='space-y-4'
       footer={

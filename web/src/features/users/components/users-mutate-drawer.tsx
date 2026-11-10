@@ -71,12 +71,14 @@ import {
   normalizeAdminPermissions,
   type AdminPermissionMatrix,
 } from '@/lib/admin-permissions'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { accountPasswordSchema } from '@/lib/password-policy'
 import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
+
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -164,6 +166,7 @@ export function UsersMutateDrawer({
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
+  const { isPlatform } = useActiveApp()
 
   const currentQuotaRaw = form.watch('quota_dollars') || 0
   const selectedRole = form.watch('role')
@@ -598,7 +601,13 @@ export function UsersMutateDrawer({
           open={quotaDialogOpen}
           onOpenChange={setQuotaDialogOpen}
           userId={currentRow.id}
-          currentQuota={parseQuotaFromDollars(currentQuotaRaw || 0)}
+          // The dialog adjusts the app wallet when an app is active, so the
+          // preview must use that pool instead of the platform balance.
+          currentQuota={
+            isPlatform
+              ? parseQuotaFromDollars(currentQuotaRaw || 0)
+              : Number(currentRow.app_quota || 0)
+          }
           onSuccess={refreshUserData}
         />
       )}

@@ -89,7 +89,13 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 	if relayInfo.UsePrice {
 		return nil
 	}
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
+	var userQuota int
+	var err error
+	if relayInfo.AppId > 0 {
+		userQuota, err = model.GetUserAppQuota(relayInfo.UserId, relayInfo.AppId)
+	} else {
+		userQuota, err = model.GetUserQuota(relayInfo.UserId, false)
+	}
 	if err != nil {
 		return err
 	}
@@ -451,7 +457,13 @@ func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, pre
 		}
 	} else {
 		// Wallet
-		if quota > 0 {
+		if relayInfo.AppId > 0 {
+			if quota > 0 {
+				err = model.DecreaseUserAppQuota(relayInfo.UserId, relayInfo.AppId, quota)
+			} else {
+				err = model.IncreaseUserAppQuota(relayInfo.UserId, relayInfo.AppId, -quota)
+			}
+		} else if quota > 0 {
 			err = model.DecreaseUserQuota(relayInfo.UserId, quota, false)
 		} else {
 			err = model.IncreaseUserQuota(relayInfo.UserId, -quota, false)

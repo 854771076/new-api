@@ -3,8 +3,9 @@ name: newapi-cli
 description: >-
   Operate a running new-api instance from the terminal with the bundled
   `newapi-cli` admin tool. Use when the user asks to log in to a new-api
-  server, inspect or manage users, channels, API tokens, logs, or server
-  options, create an API key for an agent, script admin API calls, or
+  server, inspect or manage users, channels, API tokens, logs, server
+  options, subscription plans, or app products, create an API key for an
+  agent, script admin API calls, or
   maintain a new-api deployment without the web dashboard. Also use when a
   task mentions `newapi-cli`, `/cli/authorize`, `~/.newapi-cli/config.json`,
   or a `nap_` personal access token.
@@ -77,23 +78,35 @@ fails with HTTP 403, code `ACCESS_TOKEN_SCOPE_DENIED`, exit code 2 — re-run
 | `log list` | `log:read` |
 | `option get` | `option:read` |
 | `option update` | `option:write` |
+| `plan list`, `product list`, `product orders` | `billing:read` |
+| `product update <id>` | `billing:read`, `billing:write` |
+| `product create`, `product enable`, `product disable`, `product complete-order` | `billing:write` |
 | `api ...` | the scope of the target endpoint |
 | `auth status` | none (local config only) |
 
 The authorize page preselects `profile:read`, `usage:read`, `api_key:read`,
 `api_key:write`, `user:read`, `user:write`, `channel:read`, `log:read`,
 `model:read`, `model:write`, `deployment:read`, `deployment:write`,
-`option:read`, `option:write`.
+`option:read`, `option:write`. `billing:read` and `billing:write` are not
+preselected, so grant them on the authorize page before using `plan` or
+`product`.
 
 ## Commands
 
 ```text
 auth login|status|logout
-user   list [--p 1] [--page-size 20] | get <id>
+user   list [--p 1] [--page-size 20] [--app-id <id>] | get <id>
 channel list [--p 1] [--page-size 20] | get <id>
 token  list [--p 1] [--page-size 20] | get <id> | create --name <name> [flags]
 log    list [--p 1] [--page-size 20] [--type <n>]
 option get <key> | update <key>=<value>
+plan   list [--p 1] [--page-size 20] [--app-id <id>]
+product list [--app-id <id>] [--p 1] [--page-size 20]
+        | create --app-id <id> --name <name> --price <amount> --quota <n> [flags]
+        | update <id> [flags]
+        | enable <id> | disable <id>
+        | orders [--app-id <id>] [--user-id <id>] [--p 1] [--page-size 20]
+        | complete-order <trade_no>
 api    <METHOD> </path> [--data '<json>' | --data @file.json]
 ```
 
@@ -111,6 +124,44 @@ Global flags: `--profile <name>`, `--pretty`.
 The create response includes the new token `id` and its **full** `key`. This is
 the only time the key is returned; later `token list` / `token get` calls are
 masked. Capture it immediately if the caller needs the key.
+
+## App-scoped plans and products
+
+Every plan, product, and app wallet belongs to one app. Omit `--app-id` to see
+the platform-wide view; pass it to read that app's data.
+
+```bash
+newapi-cli user list --app-id 3                 # adds app_quota / app_used_quota
+newapi-cli plan list --app-id 3
+newapi-cli product list --app-id 3
+newapi-cli product create --app-id 3 --name "Starter" --price 9.99 --quota 100000 \
+  --description "Starter pack" --currency USD --max-purchase-per-user 1
+newapi-cli product update 12 --price 12.99 --enabled=false
+newapi-cli product disable 12
+newapi-cli product orders --app-id 3 --user-id 42
+newapi-cli product complete-order APO123         # write: credits the app wallet
+```
+
+`product create` flags:
+
+- `--app-id`, `--name` (required), `--price` (required, `price_amount`),
+  `--quota` (required, `quota_amount`).
+- `--description`, `--currency` (default `USD`), `--sort-order`,
+  `--max-purchase-per-user` (0 means unlimited), `--enabled` (default `true`),
+  `--stripe-price-id`, `--creem-product-id`, `--waffo-pancake-product-id`.
+
+Notes:
+
+- `product update` reads the current product with `GET /api/app-products/<id>`,
+  overlays the flags you pass, then `PUT`s the complete object. Fields you do
+  not pass keep their current value, so `product update 12 --price 12.99`
+  changes only the price.
+- `plan list` returns every plan; the admin plans endpoint accepts the
+  pagination flags but does not limit the result.
+- `product orders` filters by app and user only; the endpoint has no product
+  filter.
+- Negative `--app-id`, `--price`, `--quota`, or `--max-purchase-per-user` and
+  a missing required flag return `usage_error` (exit 3).
 
 ## Output
 
@@ -191,8 +242,8 @@ newapi-cli auth status   # → {"server":"https://gateway.example.com","..."}
   outside version control.
 - Prefer HTTPS; the token is sent as `Authorization: Bearer <PAT>`.
 - Confirm with the user before destructive or production-wide actions:
-  `option update`, creating/editing channels, deleting tokens, and any
-  `api DELETE`/`api PUT`.
+  `option update`, creating/editing channels, deleting tokens,
+  `product complete-order`, and any `api DELETE`/`api PUT`.
 - Do not bypass the CLI to edit the database, scrape browser cookies, or reuse
   an authorization code. If a scope is missing, re-authorize.
 - Run `auth logout` on shared machines; it removes the active profile only.

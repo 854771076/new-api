@@ -16,15 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import React, { useState } from 'react'
+import React, { useEffect, useState } from 'react'
 
 import {
   getOptionValue,
   useSystemOptions,
 } from '@/features/system-settings/hooks/use-system-options'
+import { useActiveApp } from '@/hooks/use-active-app'
 import useDialogState from '@/hooks/use-dialog'
 
-import { type PlanRecord, type SubscriptionsDialogType } from '../types'
+import type { PlanRecord, SubscriptionsDialogType } from '../types'
 
 const CURRENT_COMPLIANCE_TERMS_VERSION = 'v1'
 
@@ -49,6 +50,7 @@ export function SubscriptionsProvider({
   const [open, setOpen] = useDialogState<SubscriptionsDialogType>(null)
   const [currentRow, setCurrentRow] = useState<PlanRecord | null>(null)
   const [refreshTrigger, setRefreshTrigger] = useState(0)
+  const { appId } = useActiveApp()
   const { data } = useSystemOptions()
   const complianceOptions = getOptionValue(data?.data, {
     'payment_setting.compliance_confirmed': false,
@@ -60,6 +62,11 @@ export function SubscriptionsProvider({
       CURRENT_COMPLIANCE_TERMS_VERSION
 
   const triggerRefresh = () => setRefreshTrigger((prev) => prev + 1)
+
+  useEffect(() => {
+    setOpen(null)
+    setCurrentRow(null)
+  }, [appId, setOpen])
 
   return (
     <SubscriptionsContext

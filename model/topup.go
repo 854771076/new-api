@@ -14,6 +14,7 @@ import (
 
 type TopUp struct {
 	Id              int     `json:"id"`
+	AppId           int     `json:"app_id" gorm:"not null;default:0;index"`
 	UserId          int     `json:"user_id" gorm:"index"`
 	Amount          int64   `json:"amount"`
 	Money           float64 `json:"money"`
@@ -79,6 +80,30 @@ func ValidateTopUpQuotaCapacity(userId int, creditedQuota int) error {
 		return err
 	}
 	if user.Quota > maxCurrentQuota {
+		return ErrTopUpQuotaLimitExceeded
+	}
+	return nil
+}
+
+// ValidateAppTopUpQuotaCapacity is the app-wallet counterpart of
+// ValidateTopUpQuotaCapacity. A missing wallet row is treated as zero quota.
+func ValidateAppTopUpQuotaCapacity(userId, appId int, creditedQuota int) error {
+	if appId <= 0 {
+		return ErrInvalidAppId
+	}
+	maxCurrentQuota, err := topUpQuotaMaxCurrent(creditedQuota)
+	if err != nil {
+		return err
+	}
+
+	var wallet UserAppWallet
+	if err := DB.Select("quota").Where("user_id = ? AND app_id = ?", userId, appId).First(&wallet).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if wallet.Quota > maxCurrentQuota {
 		return ErrTopUpQuotaLimitExceeded
 	}
 	return nil
@@ -698,6 +723,11 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return err
 		}
 
+		// The order row is the source of truth for the funding pool: an OAuth
+		// app top-up always credits that app's wallet, never the platform quota.
+		if topUp.AppId > 0 {
+			return increaseUserAppQuota(tx, topUp.UserId, topUp.AppId, quotaToAdd)
+		}
 		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
 	})
 
@@ -705,7 +735,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 		common.SysError(common.LogText("waffo pancake topup failed: %s", err.Error()))
 		return errors.New("top-up failed")
 	}
-	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, common.LogText("waffo pancake topup"))
+	if topUp.AppId == 0 {
+		syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, common.LogText("waffo pancake topup"))
+	}
 
 	if quotaToAdd > 0 {
 		RecordLog(topUp.UserId, LogTypeTopup, common.NewMessage("{{provider}} top-up succeeded, amount added: {{quota}}, payment amount: {{amount}}", map[string]any{"provider": "Waffo Pancake", "quota": logger.FormatQuota(quotaToAdd), "amount": fmt.Sprintf("%.2f", topUp.Money)}))

@@ -40,28 +40,50 @@ func setupContextForOAuthToken(c *gin.Context, rawToken string) bool {
 		return false
 	}
 
+	// Resolve the OAuth App that owns this token. An OAuth relay request is
+	// billed against that app's own quota pool, never the platform user quota.
+	_, clientID, _, _, perr := service.ParseOAuthAccessToken(rawToken)
+	if perr != nil || clientID == "" {
+		abortWithOpenAiMessage(c, http.StatusUnauthorized, common.TranslateMessage(c, i18n.MsgTokenInvalid))
+		return false
+	}
+	app, err := service.LoadOAuthAppByClientID(clientID)
+	if err != nil || !app.IsEnabled() {
+		abortWithOpenAiMessage(c, http.StatusForbidden, "oauth app is disabled or unavailable")
+		return false
+	}
+	if _, err := model.EnsureUserAppWallet(user.Id, app.Id); err != nil {
+		common.SysLog(common.LogText("OAuth TokenAuth EnsureUserAppWallet error for user %d app %d: %v", user.Id, app.Id, err))
+		abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+		return false
+	}
+	appQuota, err := model.GetUserAppQuota(user.Id, app.Id)
+	if err != nil {
+		common.SysLog(common.LogText("OAuth TokenAuth GetUserAppQuota error for user %d app %d: %v", user.Id, app.Id, err))
+		abortWithOpenAiMessage(c, http.StatusInternalServerError, common.TranslateMessage(c, i18n.MsgDatabaseError))
+		return false
+	}
+
 	// Set up user context.
 	userCache.WriteContext(c)
 	c.Set("id", user.Id)
+	// Override the platform quota written by WriteContext with the app pool
+	// balance so the relay pipeline sees the app-scoped funds.
+	common.SetContextKey(c, constant.ContextKeyUserQuota, appQuota)
+	common.SetContextKey(c, constant.ContextKeyOAuthAppID, app.Id)
+	common.SetContextKey(c, constant.ContextKeyOAuthAppClientID, clientID)
 
 	// Set up token-like context for the relay pipeline. OAuth tokens have no
-	// token-level limits; the user's quota and group apply directly.
+	// token-level limits; the app quota and user group apply directly.
 	c.Set("token_id", 0)
 	c.Set("token_key", "")
 	c.Set("token_name", "oauth")
 	c.Set("token_unlimited_quota", false)
-	c.Set("token_quota", user.Quota)
+	c.Set("token_quota", appQuota)
 	c.Set("token_model_limit_enabled", false)
 	common.SetContextKey(c, constant.ContextKeyTokenGroup, user.Group)
 	common.SetContextKey(c, constant.ContextKeyUsingGroup, user.Group)
 	common.SetContextKey(c, constant.ContextKeyTokenCrossGroupRetry, false)
-
-	// Surface the OAuth client_id so downstream relay code can apply
-	// OAuthApp-level policy (currently the AI model whitelist). We re-parse
-	// the token here to avoid expanding ValidateOAuthAccessToken's signature.
-	if _, clientID, _, _, perr := service.ParseOAuthAccessToken(rawToken); perr == nil && clientID != "" {
-		common.SetContextKey(c, constant.ContextKeyOAuthAppClientID, clientID)
-	}
 	return true
 }
 

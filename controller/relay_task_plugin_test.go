@@ -690,3 +690,21 @@ func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {
 	assert.Equal(t, 1, billing.refunds)
 	assert.False(t, c.Writer.Written())
 }
+
+func TestExecuteTaskSubmissionRejectsAppAccessTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+
+	submitted := false
+	outcome, taskErr := executeTaskSubmissionWith(c, &relaycommon.RelayInfo{AppId: 7}, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		submitted = true
+		return nil, nil
+	})
+
+	require.Nil(t, outcome)
+	require.NotNil(t, taskErr)
+	assert.Equal(t, http.StatusForbidden, taskErr.StatusCode)
+	assert.Equal(t, "app_task_unsupported", taskErr.Code)
+	assert.False(t, submitted)
+}

@@ -44,6 +44,8 @@ export const userSchema = z.object({
   email: z.string().optional(),
   quota: z.number(),
   used_quota: z.number(),
+  app_quota: z.number().optional(),
+  app_used_quota: z.number().optional(),
   request_count: z.number(),
   group: z.string(),
   aff_code: z.string().optional(),
@@ -93,6 +95,7 @@ export interface GetUsersParams {
   page_size?: number
   sort_by?: UserSortBy
   sort_order?: UserSortOrder
+  app_id?: number
 }
 
 export interface GetUsersResponse {
@@ -115,6 +118,7 @@ export interface SearchUsersParams {
   page_size?: number
   sort_by?: UserSortBy
   sort_order?: UserSortOrder
+  app_id?: number
 }
 
 export interface UserFormData {
@@ -143,6 +147,7 @@ export interface ManageUserQuotaPayload {
   action: 'add_quota'
   mode: QuotaAdjustMode
   value: number
+  app_id?: number
 }
 
 // ============================================================================

@@ -17,6 +17,9 @@ func manageUserQuota(c *gin.Context, req ManageRequest) {
 		"mode":            req.Mode,
 		"requested_quota": req.Value,
 	}
+	if req.AppId > 0 {
+		params["app_id"] = req.AppId
+	}
 	switch req.Mode {
 	case "add":
 		action = "user.quota_add"
@@ -43,16 +46,22 @@ func manageUserQuota(c *gin.Context, req ManageRequest) {
 		markAuditLogged(c)
 	}()
 
-	adjustment, err := model.AdjustUserQuota(req.Id, c.GetInt("role"), req.Mode, req.Value)
+	adjustment, err := model.AdjustUserAppQuota(req.Id, req.AppId, c.GetInt("role"), req.Mode, req.Value)
 	if err != nil {
 		switch {
-		case errors.Is(err, model.ErrInvalidUserQuotaAdjustment):
+		case errors.Is(err, model.ErrInvalidUserQuotaAdjustment), errors.Is(err, model.ErrInvalidAppId):
 			params["failure_reason"] = "invalid_parameters"
 			if (req.Mode == "add" || req.Mode == "subtract") && req.Value <= 0 {
 				common.ApiErrorT(c, "Quota change amount cannot be zero")
 			} else {
 				common.ApiErrorT(c, "Invalid parameters")
 			}
+		case errors.Is(err, model.ErrOAuthAppNotFound):
+			params["failure_reason"] = "app_not_found"
+			common.ApiErrorT(c, "Invalid parameters")
+		case errors.Is(err, model.ErrUserAppQuotaInsufficient):
+			params["failure_reason"] = "insufficient_balance"
+			common.ApiErrorT(c, "Insufficient balance")
 		case errors.Is(err, model.ErrUserQuotaPermission):
 			params["failure_reason"] = "permission_denied"
 			common.ApiErrorT(c, "No permission to update users of same or higher permission level")

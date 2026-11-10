@@ -101,10 +101,14 @@ export function planToFormValues(plan: SubscriptionPlan): PlanFormValues {
   }
 }
 
-export function formValuesToPlanPayload(values: PlanFormValues): PlanPayload {
+export function formValuesToPlanPayload(
+  values: PlanFormValues,
+  appId: number = 0
+): PlanPayload {
   return {
     plan: {
       ...values,
+      app_id: appId,
       price_amount: Number(values.price_amount || 0),
       currency: 'USD',
       duration_value: Number(values.duration_value || 0),

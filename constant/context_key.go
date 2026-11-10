@@ -92,4 +92,9 @@ const (
 	// policy such as the model whitelist. It must remain empty for Dashboard
 	// API keys, personal access tokens, and browser sessions.
 	ContextKeyOAuthAppClientID ContextKey = "oauth_app_client_id"
+
+	// ContextKeyOAuthAppID carries the numeric id of the OAuth App that owns the
+	// access token. Relay billing uses it to charge the app-scoped quota pool
+	// instead of the platform user quota. It is 0 for non-OAuth requests.
+	ContextKeyOAuthAppID ContextKey = "oauth_app_id"
 )

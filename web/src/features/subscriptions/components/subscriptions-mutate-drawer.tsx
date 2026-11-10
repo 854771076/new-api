@@ -63,6 +63,7 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { getPaymentErrorTranslation } from '@/features/wallet/lib/payment'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
 
@@ -96,6 +97,7 @@ export function SubscriptionsMutateDrawer({
   currentRow,
 }: Props) {
   const { t } = useTranslation()
+  const { appId } = useActiveApp()
   const isEdit = !!currentRow?.plan?.id
   const { triggerRefresh } = useSubscriptions()
   const { meta: currencyMeta } = getCurrencyDisplay()
@@ -163,7 +165,12 @@ export function SubscriptionsMutateDrawer({
   const onSubmit = async (values: PlanFormValues) => {
     setIsSubmitting(true)
     try {
-      const payload = formValuesToPlanPayload(values)
+      // A plan keeps the app it already belongs to; the active app only decides
+      // the app for a newly created plan.
+      const payload = formValuesToPlanPayload(
+        values,
+        isEdit ? (currentRow?.plan?.app_id ?? appId) : appId
+      )
       if (isEdit && currentRow?.plan?.id) {
         const res = await updatePlan(currentRow.plan.id, payload)
         if (res.success) {

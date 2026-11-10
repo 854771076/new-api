@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"time"
@@ -45,18 +46,6 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if !plan.Enabled {
-		common.ApiErrorT(c, "Subscription plan is not enabled")
-		return
-	}
-	if plan.CreemProductId == "" {
-		common.ApiErrorT(c, "CreemProductId is not configured for this plan")
-		return
-	}
-	if setting.CreemWebhookSecret == "" && !setting.CreemTestMode {
-		common.ApiErrorT(c, "Creem webhook is not configured")
-		return
-	}
 
 	userId := c.GetInt("id")
 	user, err := model.GetUserById(userId, false)
@@ -69,15 +58,47 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		return
 	}
 
+	checkoutUrl, orderId, err := createCreemSubscriptionOrder(c.Request.Context(), user, plan)
+	if err != nil {
+		paymentError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "success",
+		"data": gin.H{
+			"checkout_url": checkoutUrl,
+			"order_id":     orderId,
+		},
+	})
+}
+
+// createCreemSubscriptionOrder validates the plan and Creem configuration,
+// persists the pending order and creates the Creem checkout link. It is shared
+// by the dashboard and the OAuth app checkout endpoint.
+func createCreemSubscriptionOrder(ctx context.Context, user *model.User, plan *model.SubscriptionPlan) (string, string, error) {
+	if plan == nil {
+		return "", "", common.NewMessage("Subscription plan does not exist")
+	}
+	if !plan.Enabled {
+		return "", "", common.NewMessage("Subscription plan is not enabled")
+	}
+	if plan.CreemProductId == "" {
+		return "", "", common.NewMessage("CreemProductId is not configured for this plan")
+	}
+	if setting.CreemWebhookSecret == "" && !setting.CreemTestMode {
+		return "", "", common.NewMessage("Creem webhook is not configured")
+	}
+	if user == nil {
+		return "", "", common.NewMessage("User does not exist")
+	}
 	if plan.MaxPurchasePerUser > 0 {
-		count, err := model.CountUserSubscriptionsByPlan(userId, plan.Id)
+		count, err := model.CountUserSubscriptionsByPlan(user.Id, plan.Id)
 		if err != nil {
-			common.ApiError(c, err)
-			return
+			return "", "", err
 		}
 		if count >= int64(plan.MaxPurchasePerUser) {
-			common.ApiErrorT(c, "Purchase limit for this plan has been reached")
-			return
+			return "", "", common.NewMessage("Purchase limit for this plan has been reached")
 		}
 	}
 
@@ -86,7 +107,8 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 
 	// create pending order first
 	order := &model.SubscriptionOrder{
-		UserId:          userId,
+		AppId:           plan.AppId,
+		UserId:          user.Id,
 		PlanId:          plan.Id,
 		Money:           plan.PriceAmount,
 		TradeNo:         referenceId,
@@ -96,8 +118,7 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		Status:          common.TopUpStatusPending,
 	}
 	if err := order.Insert(); err != nil {
-		paymentError(c, common.NewMessage("Failed to create order"))
-		return
+		return "", "", common.NewMessage("Failed to create order")
 	}
 
 	// Reuse Creem checkout generator by building a lightweight product reference.
@@ -118,18 +139,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		Quota:     0,
 	}
 
-	checkoutUrl, err := genCreemLink(c.Request.Context(), referenceId, product, user.Email, user.Username)
+	checkoutUrl, err := genCreemLink(ctx, referenceId, product, user.Email, user.Username)
 	if err != nil {
-		logger.LogError(c.Request.Context(), common.LogText("Creem failed to create subscription payment link trade_no=%s product_id=%s error=%q", referenceId, product.ProductId, err.Error()))
-		paymentError(c, common.NewMessage("Failed to start payment"))
-		return
+		logger.LogError(ctx, common.LogText("Creem failed to create subscription payment link trade_no=%s product_id=%s error=%q", referenceId, product.ProductId, err.Error()))
+		return "", "", common.NewMessage("Failed to start payment")
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "success",
-		"data": gin.H{
-			"checkout_url": checkoutUrl,
-			"order_id":     referenceId,
-		},
-	})
+	return checkoutUrl, referenceId, nil
 }

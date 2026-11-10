@@ -20,12 +20,13 @@ import (
 const UserNameMaxLength = 20
 
 var userSortColumns = map[string]string{
-	"id":            "id",
-	"username":      "username",
-	"quota":         "quota",
-	"group":         "group",
-	"created_at":    "created_at",
-	"last_login_at": "last_login_at",
+	"id":            "users.id",
+	"username":      "users.username",
+	"quota":         "users.quota",
+	"used_quota":    "users.used_quota",
+	"group":         "users.group",
+	"created_at":    "users.created_at",
+	"last_login_at": "users.last_login_at",
 }
 
 type UserSortOptions struct {
@@ -52,15 +53,15 @@ func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
 func (options UserSortOptions) Apply(query *gorm.DB) *gorm.DB {
 	columnName, ok := userSortColumns[options.SortBy]
 	if !ok {
-		columnName = "id"
+		columnName = "users.id"
 	}
 	q := query.Order(clause.OrderByColumn{
 		Column: clause.Column{Name: columnName},
 		Desc:   options.SortOrder != "asc",
 	})
-	if columnName != "id" {
+	if columnName != "users.id" {
 		q = q.Order(clause.OrderByColumn{
-			Column: clause.Column{Name: "id"},
+			Column: clause.Column{Name: "users.id"},
 			Desc:   true,
 		})
 	}

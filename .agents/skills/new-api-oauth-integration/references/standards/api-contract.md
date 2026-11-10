@@ -157,7 +157,7 @@ export const fail = (
 ### 前端错误处理约定
 
 - **401**：清除 session + redirect `/login`（不是弹窗）
-- **403**：toast "额度不足，请先充值" + 跳转 new-api `/topup`
+- **403**：toast "额度不足，请先充值" + 打开 App 充值（`POST /oauth/topup/checkout`）；只有平台额度不足才跳 newapi `/topup`。App 级接口的 403 还可能是 `access_denied` 或 `app_task_unsupported`，见 §3，不要一律当成额度不足
 - **429**：toast + 按钮重试（带倒计时）
 - **500**：toast "服务暂时不可用，请稍后重试" + 日志上报
 - 所有非 2xx 都要有用户可见反馈（toast / alert banner），不能静默吞掉
@@ -190,3 +190,68 @@ common.ApiErrorT(c, "Insufficient quota: need {{need}}, have {{have}}",
 ```
 
 Next.js 侧直接返回英语 message，前端翻译层同时查 `message_key` 和兜底 `message`。
+
+## 3. new-api App 级接口（套餐 / 商品 / 额度池）
+
+OAuth App 有自己的套餐、商品和额度池，全部按 `app_id` 归属。这些接口不走上面的
+Next.js 信封约定，直接对接时按本节处理。
+
+### 3.1 OAuth App 级接口（`/oauth/*`）
+
+- 鉴权：`Authorization: Bearer <OAuth access token>`。`GET` 需要 `api:read`，写操作需要
+  `api:write`。
+- 作用域来自 token 的 `client_id`；body 里的 `app_id` 只用于拒绝不匹配的请求，不能用来
+  选择另一个 App。其他 App 的套餐/商品不可见、不可购买。
+- 响应不是 `{"success", "message", "data"}`，而是 OAuth 错误格式：HTTP 状态 +
+  `{"error": "...", "error_description": "..."}`。
+
+| HTTP | `error` | 场景 |
+|------|---------|------|
+| 401 | `invalid_token` | 缺少、过期或无效的 access token |
+| 403 | `insufficient_scope` | token 缺少 `api:read` / `api:write` |
+| 403 | `invalid_client` | OAuth App 已停用或不可用 |
+| 400 | `invalid_request` | JSON 非法；缺 `plan_id` / `product_id`，或套餐/商品 checkout 缺 `payment_method`（充值省略时默认 `waffo_pancake`，缺 `amount` 才报错） |
+| 400 | `unsupported_payment_method` | 该对象不支持此支付方式 |
+| 400 | `checkout_failed` | 业务失败：套餐/商品停用、达到购买上限、余额不足、金额越界 |
+| 403 | `access_denied` | 套餐/商品属于其他 App，或 `app_id` 与 token 不匹配 |
+| 404 | `not_found` | 套餐/商品不存在 |
+| 500 | `server_error` | 读取目录或创建支付单时服务端失败 |
+| 502 | `checkout_failed` | App 充值的支付网关或上游依赖暂时不可用 |
+| 403 | `app_task_unsupported` | 用 App token 调异步任务接口（体为 `{"code","message","data"}`，不是 OAuth 错误格式） |
+
+| 接口 | Scope | 说明 |
+|------|-------|------|
+| `GET /oauth/userinfo` | `openid`；`api:read` 才有额度 | 新增 `app_quota` / `app_used_quota`（token 所属 App 的额度池），平台 `quota` / `used_quota` 语义不变 |
+| `GET /oauth/subscription/plans` | `api:read` | `{"plans":[{"plan":{...}}]}`，仅本 App 的已启用套餐 |
+| `POST /oauth/subscription/checkout` | `api:write` | `{"plan_id":1,"payment_method":"balance"}`；余额支付同步返回 `success`，在线支付返回 `pending` + 跳转字段 |
+| `GET /oauth/products` | `api:read` | `{"products":[{id,name,description,price_amount,currency,quota_amount,max_purchase_per_user}]}` |
+| `POST /oauth/products/checkout` | `api:write` | `{"product_id":1,"payment_method":"balance"}`；余额支付返回 `order_id` / `quota_amount` |
+| `POST /oauth/topup/checkout` | `api:write` | `{"amount":10,"payment_method":"balance"}`；`balance` 是**从平台余额划转到 App 额度池**，不是免费发放，余额不足返回 `400 checkout_failed` |
+
+支付方式：套餐 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`；商品 `balance` /
+`waffo_pancake`；App 充值 `balance` / `waffo_pancake`（省略 `payment_method` 时默认
+`waffo_pancake`）。`amount` 是配置的展示单位整数，不是 quota。
+
+App 额度语义：App token 的 relay 预扣、结算、退款只作用于 token 所属 App 的额度池
+（以及该 App 的订阅额度），不扣平台 `quota`。目前没有 OAuth 接口读取 App 订阅状态或
+App 订单历史：充值和商品可用重新读 `/oauth/userinfo` 的 `app_quota` 确认到账，套餐只能
+依赖本地订单记录。
+
+### 3.2 管理端接口（admin session 或 admin PAT）
+
+分页参数是 `p` + `page_size`（默认 10，上限 100），不是 §1 的 `page`；`data` 为 new-api
+`PageInfo`：`{page, page_size, total, items}`，**没有 `total_pages`**，需要前端自行
+`ceil(total / page_size)`。
+
+| 能力 | 接口 |
+|------|------|
+| 套餐列表（按 App 筛选） | `GET /api/subscription/admin/plans?app_id=<id>`；省略 = 全部套餐，`0` = 仅平台套餐 |
+| 创建/更新套餐 | `POST /api/subscription/admin/plans`、`PUT` / `PATCH /api/subscription/admin/plans/:id`，body 内含 `app_id`（`0` = 平台）；正数必须是已存在的 OAuth App。更新是整体替换，漏传 `app_id` 会把套餐移到平台目录 |
+| 商品列表 | `GET /api/app-products?app_id=<id>&p=1&page_size=20`；省略或 `0` = 所有 App |
+| 商品创建/更新/启停/删除 | `POST /api/app-products`、`PUT /api/app-products/:id`、`PATCH /api/app-products/:id` `{"enabled":bool}`、`DELETE /api/app-products/:id`；创建必须有正数 `app_id`，已产生订单的商品只能停用不能删除 |
+| 商品订单 | `GET /api/app-products/orders?app_id=&user_id=&p=&page_size=`、`POST /api/app-products/orders/:trade_no/complete`（确认线下收款后补单，给 App 额度池入账） |
+| 用户列表（App 视角） | `GET /api/user/?app_id=<id>`、`GET /api/user/search?...&app_id=<id>`；返回的每个用户带该 App 的 `app_quota` / `app_used_quota`（无钱包为 0） |
+| 调整额度 | `POST /api/user/manage` `{"id":<user>,"action":"add_quota","mode":"add" / "subtract" / "override","value":<quota>,"app_id":<id>}`；`app_id` 省略或 `0` 调整平台 `quota`，正数只调整该 App 额度池 |
+
+管理端仍使用 §2 的 `{"success", "message", "data"}` 信封和 `ApiError` 错误结构；`app_id`
+只影响数据范围，不改变鉴权要求。

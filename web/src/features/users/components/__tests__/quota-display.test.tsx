@@ -46,6 +46,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 import { formatTimestampToDate } from '@/lib/format'
+import { PLATFORM_APP_ID, useActiveAppStore } from '@/stores/active-app-store'
 import { useAuthStore } from '@/stores/auth-store'
 import {
   DEFAULT_CURRENCY_CONFIG,
@@ -119,6 +120,62 @@ function QuotaTable(props: { remaining: number; used: number }) {
   )
 }
 
+function AppQuotaTable() {
+  const columns = useUsersColumns().filter((column) =>
+    ['app_quota', 'app_used_quota'].includes(
+      column.id ?? ('accessorKey' in column ? String(column.accessorKey) : '')
+    )
+  )
+  const table = useReactTable({
+    columns,
+    data: [
+      {
+        id: 1,
+        username: 'test',
+        display_name: '',
+        role: 1,
+        status: 1,
+        quota: 0,
+        used_quota: 0,
+        app_quota: 500000,
+        app_used_quota: 250000,
+        request_count: 0,
+        group: 'default',
+      } as User,
+    ],
+    getCoreRowModel: getCoreRowModel(),
+  })
+  return (
+    <table>
+      <thead>
+        {table.getHeaderGroups().map((group) => (
+          <tr key={group.id}>
+            {group.headers.map((header) => (
+              <th key={header.id}>
+                {flexRender(
+                  header.column.columnDef.header,
+                  header.getContext()
+                )}
+              </th>
+            ))}
+          </tr>
+        ))}
+      </thead>
+      <tbody>
+        {table.getRowModel().rows.map((row) => (
+          <tr key={row.id}>
+            {row.getVisibleCells().map((cell) => (
+              <td key={cell.id}>
+                {flexRender(cell.column.columnDef.cell, cell.getContext())}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
 beforeEach(() => {
   vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
   useSystemConfigStore
@@ -128,6 +185,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   clients.splice(0).forEach((client) => client.clear())
+  useActiveAppStore.getState().setAppId(PLATFORM_APP_ID)
   useAuthStore.getState().auth.reset()
   useSystemConfigStore
     .getState()
@@ -214,6 +272,35 @@ it('preserves negative balances in details opened with the keyboard', async () =
   const detail = await screen.findByRole('dialog')
   expect(within(detail).getByText('-1')).toBeInTheDocument()
   expect(within(detail).getByText('2')).toBeInTheDocument()
+})
+
+it('shows app quota columns only when an app is selected', () => {
+  render(
+    <I18nextProvider i18n={i18n}>
+      <AppQuotaTable />
+    </I18nextProvider>
+  )
+  expect(
+    screen.queryByRole('columnheader', { name: 'App Quota' })
+  ).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('columnheader', { name: 'App Used' })
+  ).not.toBeInTheDocument()
+
+  act(() => useActiveAppStore.getState().setAppId(7))
+
+  expect(
+    screen.getByRole('columnheader', { name: 'App Quota' })
+  ).toBeInTheDocument()
+  expect(
+    screen.getByRole('columnheader', { name: 'App Used' })
+  ).toBeInTheDocument()
+  expect(
+    within(screen.getAllByRole('cell')[0]).getByText('$1')
+  ).toBeInTheDocument()
+  expect(
+    within(screen.getAllByRole('cell')[1]).getByText('$0.5')
+  ).toBeInTheDocument()
 })
 
 it('shows the custom symbol only in the column header', () => {

@@ -36,8 +36,12 @@ import type {
 // Admin Plan Management
 // ============================================================================
 
-export async function getAdminPlans(): Promise<ApiResponse<PlanRecord[]>> {
-  const res = await api.get('/api/subscription/admin/plans')
+export async function getAdminPlans(
+  appId: number = 0
+): Promise<ApiResponse<PlanRecord[]>> {
+  const res = await api.get('/api/subscription/admin/plans', {
+    params: { app_id: appId },
+  })
   return res.data
 }
 

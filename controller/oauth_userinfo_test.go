@@ -34,7 +34,7 @@ func setupOAuthExtTestEnv(t *testing.T, scope string) *oauthExtTestEnv {
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Option{}, &model.OAuthApp{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.Option{}, &model.OAuthApp{}, &model.UserAppWallet{}))
 	model.DB = db
 	t.Cleanup(func() {
 		model.DB = previousDB

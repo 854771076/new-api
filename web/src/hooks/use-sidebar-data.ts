@@ -33,6 +33,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  ShoppingBag,
   Ticket,
   User,
   Users,
@@ -162,6 +163,11 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('OAuth Apps'),
             url: '/oauth-apps',
             icon: AppWindow,
+          },
+          {
+            title: t('Product Management'),
+            url: '/app-products',
+            icon: ShoppingBag,
           },
           {
             title: t('System Info'),

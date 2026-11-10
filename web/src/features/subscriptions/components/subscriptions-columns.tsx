@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -24,6 +25,7 @@ import { BadgeCell } from '@/components/data-table'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
+import { getOAuthApps } from '@/features/oauth-apps/api'
 import { formatQuota } from '@/lib/format'
 
 import { formatDuration, formatResetPeriod } from '../lib'
@@ -32,6 +34,14 @@ import { DataTableRowActions } from './data-table-row-actions'
 
 export function useSubscriptionsColumns(): ColumnDef<PlanRecord>[] {
   const { t } = useTranslation()
+  const { data: oauthAppsData } = useQuery({
+    queryKey: ['oauth-apps'],
+    queryFn: async () => (await getOAuthApps()).data || [],
+  })
+  const appNameById = useMemo(
+    () => new Map((oauthAppsData || []).map((app) => [app.id, app.name])),
+    [oauthAppsData]
+  )
 
   return useMemo(
     (): ColumnDef<PlanRecord>[] => [
@@ -42,6 +52,30 @@ export function useSubscriptionsColumns(): ColumnDef<PlanRecord>[] {
         meta: { mobileHidden: true },
         cell: ({ row }) => <TableId value={row.original.plan.id} />,
         size: 60,
+      },
+      {
+        accessorFn: (row) => row.plan.app_id ?? 0,
+        id: 'app',
+        header: t('App'),
+        meta: { mobileHidden: true },
+        cell: ({ row }) => {
+          const planAppId = row.original.plan.app_id ?? 0
+          if (planAppId === 0) {
+            return (
+              <StatusBadge
+                label={t('Platform')}
+                variant='neutral'
+                copyable={false}
+              />
+            )
+          }
+          return (
+            <span className='truncate'>
+              {appNameById.get(planAppId) || `#${planAppId}`}
+            </span>
+          )
+        },
+        size: 140,
       },
       {
         accessorFn: (row) => row.plan.title,
@@ -200,6 +234,6 @@ export function useSubscriptionsColumns(): ColumnDef<PlanRecord>[] {
         meta: { pinned: 'right' as const },
       },
     ],
-    [t]
+    [appNameById, t]
   )
 }

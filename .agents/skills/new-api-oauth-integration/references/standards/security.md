@@ -16,7 +16,7 @@ integration that skips one item is not built to this standard.
 - [ ] Gateway tokens are kept in memory (optionally `sessionStorage`) and never written to `user_metadata` or logged.
 - [ ] Refreshed refresh tokens replace the old value; `invalid_grant` ends the session instead of retrying.
 - [ ] HTTPS is enabled in production (required for `SameSite=None` cookies).
-- [ ] OAuth tokens are used only for `/v1/*` and `/oauth/userinfo`; quota and payment calls use a dashboard session or a scoped PAT.
+- [ ] OAuth tokens are used only for `/v1/*` and `/oauth/*` (userinfo, app plans/products, checkouts, top-up, logs); every `/api/*` dashboard call uses a session or a scoped PAT.
 - [ ] Personal access tokens are stored encrypted and carry only the scopes the integration actually needs.
 - [ ] Your system never treats a browser return URL or a `pending` order as proof of payment; quota is credited only after new-api confirms the provider payment.
 - [ ] Admin console permissions come from `app_metadata`/`app_admins`, and every admin Route Handler calls the server guard; the browser role is UX only.
@@ -24,7 +24,7 @@ integration that skips one item is not built to this standard.
 - [ ] Admin (Ant Design) and consumer (Tailwind + DaisyUI) UIs never share a layout or styling system.
 - [ ] The first admin defaults to the OAuth app developer (`oauth_apps.created_by` → `INITIAL_ADMIN_SUB`) and is granted once out of band; no endpoint or first-signup rule can create an admin.
 - [ ] All media assets are stored in Supabase Storage private buckets; only `bucket` + `path` is stored in Postgres, and reads use short-lived signed URLs.
-- [ ] Balance, credits, top-up orders, and usage come from new-api (`/api/user/self`, `/api/user/topup/self`, `/api/log/self`); there is no local ledger, and OAuth-only apps redirect to the dashboard instead of reimplementing payment.
+- [ ] Balance, credits, top-up orders, and usage come from new-api (`/oauth/userinfo` for `app_quota`, `/api/user/self`, `/api/user/topup/self`, `/api/log/self`, `/oauth/logs`); there is no local ledger, and App top-up/purchases go through `/oauth/*` checkout instead of a reimplemented payment flow.
 
 ## Token Lifecycle
 

@@ -368,14 +368,21 @@ then call `supabase.auth.signOut()`.
 
 ### OAuth access token 能调的外部端点（除了 /v1/models）
 
-new-api 已经暴露三个 `/oauth/...` 端点供 OAuth access token 直接调用，避免外部 app 去碰 dashboard PAT 或走 /api/user/self。
+new-api 暴露以下 `/oauth/...` 端点供 OAuth access token 直接调用，避免外部 app 去碰 dashboard PAT 或走 `/api/user/self`。所有端点按 token 的 `client_id` 限定到单个 App。
 
 | Endpoint | Scope | Request | Response |
 |----------|-------|---------|----------|
-| `GET /oauth/userinfo` | `openid`(必须) + `api:read`(可选) | Authorization: Bearer <token> | `sub, username, name, email`；带 `api:read` 时再附加 `quota, used_quota, request_count, group` |
-| `POST /oauth/topup/checkout` | `api:write` | `{ "amount": 10, "channel": "waffo_pancake" }` | `{ "checkout_url": "...", "order_id": "...", "expires_at": 1730000000 }`；channel 当前只支持 `waffo_pancake` |
+| `GET /oauth/userinfo` | `openid`(必须) + `api:read`(可选) | Authorization: Bearer <token> | `sub`；授予 `profile` 时附 `username, name`，授予 `email` 时附 `email`；带 `api:read` 时再附加 `quota, used_quota, request_count, group, app_quota, app_used_quota` |
+| `GET /oauth/subscription/plans` | `api:read` | — | `{ "plans": [ { "plan": { ... } } ] }`，仅本 App 的已启用套餐 |
+| `POST /oauth/subscription/checkout` | `api:write` | `{ "plan_id": 1, "payment_method": "balance" }` | 余额支付 `{ "status": "success", "payment_method": "balance" }`；在线支付 `{ "status": "pending", ...跳转字段 }` |
+| `GET /oauth/products` | `api:read` | — | `{ "products": [ { id, name, description, price_amount, currency, quota_amount, max_purchase_per_user } ] }` |
+| `POST /oauth/products/checkout` | `api:write` | `{ "product_id": 1, "payment_method": "balance" }` | 余额支付 `{ "status": "success", "order_id": "...", "quota_amount": ... }`；waffo_pancake 返回 `checkout_url` |
+| `POST /oauth/topup/checkout` | `api:write` | `{ "amount": 10, "payment_method": "balance" }` | 余额支付 `{ "status": "success", "payment_method": "balance", "quota": ... }`；在线支付 `{ "status": "pending", "checkout_url": "...", "order_id": "...", "expires_at": "..." }` |
 | `GET /oauth/logs` | `api:read` | query `page=1&page_size=20&order=desc` | `{ total, items: [ { id, created_at, type, username, token_name, model_name, quota, prompt_tokens, completion_tokens, use_time, is_stream, channel_id, channel_name, group, request_id, upstream_request_id } ] }`；**脱敏**：绝不包含 prompt/response 原文、上游 API key、other 字段 |
 
+- `POST /oauth/topup/checkout` 的 `balance` 是**从用户平台余额划转到该 App 额度池**，不是免费发放；余额不足返回 `400 checkout_failed`。在线充值当前支持 `waffo_pancake`（也是省略 `payment_method` 时的默认值），套餐还支持 `epay` / `stripe` / `creem`。
+- `GET /oauth/userinfo` 的 `quota` 是平台钱包，`app_quota` 是 token 所属 App 的额度池；OAuth relay 的预扣/结算/退款只作用于 App 额度池。平台 `quota` 语义不变。
+- App access token 调异步任务接口返回 `403`，body 为 `{"code":"app_task_unsupported","message":"Async tasks are not supported for app access tokens"}`；异步任务需用 dashboard key 或 PAT。
 - 所有端点只认 OAuth access token；不接受 PAT。
-- 后端不创建数据库迁移；TopUp 记录沿用 dashboard 侧同一 schema。
-- bootstrap.sh/.ps1 已自动把新建 OAuth app 的 scopes 设为 `openid profile email api:read api:write`，并同步到 Supabase provider 的 scopes。外部 app 登录时用户授权后即可同时拿到额度、发起充值、查看消费日志。
+- 后端不创建数据库迁移；TopUp 记录沿用 dashboard 侧同一 schema（App 充值记录带 `app_id`）。
+- bootstrap.sh/.ps1 已自动把新建 OAuth app 的 scopes 设为 `openid profile email api:read api:write`，并同步到 Supabase provider 的 scopes。外部 app 登录时用户授权后即可同时拿到额度、购买 App 套餐/商品、发起充值、查看消费日志。

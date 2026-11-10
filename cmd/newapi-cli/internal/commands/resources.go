@@ -34,16 +34,24 @@ func listPath(resource string, p, pageSize int, extra string) string {
 
 func newUserCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "user", Short: "Manage users"}
-	var p, pageSize int
+	var p, pageSize, appID int
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List users",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runData(cmd, http.MethodGet, listPath("user", p, pageSize, ""), nil)
+			if appID < 0 {
+				return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--app-id must not be negative"}
+			}
+			extra := ""
+			if appID > 0 {
+				extra = "&app_id=" + strconv.Itoa(appID)
+			}
+			return runData(cmd, http.MethodGet, listPath("user", p, pageSize, extra), nil)
 		},
 	}
 	addPageFlags(list, &p, &pageSize)
+	list.Flags().IntVar(&appID, "app-id", 0, "show app quota for this app; empty shows the platform view")
 	get := &cobra.Command{
 		Use:   "get <id>",
 		Short: "Show a user",

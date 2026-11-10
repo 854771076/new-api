@@ -54,6 +54,8 @@ func NewRootCmd() *cobra.Command {
 		newTokenCmd(),
 		newLogCmd(),
 		newOptionCmd(),
+		newPlanCmd(),
+		newProductCmd(),
 		newAPICmd(),
 	)
 	return root

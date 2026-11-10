@@ -24,6 +24,7 @@ import { z } from 'zod'
 
 export const subscriptionPlanSchema = z.object({
   id: z.number(),
+  app_id: z.number().optional(),
   title: z.string(),
   subtitle: z.string().optional(),
   price_amount: z.number(),

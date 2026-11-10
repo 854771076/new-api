@@ -35,6 +35,14 @@ func OAuthUserInfo(c *gin.Context) {
 		scopeSet[s] = struct{}{}
 	}
 
+	// The token identifies the app whose wallet backs this integration.
+	appId := 0
+	if _, clientID, _, _, parseErr := service.ParseOAuthAccessToken(token); parseErr == nil {
+		if app, loadErr := service.LoadOAuthAppByClientID(clientID); loadErr == nil && app != nil {
+			appId = app.Id
+		}
+	}
+
 	response := gin.H{
 		"sub": strconv.Itoa(user.Id),
 	}
@@ -50,6 +58,13 @@ func OAuthUserInfo(c *gin.Context) {
 		response["used_quota"] = user.UsedQuota
 		response["request_count"] = user.RequestCount
 		response["group"] = user.Group
+
+		if appId > 0 {
+			if wallet, walletErr := model.EnsureUserAppWallet(user.Id, appId); walletErr == nil {
+				response["app_quota"] = wallet.Quota
+				response["app_used_quota"] = wallet.UsedQuota
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, response)

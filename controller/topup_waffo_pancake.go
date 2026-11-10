@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,14 +33,17 @@ type waffoPancakeCheckoutResult struct {
 }
 
 // generateWaffoPancakeCheckout is the pure (no gin.Context, no response-
-// writing) core of Waffo Pancake checkout. The dashboard handler and the
-// OAuth access-token endpoint both delegate to it.
-func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount int64) (*waffoPancakeCheckoutResult, error) {
+// writing) core of Waffo Pancake checkout. The dashboard handler (appId 0) and
+// the OAuth access-token endpoint both delegate to it.
+func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount int64, appId int) (*waffoPancakeCheckoutResult, error) {
 	if !isWaffoPancakeTopUpEnabled() {
 		return nil, common.NewMessage("Waffo Pancake configuration is incomplete")
 	}
 	if user == nil {
 		return nil, common.NewMessage("User does not exist")
+	}
+	if appId < 0 {
+		return nil, model.ErrInvalidAppId
 	}
 	if amount < int64(setting.WaffoPancakeMinTopUp) {
 		return nil, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": setting.WaffoPancakeMinTopUp})
@@ -50,17 +54,24 @@ func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount 
 		return nil, common.NewMessage("Payment amount is too low")
 	}
 
-	// Validate top-up quota capacity against the user's current stored quota.
+	// Validate top-up quota capacity against the funding pool that will be
+	// credited: the app wallet for OAuth purchases, the user quota otherwise.
 	creditedQuota, err := validateTopUpQuota(amount)
 	if err != nil {
 		return nil, err
 	}
-	if err := model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota); err != nil {
+	if appId > 0 {
+		err = model.ValidateAppTopUpQuotaCapacity(user.Id, appId, creditedQuota)
+	} else {
+		err = model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota)
+	}
+	if err != nil {
 		return nil, err
 	}
 
 	tradeNo := fmt.Sprintf("WAFFO_PANCAKE-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
 	topUp := &model.TopUp{
+		AppId:           appId,
 		UserId:          user.Id,
 		Amount:          normalizeWaffoPancakeTopUpAmount(amount),
 		Money:           payMoney,
@@ -71,7 +82,7 @@ func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount 
 		Status:          common.TopUpStatusPending,
 	}
 	if err := topUp.Insert(); err != nil {
-		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create top-up order user_id=%d trade_no=%s amount=%d error=%q", user.Id, tradeNo, amount, err.Error()))
+		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create top-up order user_id=%d app_id=%d trade_no=%s amount=%d error=%q", user.Id, appId, tradeNo, amount, err.Error()))
 		return nil, common.NewMessage("Failed to create order")
 	}
 
@@ -440,7 +451,7 @@ func RequestWaffoPancakePay(c *gin.Context) {
 		return
 	}
 
-	result, err := generateWaffoPancakeCheckout(c.Request.Context(), user, req.Amount)
+	result, err := generateWaffoPancakeCheckout(c.Request.Context(), user, req.Amount, 0)
 	if err != nil {
 		paymentError(c, err)
 		return
@@ -514,6 +525,12 @@ func WaffoPancakeWebhook(c *gin.Context) {
 	// Dispatch by trade_no prefix. OrderMerchantExternalID = our trade_no;
 	// OrderID is Pancake's internal ORD_* (logs only).
 	rawTradeNo := strings.TrimSpace(event.Data.OrderMerchantExternalID)
+
+	if strings.HasPrefix(rawTradeNo, model.AppProductOrderTradeNoPrefix) {
+		completeAppProductWaffoPancakeOrder(c, event, rawTradeNo, bodyBytes)
+		return
+	}
+
 	isSubscription := strings.HasPrefix(rawTradeNo, "WAFFO_PANCAKE_SUB-")
 
 	if isSubscription {
@@ -561,5 +578,70 @@ func WaffoPancakeWebhook(c *gin.Context) {
 	}
 
 	logger.LogInfo(c.Request.Context(), common.LogText("Waffo Pancake top-up succeeded trade_no=%s event_id=%s order_id=%s client_ip=%s", tradeNo, event.ID, event.Data.OrderID, c.ClientIP()))
+	c.String(http.StatusOK, "OK")
+}
+
+// completeAppProductWaffoPancakeOrder settles an app product order. The payment
+// amount and currency must match the order snapshot, otherwise the order is
+// left pending for manual reconciliation and nothing is credited.
+func completeAppProductWaffoPancakeOrder(c *gin.Context, event *service.WaffoPancakeWebhookEvent, tradeNo string, body []byte) {
+	order := model.GetAppProductOrderByTradeNo(tradeNo)
+	if order == nil || order.PaymentProvider != model.PaymentProviderWaffoPancake {
+		logger.LogError(c.Request.Context(), common.LogText(
+			"Waffo Pancake app product order not found trade_no=%s event_id=%s order_id=%s client_ip=%s",
+			tradeNo, event.ID, event.Data.OrderID, c.ClientIP(),
+		))
+		c.String(http.StatusOK, "OK")
+		return
+	}
+	expectedIdentity := service.WaffoPancakeBuyerIdentityFromUserID(order.UserId)
+	if strings.TrimSpace(event.Data.MerchantProvidedBuyerIdentity) != expectedIdentity {
+		logger.LogError(c.Request.Context(), common.LogText(
+			"Waffo Pancake app product buyer identity mismatch trade_no=%s event_id=%s order_id=%s client_ip=%s",
+			tradeNo, event.ID, event.Data.OrderID, c.ClientIP(),
+		))
+		c.String(http.StatusOK, "OK")
+		return
+	}
+	amount, err := decimal.NewFromString(strings.TrimSpace(event.Data.Amount))
+	if err != nil || amount.LessThanOrEqual(decimal.Zero) {
+		logger.LogError(c.Request.Context(), common.LogText(
+			"Waffo Pancake app product invalid payment amount trade_no=%s amount=%q event_id=%s client_ip=%s",
+			tradeNo, event.Data.Amount, event.ID, c.ClientIP(),
+		))
+		c.String(http.StatusOK, "OK")
+		return
+	}
+	if currency := strings.TrimSpace(event.Data.Currency); currency != "" && !strings.EqualFold(currency, order.Currency) {
+		logger.LogError(c.Request.Context(), common.LogText(
+			"Waffo Pancake app product currency mismatch trade_no=%s expected=%s actual=%s event_id=%s client_ip=%s",
+			tradeNo, order.Currency, currency, event.ID, c.ClientIP(),
+		))
+		c.String(http.StatusOK, "OK")
+		return
+	}
+
+	LockOrder(tradeNo)
+	defer UnlockOrder(tradeNo)
+	if err := model.CompleteAppProductOrder(tradeNo, string(body), model.PaymentProviderWaffoPancake, amount.InexactFloat64()); err != nil {
+		if errors.Is(err, model.ErrAppProductOrderAmountMismatch) {
+			logger.LogError(c.Request.Context(), common.LogText(
+				"Waffo Pancake app product payment amount mismatch trade_no=%s amount=%s order_amount=%.2f event_id=%s client_ip=%s",
+				tradeNo, event.Data.Amount, order.Money, event.ID, c.ClientIP(),
+			))
+			c.String(http.StatusOK, "OK")
+			return
+		}
+		logger.LogError(c.Request.Context(), common.LogText(
+			"Waffo Pancake app product completion failed trade_no=%s event_id=%s order_id=%s client_ip=%s error=%q",
+			tradeNo, event.ID, event.Data.OrderID, c.ClientIP(), err.Error(),
+		))
+		c.String(http.StatusInternalServerError, "retry")
+		return
+	}
+	logger.LogInfo(c.Request.Context(), common.LogText(
+		"Waffo Pancake app product order completed trade_no=%s event_id=%s order_id=%s client_ip=%s",
+		tradeNo, event.ID, event.Data.OrderID, c.ClientIP(),
+	))
 	c.String(http.StatusOK, "OK")
 }

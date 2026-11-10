@@ -29,6 +29,7 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { useMediaQuery } from '@/hooks'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import {
   createServerError,
@@ -64,6 +65,7 @@ function isDisabledUserRow(user: User) {
 
 export function UsersTable() {
   const { t } = useTranslation()
+  const { appId } = useActiveApp()
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
@@ -133,6 +135,7 @@ export function UsersTable() {
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
       'users',
+      appId,
       pagination.pageIndex + 1,
       pagination.pageSize,
       globalFilter,
@@ -151,6 +154,7 @@ export function UsersTable() {
       const params = {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
+        app_id: appId > 0 ? appId : undefined,
         ...sortParams,
       }
 
@@ -177,7 +181,8 @@ export function UsersTable() {
         total: result.data?.total || 0,
       }
     },
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previousData, previousQuery) =>
+      previousQuery?.queryKey[1] === appId ? previousData : undefined,
   })
 
   const users = data?.items || []

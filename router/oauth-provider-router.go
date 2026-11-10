@@ -43,6 +43,13 @@ func registerOAuthProviderRoutes(router *gin.Engine) {
 	// Top-up checkout requires a valid access token with the api:write scope.
 	router.POST("/oauth/topup/checkout", rateLimit, controller.OAuthTopupCheckout)
 
+	// App-scoped purchase endpoints. Reads require api:read; checkouts require
+	// api:write, both enforced by the handlers from the access token.
+	router.GET("/oauth/subscription/plans", rateLimit, controller.OAuthSubscriptionPlans)
+	router.POST("/oauth/subscription/checkout", rateLimit, controller.OAuthSubscriptionCheckout)
+	router.GET("/oauth/products", rateLimit, controller.OAuthProductList)
+	router.POST("/oauth/products/checkout", rateLimit, controller.OAuthProductCheckout)
+
 	// Logs list requires a valid access token with the api:read scope.
 	router.GET("/oauth/logs", rateLimit, controller.OAuthLogsList)
 

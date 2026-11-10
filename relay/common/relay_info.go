@@ -81,10 +81,14 @@ type TokenCountMeta struct {
 }
 
 type RelayInfo struct {
-	TokenId           int
-	TokenKey          string
-	TokenGroup        string
-	UserId            int
+	TokenId    int
+	TokenKey   string
+	TokenGroup string
+	UserId     int
+	// AppId is the OAuth App that owns an OAuth access token. Non-zero means
+	// billing is charged against the app-scoped quota pool instead of the
+	// platform user quota. It is 0 for dashboard keys, PATs, and sessions.
+	AppId             int
 	UsingGroup        string // 使用的分组，当auto跨分组重试时，会变动
 	UserGroup         string // 用户所在分组
 	TokenUnlimited    bool
@@ -620,6 +624,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),
+		AppId:      common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID),
 		UsingGroup: common.GetContextKeyString(c, constant.ContextKeyUsingGroup),
 		UserGroup:  common.GetContextKeyString(c, constant.ContextKeyUserGroup),
 		UserQuota:  common.GetContextKeyInt(c, constant.ContextKeyUserQuota),

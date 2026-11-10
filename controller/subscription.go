@@ -34,8 +34,10 @@ func GetSubscriptionPlans(c *gin.Context) {
 		return
 	}
 
-	var plans []model.SubscriptionPlan
-	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
+	// The console only sells platform plans. App-scoped plans are listed through
+	// the OAuth provider endpoint for the owning app.
+	plans, err := model.ListEnabledSubscriptionPlans(0)
+	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -54,14 +56,16 @@ func GetSubscriptionSelf(c *gin.Context) {
 	settingMap, _ := model.GetUserSetting(userId, false)
 	pref := common.NormalizeBillingPreference(settingMap.BillingPreference)
 
-	// Get all subscriptions (including expired)
-	allSubscriptions, err := model.GetAllUserSubscriptions(userId)
+	// Get all subscriptions (including expired). The console is the platform
+	// view, so app-scoped subscriptions (app_id > 0) are excluded; OAuth App
+	// clients read those through the provider endpoints.
+	allSubscriptions, err := model.GetAllUserSubscriptions(userId, 0)
 	if err != nil {
 		allSubscriptions = []model.SubscriptionSummary{}
 	}
 
 	// Get active subscriptions for backward compatibility
-	activeSubscriptions, err := model.GetAllActiveUserSubscriptions(userId)
+	activeSubscriptions, err := model.GetAllActiveUserSubscriptions(userId, 0)
 	if err != nil {
 		activeSubscriptions = []model.SubscriptionSummary{}
 	}
@@ -108,7 +112,7 @@ func SubscriptionRequestBalancePay(c *gin.Context) {
 		return
 	}
 
-	if err := model.PurchaseSubscriptionWithBalance(userId, req.PlanId); err != nil {
+	if err := model.PurchaseSubscriptionWithBalance(userId, req.PlanId, 0); err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -118,8 +122,17 @@ func SubscriptionRequestBalancePay(c *gin.Context) {
 // ---- Admin APIs ----
 
 func AdminListSubscriptionPlans(c *gin.Context) {
+	query := model.DB.Order("sort_order desc, id desc")
+	if rawAppId := strings.TrimSpace(c.Query("app_id")); rawAppId != "" {
+		appId, err := strconv.Atoi(rawAppId)
+		if err != nil || appId < 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		query = query.Where("app_id = ?", appId)
+	}
 	var plans []model.SubscriptionPlan
-	if err := model.DB.Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
+	if err := query.Find(&plans).Error; err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -148,6 +161,16 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = 0
+	if req.Plan.AppId < 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	if req.Plan.AppId > 0 {
+		if _, err := model.GetOAuthAppByID(req.Plan.AppId); err != nil {
+			common.ApiErrorT(c, "Application does not exist")
+			return
+		}
+	}
 	if strings.TrimSpace(req.Plan.Title) == "" {
 		common.ApiErrorT(c, "Subscription plan title cannot be empty")
 		return
@@ -240,6 +263,16 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		return
 	}
 	req.Plan.Id = id
+	if req.Plan.AppId < 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	if req.Plan.AppId > 0 {
+		if _, err := model.GetOAuthAppByID(req.Plan.AppId); err != nil {
+			common.ApiErrorT(c, "Application does not exist")
+			return
+		}
+	}
 	if req.Plan.Currency == "" {
 		req.Plan.Currency = "USD"
 	}
@@ -282,6 +315,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		// update plan (allow zero values updates with map)
 		updateMap := map[string]any{
 			"title":                      req.Plan.Title,
+			"app_id":                     req.Plan.AppId,
 			"subtitle":                   req.Plan.Subtitle,
 			"price_amount":               req.Plan.PriceAmount,
 			"currency":                   req.Plan.Currency,
@@ -390,7 +424,7 @@ func AdminListUserSubscriptions(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid user ID")
 		return
 	}
-	subs, err := model.GetAllUserSubscriptions(userId)
+	subs, err := model.GetAllUserSubscriptions(userId, 0)
 	if err != nil {
 		common.ApiError(c, err)
 		return

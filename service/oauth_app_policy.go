@@ -23,6 +23,7 @@ var (
 // cachedOAuthApp is the memory-cache shape for an OAuthApp. Keeping a tiny
 // subset avoids serializing full redirect URIs / scope arrays every hit.
 type cachedOAuthApp struct {
+	id                 int
 	clientID           string
 	status             int
 	aiModelWhitelist   string // JSON array string; "" means no restriction
@@ -71,6 +72,7 @@ func LoadOAuthAppByClientID(clientID string) (*model.OAuthApp, error) {
 	}
 
 	cache := cachedOAuthApp{
+		id:                 app.Id,
 		clientID:           app.ClientID,
 		status:             app.Status,
 		aiModelWhitelist:   app.AIModelWhitelist,
@@ -135,6 +137,7 @@ func loadOAuthAppFromMemory(clientID string) (*model.OAuthApp, bool) {
 
 func cachedOAuthAppToModel(c cachedOAuthApp) *model.OAuthApp {
 	return &model.OAuthApp{
+		Id:                 c.id,
 		ClientID:           c.clientID,
 		Status:             c.status,
 		AIModelWhitelist:   c.aiModelWhitelist,
@@ -149,6 +152,7 @@ func cachedOAuthAppToModel(c cachedOAuthApp) *model.OAuthApp {
 // consistent with the rest of the codebase.
 func serializeCachedOAuthApp(c cachedOAuthApp) string {
 	data, err := common.Marshal(map[string]any{
+		"id":  c.id,
 		"cid": c.clientID,
 		"st":  c.status,
 		"wl":  c.aiModelWhitelist,
@@ -163,6 +167,7 @@ func serializeCachedOAuthApp(c cachedOAuthApp) string {
 
 func parseCachedOAuthApp(raw string) *model.OAuthApp {
 	var payload struct {
+		ID  int    `json:"id"`
 		CID string `json:"cid"`
 		St  int    `json:"st"`
 		WL  string `json:"wl"`
@@ -172,7 +177,9 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 	if err := common.UnmarshalJsonStr(raw, &payload); err != nil {
 		return nil
 	}
-	if payload.CID == "" {
+	if payload.CID == "" || payload.ID <= 0 {
+		// Entries written before the app id was cached cannot be used for
+		// app-scoped billing, so treat them as a cache miss and reload.
 		return nil
 	}
 	// Stale protection (Redis side TTL should already handle it, but we double
@@ -181,6 +188,7 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 		return nil
 	}
 	return &model.OAuthApp{
+		Id:                 payload.ID,
 		ClientID:           payload.CID,
 		Status:             payload.St,
 		AIModelWhitelist:   payload.WL,

@@ -21,6 +21,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { DataTablePage, useDataTable } from '@/components/data-table'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getAdminPlans } from '../api'
@@ -29,16 +30,16 @@ import { useSubscriptions } from './subscriptions-provider'
 
 export function SubscriptionsTable() {
   const { t } = useTranslation()
+  const { appId } = useActiveApp()
   const columns = useSubscriptionsColumns()
   const { refreshTrigger } = useSubscriptions()
 
   const { data, isLoading } = useQuery({
-    queryKey: ['admin-subscription-plans', refreshTrigger],
+    queryKey: ['admin-subscription-plans', appId, refreshTrigger],
     queryFn: async () => {
-      const result = requireServerSuccess(await getAdminPlans())
+      const result = requireServerSuccess(await getAdminPlans(appId))
       return result.data || []
     },
-    placeholderData: (prev) => prev,
   })
 
   const plans = useMemo(() => data || [], [data])

@@ -144,7 +144,8 @@ func InvalidateSubscriptionPlanCache(planId int) {
 
 // Subscription plan
 type SubscriptionPlan struct {
-	Id int `json:"id"`
+	Id    int `json:"id"`
+	AppId int `json:"app_id" gorm:"not null;default:0;index"`
 
 	Title    string `json:"title" gorm:"type:varchar(128);not null"`
 	Subtitle string `json:"subtitle" gorm:"type:varchar(255);default:''"`
@@ -213,6 +214,7 @@ func (p *SubscriptionPlan) NormalizeDefaults() {
 // Subscription order (payment -> webhook -> create UserSubscription)
 type SubscriptionOrder struct {
 	Id     int     `json:"id"`
+	AppId  int     `json:"app_id" gorm:"not null;default:0;index"`
 	UserId int     `json:"user_id" gorm:"index"`
 	PlanId int     `json:"plan_id" gorm:"index"`
 	Money  float64 `json:"money"`
@@ -252,6 +254,7 @@ func GetSubscriptionOrderByTradeNo(tradeNo string) *SubscriptionOrder {
 // User subscription instance
 type UserSubscription struct {
 	Id     int `json:"id"`
+	AppId  int `json:"app_id" gorm:"not null;default:0;index"`
 	UserId int `json:"user_id" gorm:"index;index:idx_user_sub_active,priority:1"`
 	PlanId int `json:"plan_id" gorm:"index"`
 
@@ -534,6 +537,7 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		allowWalletOverflow = *plan.AllowWalletOverflow
 	}
 	sub := &UserSubscription{
+		AppId:               plan.AppId,
 		UserId:              userId,
 		PlanId:              plan.Id,
 		AmountTotal:         plan.TotalAmount,
@@ -597,6 +601,13 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		if err != nil {
 			return err
 		}
+		// The order is the source of truth for the app scope: never derive it
+		// from a mutable plan or the payment request body.
+		if plan.AppId != order.AppId {
+			planCopy := *plan
+			planCopy.AppId = order.AppId
+			plan = &planCopy
+		}
 		if !plan.Enabled {
 			// still allow completion for already purchased orders
 		}
@@ -658,6 +669,7 @@ func upsertSubscriptionTopUpTx(tx *gorm.DB, order *SubscriptionOrder) error {
 	if err := tx.Where("trade_no = ?", order.TradeNo).First(&topup).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			topup = TopUp{
+				AppId:         order.AppId,
 				UserId:        order.UserId,
 				Amount:        0,
 				Money:         order.Money,
@@ -755,10 +767,14 @@ func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
 	return common.WalletQuotaFromDecimalStrict(quota)
 }
 
-// PurchaseSubscriptionWithBalance creates a subscription by deducting the user's wallet quota.
-func PurchaseSubscriptionWithBalance(userId int, planId int) error {
+// PurchaseSubscriptionWithBalance creates a subscription by deducting the wallet
+// quota of the given app scope (appId 0 = platform user quota).
+func PurchaseSubscriptionWithBalance(userId int, planId int, appId int) error {
 	if userId <= 0 || planId <= 0 {
 		return errors.New("invalid userId or planId")
+	}
+	if appId < 0 {
+		return ErrInvalidAppId
 	}
 
 	var logPlanTitle string
@@ -779,23 +795,45 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		if plan.AllowBalancePay != nil && !*plan.AllowBalancePay {
 			return common.NewMessage("This plan does not allow balance redemption")
 		}
+		if plan.AppId != appId {
+			return common.NewMessage("Subscription plan does not belong to this app")
+		}
 
 		requiredQuota, err := calcSubscriptionBalanceQuota(plan.PriceAmount)
 		if err != nil {
 			return err
 		}
 
-		var user User
-		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
-			return err
-		}
-		if requiredQuota > 0 && user.Quota < requiredQuota {
-			return common.NewMessage("Insufficient balance")
-		}
-		if requiredQuota > 0 {
-			if err := tx.Model(&User{}).Where("id = ?", userId).
-				Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+		if appId > 0 {
+			if requiredQuota > 0 {
+				var wallet UserAppWallet
+				if err := lockForUpdate(tx).Where("user_id = ? AND app_id = ?", userId, appId).First(&wallet).Error; err != nil {
+					if errors.Is(err, gorm.ErrRecordNotFound) {
+						return common.NewMessage("Insufficient balance")
+					}
+					return err
+				}
+				if wallet.Quota < requiredQuota {
+					return common.NewMessage("Insufficient balance")
+				}
+				if err := tx.Model(&UserAppWallet{}).Where("user_id = ? AND app_id = ?", userId, appId).
+					Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+					return err
+				}
+			}
+		} else {
+			var user User
+			if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
 				return err
+			}
+			if requiredQuota > 0 && user.Quota < requiredQuota {
+				return common.NewMessage("Insufficient balance")
+			}
+			if requiredQuota > 0 {
+				if err := tx.Model(&User{}).Where("id = ?", userId).
+					Update("quota", gorm.Expr("quota - ?", requiredQuota)).Error; err != nil {
+					return err
+				}
 			}
 		}
 
@@ -807,6 +845,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		now := common.GetTimestamp()
 		tradeNo := fmt.Sprintf("SUBBALUSR%dNO%s%d", userId, common.GetRandomString(6), time.Now().UnixNano())
 		order := &SubscriptionOrder{
+			AppId:           appId,
 			UserId:          userId,
 			PlanId:          plan.Id,
 			Money:           plan.PriceAmount,
@@ -834,7 +873,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		return err
 	}
 
-	if chargedQuota > 0 {
+	if chargedQuota > 0 && appId == 0 {
 		if err := cacheDecrUserQuota(userId, int64(chargedQuota)); err != nil {
 			common.SysLog(common.LogText("failed to decrease user quota cache after subscription balance purchase: %s", err.Error()))
 		}
@@ -850,14 +889,18 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 	return nil
 }
 
-// GetAllActiveUserSubscriptions returns all active subscriptions for a user.
-func GetAllActiveUserSubscriptions(userId int) ([]SubscriptionSummary, error) {
+// GetAllActiveUserSubscriptions returns the active subscriptions for a user in
+// one app scope (appId 0 = platform console).
+func GetAllActiveUserSubscriptions(userId int, appId int) ([]SubscriptionSummary, error) {
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
 	}
+	if appId < 0 {
+		return nil, ErrInvalidAppId
+	}
 	now := common.GetTimestamp()
 	var subs []UserSubscription
-	err := DB.Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
+	err := DB.Where("user_id = ? AND app_id = ? AND status = ? AND end_time > ?", userId, appId, "active", now).
 		Order("end_time desc, id desc").
 		Find(&subs).Error
 	if err != nil {
@@ -866,16 +909,38 @@ func GetAllActiveUserSubscriptions(userId int) ([]SubscriptionSummary, error) {
 	return buildSubscriptionSummaries(subs), nil
 }
 
-// HasActiveUserSubscription returns whether the user has any active subscription.
+// ListEnabledSubscriptionPlans returns enabled plans for one app scope.
+// appId 0 is the platform console scope; a positive id is an OAuth App.
+func ListEnabledSubscriptionPlans(appId int) ([]SubscriptionPlan, error) {
+	if appId < 0 {
+		return nil, ErrInvalidAppId
+	}
+	var plans []SubscriptionPlan
+	if err := DB.Where("enabled = ? AND app_id = ?", true, appId).
+		Order("sort_order desc, id desc").
+		Find(&plans).Error; err != nil {
+		return nil, err
+	}
+	for i := range plans {
+		plans[i].NormalizeDefaults()
+	}
+	return plans, nil
+}
+
+// HasActiveUserSubscription returns whether the user has any active subscription
+// in the given app scope (appId 0 = platform).
 // This is a lightweight existence check to avoid heavy pre-consume transactions.
-func HasActiveUserSubscription(userId int) (bool, error) {
+func HasActiveUserSubscription(userId int, appId int) (bool, error) {
 	if userId <= 0 {
 		return false, errors.New("invalid userId")
+	}
+	if appId < 0 {
+		return false, ErrInvalidAppId
 	}
 	now := common.GetTimestamp()
 	var count int64
 	if err := DB.Model(&UserSubscription{}).
-		Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
+		Where("user_id = ? AND app_id = ? AND status = ? AND end_time > ?", userId, appId, "active", now).
 		Count(&count).Error; err != nil {
 		return false, err
 	}
@@ -885,28 +950,35 @@ func HasActiveUserSubscription(userId int) (bool, error) {
 // UserActiveSubscriptionsAllowWalletOverflow returns whether wallet balance may be used
 // after the user's subscription quota is exhausted. A single active subscription that
 // disallows wallet overflow (allow_wallet_overflow = false) blocks the fallback.
-func UserActiveSubscriptionsAllowWalletOverflow(userId int) (bool, error) {
+func UserActiveSubscriptionsAllowWalletOverflow(userId int, appId int) (bool, error) {
 	if userId <= 0 {
 		return false, errors.New("invalid userId")
+	}
+	if appId < 0 {
+		return false, ErrInvalidAppId
 	}
 	now := common.GetTimestamp()
 	var strictCount int64
 	if err := DB.Model(&UserSubscription{}).
-		Where("user_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
-			userId, "active", now, false).
+		Where("user_id = ? AND app_id = ? AND status = ? AND end_time > ? AND allow_wallet_overflow = ?",
+			userId, appId, "active", now, false).
 		Count(&strictCount).Error; err != nil {
 		return false, err
 	}
 	return strictCount == 0, nil
 }
 
-// GetAllUserSubscriptions returns all subscriptions (active and expired) for a user.
-func GetAllUserSubscriptions(userId int) ([]SubscriptionSummary, error) {
+// GetAllUserSubscriptions returns all subscriptions (active and expired) for a
+// user in one app scope (appId 0 = platform console).
+func GetAllUserSubscriptions(userId int, appId int) ([]SubscriptionSummary, error) {
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
 	}
+	if appId < 0 {
+		return nil, ErrInvalidAppId
+	}
 	var subs []UserSubscription
-	err := DB.Where("user_id = ?", userId).
+	err := DB.Where("user_id = ? AND app_id = ?", userId, appId).
 		Order("end_time desc, id desc").
 		Find(&subs).Error
 	if err != nil {
@@ -1300,10 +1372,14 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 	return tx.Save(sub).Error
 }
 
-// PreConsumeUserSubscription pre-consumes from any active subscription total quota.
-func PreConsumeUserSubscription(requestId string, userId int, modelName string, quotaType int, amount int64) (*SubscriptionPreConsumeResult, error) {
+// PreConsumeUserSubscription pre-consumes from any active subscription total quota
+// inside the given app scope (appId 0 = platform).
+func PreConsumeUserSubscription(requestId string, userId int, appId int, modelName string, quotaType int, amount int64) (*SubscriptionPreConsumeResult, error) {
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
+	}
+	if appId < 0 {
+		return nil, ErrInvalidAppId
 	}
 	if strings.TrimSpace(requestId) == "" {
 		return nil, errors.New("requestId is empty")
@@ -1339,7 +1415,7 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 
 		var subs []UserSubscription
 		if err := lockForUpdate(tx).
-			Where("user_id = ? AND status = ? AND end_time > ?", userId, "active", now).
+			Where("user_id = ? AND app_id = ? AND status = ? AND end_time > ?", userId, appId, "active", now).
 			Order("end_time asc, id asc").
 			Find(&subs).Error; err != nil {
 			return errors.New("no active subscription")

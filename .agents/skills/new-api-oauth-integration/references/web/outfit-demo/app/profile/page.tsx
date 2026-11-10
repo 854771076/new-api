@@ -57,8 +57,11 @@ export default async function ProfilePage() {
           rel="noreferrer"
           className="btn btn-neutral w-full"
         >
-          在网关查看额度 / 充值
+          在网关管理平台余额
         </a>
+        <p className="text-xs opacity-70">
+          应用额度独立于平台余额：可在应用内调用 OAuth 充值接口把平台余额划转到本应用额度池。
+        </p>
         <LogoutButton />
       </div>
     </div>

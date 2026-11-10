@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Calcium-Ion/go-epay/epay"
@@ -37,42 +38,60 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if !plan.Enabled {
-		common.ApiErrorT(c, "Subscription plan is not enabled")
+
+	uri, params, err := createEpaySubscriptionOrder(c.GetInt("id"), plan, req.PaymentMethod)
+	if err != nil {
+		common.ApiError(c, err)
 		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "success", "data": params, "url": uri})
+}
+
+// firstConfiguredEpayMethod maps the OAuth channel name "epay" to a concrete
+// configured epay payment type (for example alipay or wxpay).
+func firstConfiguredEpayMethod() (string, error) {
+	for _, method := range operation_setting.PayMethods {
+		if payType := strings.TrimSpace(method["type"]); payType != "" {
+			return payType, nil
+		}
+	}
+	return "", common.NewMessage("Payment method does not exist")
+}
+
+// createEpaySubscriptionOrder validates the plan/payment method, persists the
+// pending subscription order and starts an epay payment. It is shared by the
+// dashboard and the OAuth app checkout endpoint.
+func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, paymentMethod string) (string, map[string]string, error) {
+	if plan == nil {
+		return "", nil, common.NewMessage("Subscription plan does not exist")
+	}
+	if !plan.Enabled {
+		return "", nil, common.NewMessage("Subscription plan is not enabled")
 	}
 	if plan.PriceAmount < 0.01 {
-		common.ApiErrorT(c, "Plan amount is too low")
-		return
+		return "", nil, common.NewMessage("Plan amount is too low")
 	}
-	if !operation_setting.ContainsPayMethod(req.PaymentMethod) {
-		common.ApiErrorT(c, "Payment method does not exist")
-		return
+	if !operation_setting.ContainsPayMethod(paymentMethod) {
+		return "", nil, common.NewMessage("Payment method does not exist")
 	}
-
-	userId := c.GetInt("id")
 	if plan.MaxPurchasePerUser > 0 {
 		count, err := model.CountUserSubscriptionsByPlan(userId, plan.Id)
 		if err != nil {
-			common.ApiError(c, err)
-			return
+			return "", nil, err
 		}
 		if count >= int64(plan.MaxPurchasePerUser) {
-			common.ApiErrorT(c, "Purchase limit for this plan has been reached")
-			return
+			return "", nil, common.NewMessage("Purchase limit for this plan has been reached")
 		}
 	}
 
 	callBackAddress := service.GetCallbackAddress()
 	returnUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/return")
 	if err != nil {
-		common.ApiErrorT(c, "Callback URL configuration error")
-		return
+		return "", nil, common.NewMessage("Callback URL configuration error")
 	}
 	notifyUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/notify")
 	if err != nil {
-		common.ApiErrorT(c, "Callback URL configuration error")
-		return
+		return "", nil, common.NewMessage("Callback URL configuration error")
 	}
 
 	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
@@ -80,26 +99,25 @@ func SubscriptionRequestEpay(c *gin.Context) {
 
 	client := GetEpayClient()
 	if client == nil {
-		common.ApiErrorT(c, "Payment information has not been configured by administrator")
-		return
+		return "", nil, common.NewMessage("Payment information has not been configured by administrator")
 	}
 
 	order := &model.SubscriptionOrder{
+		AppId:           plan.AppId,
 		UserId:          userId,
 		PlanId:          plan.Id,
 		Money:           plan.PriceAmount,
 		TradeNo:         tradeNo,
-		PaymentMethod:   req.PaymentMethod,
+		PaymentMethod:   paymentMethod,
 		PaymentProvider: model.PaymentProviderEpay,
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
 	}
 	if err := order.Insert(); err != nil {
-		common.ApiErrorT(c, "Failed to create order")
-		return
+		return "", nil, common.NewMessage("Failed to create order")
 	}
 	uri, params, err := client.Purchase(&epay.PurchaseArgs{
-		Type:           req.PaymentMethod,
+		Type:           paymentMethod,
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("SUB:%s", plan.Title),
 		Money:          strconv.FormatFloat(plan.PriceAmount, 'f', 2, 64),
@@ -109,10 +127,9 @@ func SubscriptionRequestEpay(c *gin.Context) {
 	})
 	if err != nil {
 		_ = model.ExpireSubscriptionOrder(tradeNo, model.PaymentProviderEpay)
-		common.ApiErrorT(c, "Failed to start payment")
-		return
+		return "", nil, common.NewMessage("Failed to start payment")
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "success", "data": params, "url": uri})
+	return uri, params, nil
 }
 
 func SubscriptionEpayNotify(c *gin.Context) {

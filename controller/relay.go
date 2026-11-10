@@ -539,6 +539,16 @@ func executeTaskSubmissionWith(
 	relayInfo *relaycommon.RelayInfo,
 	submit taskSubmitAttempt,
 ) (*taskSubmissionOutcome, *taskdto.TaskError) {
+	if relayInfo.AppId > 0 {
+		// Async tasks are billed against the platform wallet after completion,
+		// which cannot be attributed to an app quota pool. Rejecting here keeps
+		// app usage from bypassing the app wallet entirely.
+		return nil, &taskdto.TaskError{
+			Code:       "app_task_unsupported",
+			Message:    "Async tasks are not supported for app access tokens",
+			StatusCode: http.StatusForbidden,
+		}
+	}
 	policy := service.RequestPolicy(c)
 	diagnostics := newTaskPluginSubmitDiagnostics(c)
 	diagnostics.start(relayInfo)

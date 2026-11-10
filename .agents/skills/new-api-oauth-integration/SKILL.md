@@ -65,12 +65,12 @@ Each new-api surface accepts a different credential. Sending the wrong one is th
 
 | Surface | Endpoints | Accepted credential |
 |---------|-----------|---------------------|
-| OAuth / OIDC | `/oauth/authorize`, `/oauth/token`, `/oauth/userinfo`, `/oauth/introspect`, `/oauth/revoke`, `/oauth/topup/checkout`, `/oauth/logs`, `/.well-known/openid-configuration` | OAuth access token / client credentials |
+| OAuth / OIDC | `/oauth/authorize`, `/oauth/token`, `/oauth/userinfo`, `/oauth/introspect`, `/oauth/revoke`, `/oauth/topup/checkout`, `/oauth/subscription/plans`, `/oauth/subscription/checkout`, `/oauth/products`, `/oauth/products/checkout`, `/oauth/logs`, `/.well-known/openid-configuration` | OAuth access token / client credentials |
 | AI relay | `/v1/*` | OAuth access token (`api:read` for GET/HEAD, `api:write` for other methods), or a new-api API token (`sk-...`) |
 | Dashboard / user system | `/api/user/*`, `/api/user/topup*`, `/api/user/pay`, `/api/subscription/*` | Browser session or personal access token (`nap_...`) |
-| Administration | `/api/user/` admin routes, `/api/subscription/admin/*` | Admin or root session, or admin personal access token |
+| Administration | `/api/user/` admin routes, `/api/subscription/admin/*`, `/api/app-products*` | Admin or root session, or admin personal access token |
 
-An OAuth access token is accepted by the AI relay and `/oauth/*` endpoints above; every `/api/*` dashboard endpoint rejects it. Quota, usage, top-up, and subscription calls therefore no longer need a dashboard session or a PAT — the three new `/oauth/userinfo` (with `api:read`), `/oauth/topup/checkout` (with `api:write`), and `/oauth/logs` (with `api:read`) endpoints handle them directly. Personal access tokens (`nap_...`) remain available for trusted backend integrations that need full dashboard scope.
+An OAuth access token is accepted by the AI relay and `/oauth/*` endpoints above; every `/api/*` dashboard endpoint rejects it. App-scoped plans, products, top-up, quota, and usage therefore need no dashboard session or PAT — `/oauth/userinfo` (identity and quota, `api:read`), `/oauth/subscription/plans` and `/oauth/products` (`api:read`), `/oauth/subscription/checkout`, `/oauth/products/checkout`, and `/oauth/topup/checkout` (`api:write`), and `/oauth/logs` (`api:read`) cover them. Personal access tokens (`nap_...`) remain available for trusted backend integrations that need full dashboard scope.
 
 ## Step 0: Environment Bootstrap
 
@@ -181,15 +181,37 @@ All AI traffic goes to `/v1/*` with the OAuth access token; that token is not a 
 - Never log the `Authorization` header, token, request body, or upstream body; log method, path, status, latency, and a request id only.
 - Never forward cookies, `client_secret`, or dashboard PATs upstream; preserve the upstream status and content type.
 - Retry a `401` exactly once after refresh, then surface it.
+- Relay billing for an OAuth access token is **App-scoped**: pre-consume, settlement, and refund all use the quota pool of the App that owns the token (`app_quota`), never the user's platform wallet.
+- Async task endpoints (video, music, and other task submissions) reject App access tokens with HTTP `403` and body `{"code":"app_task_unsupported","message":"Async tasks are not supported for app access tokens"}`. Handle it as a capability limit, not an auth or quota failure; task flows need a dashboard key or PAT.
 
 ## Step 4: Users, Quota, and Payments
 
-The user system lives under `/api/*`, which OAuth tokens cannot reach; quota, usage, top-up, and subscription calls historically needed a dashboard session or a PAT — but new-api now exposes three `/oauth/...` endpoints that accept OAuth access tokens directly. Full contract: `references/standards/billing.md` and `references/standards/identity.md`.
+The dashboard user system lives under `/api/*`, which OAuth tokens cannot reach. App-scoped identity, quota, plans, products, top-up, and usage are exposed under `/oauth/*` and accept the OAuth access token directly. Full contract, payment matrix, and error codes: `references/standards/billing.md` and `references/standards/identity.md`.
 
+Every call is scoped by the access token, not by request data: the token's `client_id` selects the App, and a request body `app_id` is only rejected when it does not match. Plans and products of other Apps, and platform plans (`app_id = 0`), are never returned or purchasable through it.
+
+| Endpoint | Scope | Contract |
+|----------|-------|----------|
+| `GET /oauth/userinfo` | `openid`; `api:read` for quota | `sub`, plus `username` / `name` (`profile`) and `email` (`email`). With `api:read`: `quota`, `used_quota`, `request_count`, `group`, and `app_quota` / `app_used_quota` for the token's App. |
+| `GET /oauth/subscription/plans` | `api:read` | `{"plans":[{"plan":{...}}]}` — enabled plans owned by this App only. |
+| `POST /oauth/subscription/checkout` | `api:write` | `{"plan_id":1,"payment_method":"balance"}`; balance returns `{"status":"success","payment_method":"balance"}`, online methods return a `pending` order with a checkout link. |
+| `GET /oauth/products` | `api:read` | `{"products":[{id,name,description,price_amount,currency,quota_amount,max_purchase_per_user}]}` — enabled products of this App only. |
+| `POST /oauth/products/checkout` | `api:write` | `{"product_id":1,"payment_method":"balance"}`; balance returns `{"status":"success","order_id":"...","quota_amount":...}`, `waffo_pancake` returns `checkout_url`. |
+| `POST /oauth/topup/checkout` | `api:write` | `{"amount":10,"payment_method":"balance"}`; balance returns `{"status":"success","quota":...}`, `waffo_pancake` returns `checkout_url` / `order_id` / `expires_at`. |
+| `GET /oauth/logs` | `api:read` | Redacted request logs of the token owner. |
+
+- **Two balances, one billing rule**: `quota` stays the platform wallet and `app_quota` is the App pool. Relay pre-consume, settlement, and refund for an OAuth token only touch that App pool (plus App-scoped subscription quota); the platform wallet is not charged.
+- **An App pool starts empty**: the wallet row is created lazily with `0` on first credit, and `app_quota` reads as `0` before that. Fund it by `POST /oauth/topup/checkout` or by buying an App product; both credit `app_quota`.
+- **Balance top-up is a transfer, not a grant**: `payment_method: "balance"` debits the user's platform wallet by the quota converted from `amount` and credits that same quota to the App pool. Insufficient platform balance or a violated minimum/maximum returns HTTP `400` `checkout_failed`; nothing is minted. `waffo_pancake` (the default when `payment_method` is omitted) credits the pool only after the provider confirms payment.
+- **Payment matrix** — plans: `balance`, `epay`, `stripe`, `creem`, `waffo_pancake`; products: `balance`, `waffo_pancake`; App top-up: `balance`, `waffo_pancake`. Any other value returns `400` `unsupported_payment_method`. `balance` on a plan or product debits the App pool; `balance` on top-up moves platform balance into the App pool.
+- **Cross-App purchase is rejected**: a plan or product owned by another App, a disabled plan/product, or a reached per-user purchase limit returns `403 access_denied` or `400 checkout_failed`; a missing `plan_id` / `product_id` returns `400 invalid_request`, as does an omitted `payment_method` on plan or product checkout (top-up defaults to `waffo_pancake`).
+- **No OAuth endpoint reads App subscription state or App order history yet**: treat the checkout response as an order handle, confirm top-up/product effects by re-reading `/oauth/userinfo` (`app_quota`), keep your own record for plans, and never treat a browser return URL or a `pending` order as proof of payment.
 - Link accounts on `sub` from `GET /oauth/userinfo`; `username` and `email` are mutable and email may be empty. OAuth login never creates a new-api user.
-- 外部 app 用 OAuth access token 调 `/oauth/userinfo` 拿身份，带 `api:read` 时还能拿到额度；站内充值走 `/oauth/topup/checkout`（modal），日志走 `/oauth/logs`；不要跳 newapi 仪表板。
+- 外部 app 用 OAuth access token 调 `/oauth/userinfo` 拿身份与额度，站内充值走 `/oauth/topup/checkout`（modal），套餐/商品走 `/oauth/subscription/*` 和 `/oauth/products*`，日志走 `/oauth/logs`；不要跳 newapi 仪表板。
+- 每个 App 在后台独立配置自己的套餐与商品（按 `app_id` 归属），外部 app 只看到自己 App 的那一份；后台按 App 筛选用户与订单见 `references/standards/api-contract.md`。
 - PATs (`nap_...`, shown once, scoped, `expires_at` at least 1 hour ahead when set) need a browser session and a security proof; a PAT cannot mint another PAT and never exceeds the user's role.
 - `amount` is in the configured display unit — never send a quota value as an `amount`.
+
 
 ## Step 5: Backend on Supabase
 
@@ -271,7 +293,8 @@ Optional surface with a different stack: Next.js App Router + Ant Design 5 + `@r
 - [ ] `state` is validated against a server-held value; `nonce` is per request and validated when an `id_token` is consumed.
 - [ ] State, verifier, and session cookies are `HttpOnly`, `Secure` in production, and `SameSite=Lax`.
 - [ ] Gateway tokens stay in memory and are never logged or written to `user_metadata`; a rotated refresh token replaces the old one.
-- [ ] OAuth tokens are used for `/v1/*`, `/oauth/userinfo`, `/oauth/topup/checkout`, and `/oauth/logs` only; every `/api/*` dashboard endpoint rejects them.
+- [ ] OAuth tokens are used for `/v1/*` and `/oauth/*` (`userinfo`, `subscription/*`, `products*`, `topup/checkout`, `logs`) only; every `/api/*` dashboard endpoint rejects them.
+- [ ] App access tokens are never sent to async task endpoints; the `403 app_task_unsupported` response is treated as a capability limit.
 - [ ] A browser return URL or `pending` order is never proof of payment; admin permissions come from your own store and the server guard.
 - [ ] `SUPABASE_SECRET_KEY` is imported only by `server-only` code and never exposed through `NEXT_PUBLIC_*`.
 - [ ] All media lives in Supabase Storage private buckets; only `bucket` + `path` is in Postgres.
@@ -295,8 +318,8 @@ Details: `references/standards/security.md`.
 | `openid` | User ID (sub claim) — required for OIDC |
 | `profile` | Username, display name |
 | `email` | Email address |
-| `api:read` | Read-only AI endpoints (`GET` / `HEAD` / `OPTIONS`, e.g. `/v1/models`) |
-| `api:write` | Non-read AI endpoints (chat, images, embeddings, ...). Request both if the app also reads. |
+| `api:read` | Read-only AI endpoints (`GET` / `HEAD` / `OPTIONS`, e.g. `/v1/models`), quota in `/oauth/userinfo`, App plans/products, and `/oauth/logs` |
+| `api:write` | Non-read AI endpoints (chat, images, embeddings, ...) and plan/product/top-up checkout. Request both if the app also reads. |
 
 These scopes belong to OAuth access tokens only. Dashboard personal access tokens use a separate catalog (`profile:read`, `profile:write`, `account_security:write`, `wallet:read`, `wallet:write`, `billing:read`, `billing:write`, ...); list it with `GET /api/user/access_tokens/scopes`.
 

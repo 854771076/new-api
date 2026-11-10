@@ -32,6 +32,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { getCurrencyDisplay } from '@/lib/currency'
 import { formatQuota } from '@/lib/format'
 import { useSystemConfigStore } from '@/stores/system-config-store'
@@ -48,6 +49,7 @@ import { UserQuotaCell } from './user-quota-cell'
 
 export function useUsersColumns(): ColumnDef<User>[] {
   const { t } = useTranslation()
+  const { isPlatform } = useActiveApp()
   const currencyConfig = useSystemConfigStore((state) => state.config.currency)
   const { meta: currency } = getCurrencyDisplay()
   const quotaUnit = currency.kind === 'tokens' ? t('Tokens') : currency.symbol
@@ -194,6 +196,34 @@ export function useUsersColumns(): ColumnDef<User>[] {
         minSize: 160,
         meta: { mobileOrder: 40 },
       },
+      ...(isPlatform
+        ? []
+        : ([
+            {
+              accessorKey: 'app_quota',
+              header: t('App Quota'),
+              cell: ({ row }) => (
+                <span className='text-muted-foreground tabular-nums'>
+                  {formatQuota(row.original.app_quota ?? 0)}
+                </span>
+              ),
+              enableSorting: false,
+              size: 140,
+              meta: { mobileHidden: true },
+            },
+            {
+              accessorKey: 'app_used_quota',
+              header: t('App Used'),
+              cell: ({ row }) => (
+                <span className='text-muted-foreground tabular-nums'>
+                  {formatQuota(row.original.app_used_quota ?? 0)}
+                </span>
+              ),
+              enableSorting: false,
+              size: 140,
+              meta: { mobileHidden: true },
+            },
+          ] as ColumnDef<User>[])),
       {
         accessorKey: 'group',
         header: t('User Group'),
@@ -298,6 +328,6 @@ export function useUsersColumns(): ColumnDef<User>[] {
     ],
     // formatQuota reads the currency configuration from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, quotaUnit, currencyConfig]
+    [t, quotaUnit, currencyConfig, isPlatform]
   )
 }

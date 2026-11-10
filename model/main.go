@@ -377,6 +377,9 @@ func migrateDB() error {
 		&AuthzRole{},
 		&UserAccessToken{},
 		&OAuthApp{},
+		&AppProduct{},
+		&AppProductOrder{},
+		&UserAppWallet{},
 		&OAuthAuthorizationCode{},
 		&OAuthRefreshToken{},
 		&OAuthConsent{},
@@ -518,6 +521,7 @@ func ensureSubscriptionPlanTableSQLite() error {
 	if !DB.Migrator().HasTable(tableName) {
 		createSQL := `CREATE TABLE ` + "`" + tableName + "`" + ` (
 ` + "`id`" + ` integer,
+` + "`app_id`" + ` integer NOT NULL DEFAULT 0,
 ` + "`title`" + ` varchar(128) NOT NULL,
 ` + "`subtitle`" + ` varchar(255) DEFAULT '',
 ` + "`price_amount`" + ` decimal(10,6) NOT NULL,
@@ -555,6 +559,7 @@ PRIMARY KEY (` + "`id`" + `)
 		existing[c.Name] = struct{}{}
 	}
 	required := []sqliteColumnDef{
+		{Name: "app_id", DDL: "`app_id` integer NOT NULL DEFAULT 0"},
 		{Name: "title", DDL: "`title` varchar(128) NOT NULL"},
 		{Name: "subtitle", DDL: "`subtitle` varchar(255) DEFAULT ''"},
 		{Name: "price_amount", DDL: "`price_amount` decimal(10,6) NOT NULL"},

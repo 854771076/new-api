@@ -206,6 +206,20 @@ func SetApiRouter(router *gin.Engine) {
 			subscriptionAdminRoute.DELETE("/user_subscriptions/:id", controller.AdminDeleteUserSubscription)
 		}
 
+		// App product catalog and product orders (admin)
+		appProductRoute := apiRouter.Group("/app-products")
+		appProductRoute.Use(middleware.AdminAuth())
+		{
+			appProductRoute.GET("", controller.AdminListAppProducts)
+			appProductRoute.POST("", controller.AdminCreateAppProduct)
+			appProductRoute.GET("/orders", controller.AdminListAppProductOrders)
+			appProductRoute.POST("/orders/:trade_no/complete", controller.AdminCompleteAppProductOrder)
+			appProductRoute.GET("/:id", controller.AdminGetAppProduct)
+			appProductRoute.PUT("/:id", controller.AdminUpdateAppProduct)
+			appProductRoute.PATCH("/:id", controller.AdminSetAppProductEnabled)
+			appProductRoute.DELETE("/:id", controller.AdminDeleteAppProduct)
+		}
+
 		// Subscription payment callbacks (no auth)
 		apiRouter.POST("/subscription/epay/notify", anonymousRequestBodyLimit, controller.SubscriptionEpayNotify)
 		apiRouter.GET("/subscription/epay/notify", controller.SubscriptionEpayNotify)
