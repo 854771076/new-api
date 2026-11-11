@@ -267,7 +267,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	if err != nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "insert_midjourney_task_failed")
 	}
-	billingApplied, billingErr := service.SettleMidjourneyTaskBilling(info, midjourneyTask, billingPrepared)
+	billingApplied, billingErr := service.SettleMidjourneyTaskBilling(c.Request.Context(), info, midjourneyTask, billingPrepared)
 	if billingErr != nil {
 		common.SysLog(common.LogText("error settling Midjourney quota: %s", billingErr.Error()))
 	}
@@ -312,7 +312,7 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 func RelayMidjourneyTaskImageSeed(c *gin.Context) *dto.MidjourneyResponse {
 	taskId := c.Param("id")
 	userId := c.GetInt("id")
-	originTask := model.GetByMJId(userId, taskId)
+	originTask := model.GetByMJIdScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskId)
 	if originTask == nil {
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "task_no_found")
 	}
@@ -349,7 +349,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 	switch relayMode {
 	case relayconstant.RelayModeMidjourneyTaskFetch:
 		taskId := c.Param("id")
-		originTask := model.GetByMJId(userId, taskId)
+		originTask := model.GetByMJIdScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskId)
 		if originTask == nil {
 			return &dto.MidjourneyResponse{
 				Code:        4,
@@ -377,7 +377,7 @@ func RelayMidjourneyTask(c *gin.Context, relayMode int) *dto.MidjourneyResponse 
 		}
 		var tasks []dto.MidjourneyDto
 		if len(condition.IDs) != 0 {
-			originTasks := model.GetByMJIds(userId, condition.IDs)
+			originTasks := model.GetByMJIdsScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), condition.IDs)
 			for _, originTask := range originTasks {
 				midjourneyTask := coverMidjourneyTaskDto(c, originTask)
 				tasks = append(tasks, midjourneyTask)
@@ -481,7 +481,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			mjId = midjRequest.TaskId
 		}
 
-		originTask := model.GetByMJId(relayInfo.UserId, mjId)
+		originTask := model.GetByMJIdScoped(relayInfo.UserId, relayInfo.AppId, mjId)
 		if originTask == nil {
 			return service.MidjourneyErrorWrapper(constant.MjRequestError, "task_not_found")
 		} else { //原任务的Status=SUCCESS，则可以做放大UPSCALE、变换VARIATION等动作，此时必须使用原来的请求地址才能正确处理
@@ -645,7 +645,7 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 			Description: "insert_midjourney_task_failed",
 		}
 	}
-	billingApplied, billingErr := service.SettleMidjourneyTaskBilling(relayInfo, midjourneyTask, billingPrepared)
+	billingApplied, billingErr := service.SettleMidjourneyTaskBilling(c.Request.Context(), relayInfo, midjourneyTask, billingPrepared)
 	if billingErr != nil {
 		common.SysLog(common.LogText("error settling Midjourney quota: %s", billingErr.Error()))
 	}

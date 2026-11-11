@@ -101,8 +101,14 @@ export async function searchUsers(
 /**
  * Get single user by ID
  */
-export async function getUser(id: number): Promise<ApiResponse<User>> {
-  const res = await api.get(`/api/user/${id}`)
+export async function getUser(
+  id: number,
+  appId?: number
+): Promise<ApiResponse<User>> {
+  const res =
+    appId === undefined
+      ? await api.get(`/api/user/${id}`)
+      : await api.get(`/api/user/${id}`, { params: { app_id: appId } })
   return res.data
 }
 

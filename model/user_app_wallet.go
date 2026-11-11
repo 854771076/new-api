@@ -200,15 +200,70 @@ func ensureUserAppWallet(db *gorm.DB, userId, appId int) (*UserAppWallet, error)
 		return nil, ErrInvalidAppId
 	}
 	wallet := UserAppWallet{UserId: userId, AppId: appId}
-	err := db.Where("user_id = ? AND app_id = ?", userId, appId).FirstOrCreate(&wallet).Error
-	if err == nil {
-		return &wallet, nil
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "app_id"}},
+		DoNothing: true,
+	}).Create(&wallet).Error; err != nil {
+		return nil, err
 	}
+	// Read the winning row, not the attempted insert's zero quota or timestamps.
+	// A locking read also sees a newly committed winner in MySQL transactions
+	// that already established a repeatable-read snapshot before the insert.
 	var existing UserAppWallet
-	if findErr := db.Where("user_id = ? AND app_id = ?", userId, appId).First(&existing).Error; findErr == nil {
-		return &existing, nil
+	if err := lockForUpdate(db).Where("user_id = ? AND app_id = ?", userId, appId).First(&existing).Error; err != nil {
+		return nil, err
 	}
-	return nil, err
+	return &existing, nil
+}
+
+// TransferUserQuotaToApp atomically moves platform quota into an app wallet and
+// records the completed balance top-up. Cache changes happen only after commit.
+func TransferUserQuotaToApp(userId, appId int, amount int64, quota int) error {
+	if userId <= 0 || amount <= 0 {
+		return ErrInvalidTopUpQuota
+	}
+	if appId <= 0 {
+		return ErrInvalidAppId
+	}
+	if _, err := topUpQuotaMaxCurrent(quota); err != nil {
+		return err
+	}
+	// Batched relay deductions can exist only in Redis (including other
+	// instances), so a database transaction cannot safely spend that balance.
+	// Fail closed rather than reserve/refund in a second financial system.
+	if common.BatchUpdateEnabled {
+		return errors.New("platform balance transfers require immediate quota persistence")
+	}
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&User{}).Where("id = ? AND quota >= ?", userId, quota).
+			Update("quota", gorm.Expr("quota - ?", quota))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return common.NewMessage("Insufficient balance")
+		}
+		if err := increaseUserAppQuota(tx, userId, appId, quota); err != nil {
+			if errors.Is(err, ErrWalletQuotaLimitExceeded) {
+				return ErrTopUpQuotaLimitExceeded
+			}
+			return err
+		}
+		now := common.GetTimestamp()
+		return tx.Create(&TopUp{
+			UserId: userId, AppId: appId, Amount: amount,
+			TradeNo:       "APP_BALANCE-" + strconv.Itoa(appId) + "-" + strconv.Itoa(userId) + "-" + common.GetRandomString(16),
+			PaymentMethod: PaymentMethodBalance, PaymentProvider: PaymentProviderBalance,
+			CreateTime: now, CompleteTime: now, Status: common.TopUpStatusSuccess,
+		}).Error
+	})
+	if err != nil {
+		return err
+	}
+	if err := cacheDecrUserQuota(userId, int64(quota)); err != nil {
+		common.SysLog(common.LogText("failed to decrease user quota cache after app balance top-up: %s", err.Error()))
+	}
+	return nil
 }
 
 func GetUserAppQuota(userId, appId int) (int, error) {
@@ -307,4 +362,28 @@ func IncreaseUserAppUsedQuota(userId, appId, quota int) error {
 	return DB.Model(&UserAppWallet{}).
 		Where("user_id = ? AND app_id = ?", userId, appId).
 		Update("used_quota", gorm.Expr("used_quota + ?", quota)).Error
+}
+
+// AdjustUserAppUsedQuota applies a signed delta to the app wallet used_quota.
+// The balance floor is clamped in one UPDATE because GREATEST/MAX do not share
+// SQLite, MySQL, and PostgreSQL semantics; a conditional CASE expression does.
+func AdjustUserAppUsedQuota(userId, appId, delta int) error {
+	return adjustUserAppUsedQuota(DB, userId, appId, delta)
+}
+
+func adjustUserAppUsedQuota(db *gorm.DB, userId, appId, delta int) error {
+	if appId <= 0 {
+		return ErrInvalidAppId
+	}
+	if delta == 0 {
+		return nil
+	}
+	if _, err := ensureUserAppWallet(db, userId, appId); err != nil {
+		return err
+	}
+	return db.Model(&UserAppWallet{}).
+		Where("user_id = ? AND app_id = ?", userId, appId).
+		Update("used_quota", gorm.Expr(
+			"CASE WHEN used_quota + ? < 0 THEN 0 ELSE used_quota + ? END", delta, delta,
+		)).Error
 }

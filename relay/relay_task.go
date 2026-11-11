@@ -65,7 +65,7 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	}
 
 	// 查找原始任务
-	originTask, exist, err := model.GetByTaskId(info.UserId, info.OriginTaskID)
+	originTask, exist, err := model.GetByTaskIdScoped(info.UserId, info.AppId, info.OriginTaskID)
 	if err != nil {
 		return service.TaskErrorWrapper(err, "get_origin_task_failed", http.StatusInternalServerError, common.UpstreamAddresses(c)...)
 	}
@@ -476,7 +476,7 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	}
 	userId := c.GetInt("id")
 
-	originTask, exist, err := model.GetByTaskId(userId, taskId)
+	originTask, exist, err := model.GetByTaskIdScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskId)
 	if err != nil {
 		taskResp = service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError)
 		return

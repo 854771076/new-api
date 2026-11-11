@@ -11,8 +11,8 @@ export function getSupabase(): SupabaseClient {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
-        // 让 OAuth custom provider 在 redirect 回我们自己的 URL 时自动处理
-        detectSessionInUrl: true,
+        flowType: 'pkce',
+        detectSessionInUrl: false,
       },
     });
   }

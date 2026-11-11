@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { createFileRoute, useSearch } from '@tanstack/react-router'
+import { createFileRoute, useLocation, useRouter } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { z } from 'zod'
 
@@ -9,58 +9,56 @@ import { Button } from '@/components/ui/button'
 import { getOAuthConsentContext } from '@/features/oauth-apps/api'
 import { OAUTH_SCOPES } from '@/features/oauth-apps/types'
 
-const CONSENT_PARAM_MAX_LENGTH = 2048
-
-function normalizeConsentParam(value: unknown): string {
-  if (typeof value !== 'string') {
-    return ''
-  }
-  if (value.length > CONSENT_PARAM_MAX_LENGTH) {
-    return ''
-  }
-  return value
-}
-
 const consentSearchParams = z.object({
-  client_id: z.preprocess(normalizeConsentParam, z.string()),
-  redirect_uri: z.preprocess(normalizeConsentParam, z.string()),
-  scope: z.preprocess(normalizeConsentParam, z.string()),
-  state: z.preprocess(normalizeConsentParam, z.string()),
-  nonce: z.preprocess(normalizeConsentParam, z.string()),
-  code_challenge: z.preprocess(normalizeConsentParam, z.string()),
-  code_challenge_method: z.preprocess(normalizeConsentParam, z.string()),
+  client_id: z.string().min(1).max(2048),
+  redirect_uri: z.string().min(1).max(2048),
+  scope: z.string().min(1).max(2048),
+  // Opaque protocol values must not be truncated or silently dropped.
+  state: z.string().default(''),
+  nonce: z.string().default(''),
+  code_challenge: z.string().min(1).max(2048),
+  code_challenge_method: z.literal('S256'),
+  response_type: z.literal('code').optional(),
 })
 
 export const Route = createFileRoute('/oauth/consent')({
-  validateSearch: consentSearchParams,
+  // Router-parsed search values are not OAuth protocol values: its default
+  // JSON parser changes numbers, booleans and quoted strings. Validate the
+  // raw URL below, and keep invalid requests on the safe error page.
+  validateSearch: z.record(z.string(), z.unknown()),
   component: OAuthConsentPage,
 })
 
 function OAuthConsentPage() {
   const { t } = useTranslation()
-  const search = useSearch({ from: '/oauth/consent' })
-
-  const missingRequiredParam =
-    search.client_id === '' ||
-    search.redirect_uri === '' ||
-    search.scope === '' ||
-    search.code_challenge === '' ||
-    search.code_challenge_method === ''
+  const router = useRouter()
+  // ParsedLocation.searchStr is also re-stringified by TanStack. Subscribe
+  // through useLocation, but read the original search from router history.
+  const rawSearch = useLocation({
+    select: () => router.history.location.search,
+  })
+  const params = new URLSearchParams(rawSearch)
+  const parsed = consentSearchParams.safeParse(Object.fromEntries(params))
+  const duplicateParam = Object.keys(consentSearchParams.shape).some(
+    (key) => params.getAll(key).length > 1
+  )
+  const search = parsed.success && !duplicateParam ? parsed.data : null
+  const clientId = search?.client_id ?? ''
 
   // The consent URL is a redirect target, so its CSRF token may have expired by
   // the time the page is submitted. Fetching the context issues a fresh token
   // bound to the current session and returns the app name and logo.
   const contextQuery = useQuery({
-    queryKey: ['oauth-consent-context', search.client_id],
-    queryFn: () => getOAuthConsentContext(search.client_id),
-    enabled: !missingRequiredParam,
+    queryKey: ['oauth-consent-context', clientId],
+    queryFn: () => getOAuthConsentContext(clientId),
+    enabled: search !== null,
     retry: false,
     meta: { errorToast: false },
   })
 
-  if (missingRequiredParam) {
+  if (!search) {
     return (
-      <div className='flex min-h-screen items-center justify-center bg-muted/30 p-4'>
+      <div className='bg-muted/30 flex min-h-screen items-center justify-center p-4'>
         <ErrorState
           title={t('Invalid request')}
           description={t('Invalid parameters')}
@@ -71,7 +69,7 @@ function OAuthConsentPage() {
 
   if (contextQuery.isPending) {
     return (
-      <div className='flex min-h-screen items-center justify-center bg-muted/30 p-4'>
+      <div className='bg-muted/30 flex min-h-screen items-center justify-center p-4'>
         <LoadingState />
       </div>
     )
@@ -79,7 +77,7 @@ function OAuthConsentPage() {
 
   if (contextQuery.isError || !contextQuery.data) {
     return (
-      <div className='flex min-h-screen items-center justify-center bg-muted/30 p-4'>
+      <div className='bg-muted/30 flex min-h-screen items-center justify-center p-4'>
         <ErrorState
           title={t('Failed to load application')}
           description={
@@ -102,24 +100,24 @@ function OAuthConsentPage() {
   )
 
   return (
-    <div className='flex min-h-screen items-center justify-center bg-muted/30 p-4'>
-      <div className='w-full max-w-md rounded-lg border bg-background p-6 shadow-lg'>
+    <div className='bg-muted/30 flex min-h-screen items-center justify-center p-4'>
+      <div className='bg-background w-full max-w-md rounded-lg border p-6 shadow-lg'>
         <h1 className='mb-2 text-xl font-bold'>{t('Authorize Application')}</h1>
-        <p className='mb-4 text-sm text-muted-foreground'>
+        <p className='text-muted-foreground mb-4 text-sm'>
           {t('An application is requesting access to your new-api account.')}
         </p>
 
-        <div className='mb-4 flex items-center gap-3 rounded-md bg-muted p-3'>
+        <div className='bg-muted mb-4 flex items-center gap-3 rounded-md p-3'>
           {context.logo_url ? (
             <img
               src={context.logo_url}
               alt=''
-              className='size-12 shrink-0 rounded-md border bg-background object-contain'
+              className='bg-background size-12 shrink-0 rounded-md border object-contain'
             />
           ) : (
             <div
               aria-hidden='true'
-              className='flex size-12 shrink-0 items-center justify-center rounded-md border bg-background text-lg font-semibold'
+              className='bg-background flex size-12 shrink-0 items-center justify-center rounded-md border text-lg font-semibold'
             >
               {initial}
             </div>
@@ -142,7 +140,11 @@ function OAuthConsentPage() {
         <form method='POST' action='/oauth/authorize'>
           <input type='hidden' name='response_type' value='code' />
           <input type='hidden' name='client_id' value={search.client_id} />
-          <input type='hidden' name='redirect_uri' value={search.redirect_uri} />
+          <input
+            type='hidden'
+            name='redirect_uri'
+            value={search.redirect_uri}
+          />
           <input type='hidden' name='scope' value={search.scope} />
           <input type='hidden' name='state' value={search.state} />
           {search.nonce ? (
@@ -160,7 +162,12 @@ function OAuthConsentPage() {
           />
           <input type='hidden' name='csrf_token' value={context.csrf_token} />
           <div className='flex gap-3'>
-            <Button type='submit' name='consent' value='allow' className='flex-1'>
+            <Button
+              type='submit'
+              name='consent'
+              value='allow'
+              className='flex-1'
+            >
               {t('Allow')}
             </Button>
             <Button

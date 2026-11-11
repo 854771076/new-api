@@ -37,10 +37,18 @@ func OAuthToken(c *gin.Context) {
 	c.Set("oauth_client_id", app.ClientID)
 
 	switch grantType {
-	case "authorization_code":
-		handleOAuthAuthorizationCodeGrant(c, app)
-	case "refresh_token":
-		handleOAuthRefreshTokenGrant(c, app)
+	case "authorization_code", "refresh_token":
+		// Initialize the persisted key before consuming a single-use grant. A
+		// recoverable key-store outage must not burn the client's code or refresh.
+		if _, _, err := service.OAuthSigningPublicKey(); err != nil {
+			oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
+			return
+		}
+		if grantType == "authorization_code" {
+			handleOAuthAuthorizationCodeGrant(c, app)
+		} else {
+			handleOAuthRefreshTokenGrant(c, app)
+		}
 	default:
 		oauthTokenError(c, http.StatusBadRequest, "unsupported_grant_type", "grant_type is not supported")
 	}
@@ -88,9 +96,9 @@ func handleOAuthAuthorizationCodeGrant(c *gin.Context, app *model.OAuthApp) {
 		return
 	}
 
-	consumed, err := model.ConsumeOAuthAuthorizationCode(code, app.Id, redirectURI)
+	consumed, err := model.ConsumeOAuthAuthorizationCode(code, app.Id, redirectURI, codeVerifier)
 	if err != nil {
-		if errors.Is(err, model.ErrOAuthCodeNotFound) || errors.Is(err, model.ErrOAuthCodeConsumed) || errors.Is(err, model.ErrOAuthCodeExpired) {
+		if errors.Is(err, model.ErrOAuthCodeNotFound) || errors.Is(err, model.ErrOAuthCodeConsumed) || errors.Is(err, model.ErrOAuthCodeExpired) || errors.Is(err, model.ErrOAuthGrantSessionInvalid) {
 			oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "authorization code is invalid, expired, or has been used")
 			return
 		}
@@ -102,14 +110,7 @@ func handleOAuthAuthorizationCodeGrant(c *gin.Context, app *model.OAuthApp) {
 		return
 	}
 
-	// Verify PKCE.
-	if !VerifyPKCE(codeVerifier, consumed.CodeChallenge) {
-		c.Set("oauth_user_id", consumed.UserID)
-		oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "code_verifier does not match code_challenge")
-		return
-	}
-
-	issueOAuthTokenResponse(c, app, consumed.UserID, consumed.SessionID, consumed.Scope, consumed.Nonce, "oauth.token")
+	issueOAuthTokenResponse(c, app, consumed)
 }
 
 // handleOAuthRefreshTokenGrant rotates a refresh token and issues new tokens.
@@ -133,13 +134,17 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, app *model.OAuthApp) {
 		oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "refresh token does not belong to this client")
 		return
 	}
-	newRefreshPlaintext := model.GenerateOAuthRefreshToken()
+	newRefreshPlaintext, err := model.GenerateOAuthRefreshToken()
+	if err != nil {
+		oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
+		return
+	}
 	newHash := model.OAuthRefreshTokenHash(newRefreshPlaintext)
 	newExpiresAt := time.Now().Add(model.OAuthRefreshTokenTTL).Unix()
 
-	rotated, err := model.RotateOAuthRefreshToken(oldHash, newHash, newExpiresAt)
+	rotated, err := model.RotateOAuthRefreshToken(oldHash, newHash, newExpiresAt, app.Id)
 	if err != nil {
-		if errors.Is(err, model.ErrOAuthRefreshTokenNotFound) || errors.Is(err, model.ErrOAuthRefreshTokenExpired) || errors.Is(err, model.ErrOAuthRefreshTokenRevoked) {
+		if errors.Is(err, model.ErrOAuthRefreshTokenNotFound) || errors.Is(err, model.ErrOAuthRefreshTokenExpired) || errors.Is(err, model.ErrOAuthRefreshTokenRevoked) || errors.Is(err, model.ErrOAuthGrantSessionInvalid) {
 			oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "refresh token is invalid, expired, or has been revoked")
 			return
 		}
@@ -147,59 +152,49 @@ func handleOAuthRefreshTokenGrant(c *gin.Context, app *model.OAuthApp) {
 		return
 	}
 
-	issueOAuthTokenResponseWithRefresh(c, app, rotated.UserID, rotated.SessionID, rotated.Scope, newRefreshPlaintext, "oauth.token.refresh")
+	issueOAuthTokenResponseWithRefresh(c, app, rotated, "", newRefreshPlaintext, "oauth.token.refresh")
 }
 
 // issueOAuthTokenResponse issues access, ID, and refresh tokens for a fresh
 // authorization code grant.
-func issueOAuthTokenResponse(c *gin.Context, app *model.OAuthApp, userID int, sessionID, scope, nonce, auditAction string) {
-	accessToken, accessExpiresAt, err := service.IssueOAuthAccessToken(userID, app.ClientID, scope)
+func issueOAuthTokenResponse(c *gin.Context, app *model.OAuthApp, code *model.OAuthAuthorizationCode) {
+	refreshPlaintext, err := model.GenerateOAuthRefreshToken()
 	if err != nil {
 		oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
 		return
 	}
-
-	refreshPlaintext := model.GenerateOAuthRefreshToken()
 	refresh := &model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(refreshPlaintext),
-		AppID:     app.Id,
-		UserID:    userID,
-		SessionID: sessionID,
-		Scope:     scope,
-		ExpiresAt: time.Now().Add(model.OAuthRefreshTokenTTL).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(refreshPlaintext),
+		AppID:       app.Id,
+		UserID:      code.UserID,
+		SessionID:   code.SessionID,
+		AuthVersion: code.AuthVersion,
+		AuthTime:    code.AuthTime,
+		Scope:       code.Scope,
+		ExpiresAt:   time.Now().Add(model.OAuthRefreshTokenTTL).Unix(),
 	}
 	if err := model.CreateOAuthRefreshToken(refresh); err != nil {
+		if errors.Is(err, model.ErrOAuthGrantSessionInvalid) {
+			oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "authorization session is no longer valid")
+			return
+		}
 		oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
 		return
 	}
-
-	response := gin.H{
-		"access_token":  accessToken,
-		"token_type":    "Bearer",
-		"expires_in":    int64(time.Until(time.Unix(accessExpiresAt, 0)).Seconds()),
-		"refresh_token": refreshPlaintext,
-		"scope":         scope,
-	}
-	if hasOpenIDScope(scope) {
-		idToken, _, err := service.IssueOAuthIDToken(userID, app.ClientID, nonce, time.Now().Unix())
-		if err != nil {
-			oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
-			return
-		}
-		response["id_token"] = idToken
-	}
-	recordOAuthAudit(c, userID, oauthAuditActorRole(userID), auditAction, true, http.StatusOK, map[string]any{
-		"client_id": app.ClientID,
-		"scope":     scope,
-	})
-	c.JSON(http.StatusOK, response)
+	issueOAuthTokenResponseWithRefresh(c, app, refresh, code.Nonce, refreshPlaintext, "oauth.token")
 }
 
 // issueOAuthTokenResponseWithRefresh issues access and ID tokens using a
 // pre-rotated refresh token.
-func issueOAuthTokenResponseWithRefresh(c *gin.Context, app *model.OAuthApp, userID int, sessionID, scope, refreshPlaintext, auditAction string) {
-	accessToken, accessExpiresAt, err := service.IssueOAuthAccessToken(userID, app.ClientID, scope)
+func issueOAuthTokenResponseWithRefresh(c *gin.Context, app *model.OAuthApp, grant *model.OAuthRefreshToken, nonce, refreshPlaintext, auditAction string) {
+	userID, scope := grant.UserID, grant.Scope
+	c.Set("oauth_user_id", userID)
+	accessToken, accessExpiresAt, err := service.IssueOAuthAccessTokenForGrant(grant, app.ClientID)
 	if err != nil {
+		if errors.Is(err, service.ErrOAuthTokenInvalid) {
+			oauthTokenError(c, http.StatusBadRequest, oauthErrInvalidGrant, "authorization session is no longer valid")
+			return
+		}
 		oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
 		return
 	}
@@ -212,7 +207,7 @@ func issueOAuthTokenResponseWithRefresh(c *gin.Context, app *model.OAuthApp, use
 		"scope":         scope,
 	}
 	if hasOpenIDScope(scope) {
-		idToken, _, err := service.IssueOAuthIDToken(userID, app.ClientID, "", time.Now().Unix())
+		idToken, _, err := service.IssueOAuthIDToken(userID, app.ClientID, nonce, grant.AuthTime)
 		if err != nil {
 			oauthTokenError(c, http.StatusInternalServerError, oauthErrServerError, "internal error")
 			return
@@ -223,6 +218,8 @@ func issueOAuthTokenResponseWithRefresh(c *gin.Context, app *model.OAuthApp, use
 		"client_id": app.ClientID,
 		"scope":     scope,
 	})
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusOK, response)
 }
 

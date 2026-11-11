@@ -38,6 +38,10 @@ func PrepareMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.
 	task.Quota = 0
 	task.TokenId = 0
 	task.BillingChannelId = 0
+	task.AppId = 0
+	if relayInfo != nil {
+		task.AppId = relayInfo.AppId
+	}
 	if !shouldBill {
 		return false, nil
 	}
@@ -60,7 +64,7 @@ func PrepareMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.
 }
 
 // SettleMidjourneyTaskBilling charges a persisted legacy task and records the applied stages.
-func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.Midjourney, prepared bool) (bool, error) {
+func SettleMidjourneyTaskBilling(ctx context.Context, relayInfo *relaycommon.RelayInfo, task *model.Midjourney, prepared bool) (bool, error) {
 	if !prepared {
 		return false, nil
 	}
@@ -86,6 +90,14 @@ func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.M
 	if result.TokenApplied {
 		task.TokenId = relayInfo.TokenId
 	}
+	if relayInfo.AppId > 0 && task.Quota > 0 {
+		// The legacy Midjourney route deducts the app wallet directly instead
+		// of going through BillingSession, so it records the app usage stat here
+		// to keep a later refund from subtracting usage it never added.
+		if err := model.IncreaseUserAppUsedQuota(relayInfo.UserId, relayInfo.AppId, task.Quota); err != nil {
+			logger.LogError(ctx, common.LogText("failed to record Midjourney app used quota (userId=%d, appId=%d, quota=%d): %s", relayInfo.UserId, relayInfo.AppId, task.Quota, err.Error()))
+		}
+	}
 	if updateErr := task.UpdateBillingState(); updateErr != nil {
 		return true, errors.Join(billingErr, fmt.Errorf("update Midjourney billing state: %w", updateErr))
 	}
@@ -99,7 +111,15 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return true
 	}
 
-	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
+	if task.AppId > 0 {
+		if err := model.IncreaseUserAppQuota(task.UserId, task.AppId, quota); err != nil {
+			logger.LogWarn(ctx, common.LogText("failed to refund Midjourney app quota, task %s: %s", task.MjId, err.Error()))
+			return false
+		}
+		if err := model.AdjustUserAppUsedQuota(task.UserId, task.AppId, -quota); err != nil {
+			logger.LogWarn(ctx, common.LogText("failed to refund Midjourney app used quota, task %s: %s", task.MjId, err.Error()))
+		}
+	} else if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
 		logger.LogWarn(ctx, common.LogText("failed to refund Midjourney user quota, task %s: %s", task.MjId, err.Error()))
 		return false
 	}

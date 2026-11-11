@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,11 @@ func setupOAuthPurchaseTestEnv(t *testing.T, scope string) *oauthExtTestEnv {
 	previousRedis := common.RedisEnabled
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
 	common.RedisEnabled = false
+	payment := operation_setting.GetPaymentSetting()
+	previousPayment := *payment
+	payment.ComplianceConfirmed = true
+	payment.ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
+	t.Cleanup(func() { *payment = previousPayment })
 
 	// File-backed SQLite keeps multiple connections pointing at the same data,
 	// which the subscription transaction needs because it reads database time.
@@ -290,6 +296,85 @@ func TestOAuthTopupCheckout_BalanceRejectsInsufficientPlatformQuota(t *testing.T
 	var topUpCount int64
 	require.NoError(t, env.db.Model(&model.TopUp{}).Where("user_id = ?", env.user.Id).Count(&topUpCount).Error)
 	assert.Zero(t, topUpCount)
+}
+
+func TestOAuthPurchasesRejectUnconfirmedCompliance(t *testing.T) {
+	env := setupOAuthPurchaseTestEnv(t, "api:write")
+	plan := createOAuthTestPlan(t, env, env.app.Id, 0)
+	product := createOAuthTestProduct(t, env, env.app.Id)
+	for _, state := range []struct {
+		name      string
+		confirmed bool
+		version   string
+	}{
+		{"unconfirmed", false, operation_setting.CurrentComplianceTermsVersion},
+		{"outdated terms", true, "outdated"},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			payment := operation_setting.GetPaymentSetting()
+			payment.ComplianceConfirmed, payment.ComplianceTermsVersion = state.confirmed, state.version
+			for _, tc := range []struct {
+				name   string
+				body   string
+				handle gin.HandlerFunc
+			}{
+				{"subscription", `{"plan_id":` + strconv.Itoa(plan.Id) + `,"payment_method":"balance"}`, OAuthSubscriptionCheckout},
+				{"product", `{"product_id":` + strconv.Itoa(product.Id) + `,"payment_method":"balance"}`, OAuthProductCheckout},
+				{"topup", `{"amount":2,"payment_method":"balance"}`, OAuthTopupCheckout},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					c, recorder := newOAuthPurchaseContext(t, http.MethodPost, "/oauth/checkout", env.token, tc.body)
+					tc.handle(c)
+					assert.Equal(t, http.StatusBadRequest, recorder.Code)
+					var response map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(recorder.Body.String(), &response), "exactly one JSON response")
+					assert.Equal(t, "checkout_failed", response["error"])
+					assert.Contains(t, response["error_description"], "administrator must confirm compliance terms")
+				})
+			}
+			_, _, err := createEpaySubscriptionOrder(env.user.Id, plan, "alipay")
+			assert.ErrorContains(t, err, "administrator must confirm compliance terms")
+			_, err = createStripeSubscriptionOrder(t.Context(), env.user, plan)
+			assert.ErrorContains(t, err, "administrator must confirm compliance terms")
+			_, _, err = createCreemSubscriptionOrder(t.Context(), env.user, plan)
+			assert.ErrorContains(t, err, "administrator must confirm compliance terms")
+			_, err = createWaffoPancakeSubscriptionOrder(t.Context(), env.user, plan)
+			assert.ErrorContains(t, err, "administrator must confirm compliance terms")
+			_, err = CreateAppProductWaffoPancakeCheckout(t.Context(), env.user, product)
+			assert.ErrorContains(t, err, "administrator must confirm compliance terms")
+		})
+	}
+	for _, table := range []any{&model.TopUp{}, &model.SubscriptionOrder{}, &model.AppProductOrder{}, &model.UserSubscription{}, &model.UserAppWallet{}} {
+		var count int64
+		require.NoError(t, env.db.Model(table).Count(&count).Error)
+		assert.Zero(t, count)
+	}
+}
+
+func TestAdminCreateAppProductPreservesEnabledChoice(t *testing.T) {
+	env := setupOAuthPurchaseTestEnv(t, "api:write")
+	for _, tc := range []struct {
+		name, enabled string
+		want          bool
+	}{
+		{"omitted", "", true}, {"disabled", `,"enabled":false`, false}, {"enabled", `,"enabled":true`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, recorder := newOAuthPurchaseContext(t, http.MethodPost, "/api/app-products", "",
+				`{"app_id":`+strconv.Itoa(env.app.Id)+`,"name":"`+tc.name+`","quota_amount":100`+tc.enabled+`}`)
+			AdminCreateAppProduct(c)
+			var response struct {
+				Success bool             `json:"success"`
+				Data    model.AppProduct `json:"data"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(recorder.Body.String(), &response))
+			require.True(t, response.Success, recorder.Body.String())
+			assert.Equal(t, tc.want, response.Data.Enabled)
+			stored, err := model.GetAppProductById(response.Data.Id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, stored.Enabled)
+		})
+	}
 }
 
 func TestGetSubscriptionSelf_ExcludesAppSubscriptions(t *testing.T) {

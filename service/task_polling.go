@@ -85,6 +85,14 @@ func sweepTimedOutTasks(ctx context.Context) {
 
 	for _, task := range tasks {
 		isLegacy := task.SubmitTime > 0 && task.SubmitTime < model.TaskRefundLegacyCutoff
+		if taskIsAppWallet(task) && !isLegacy {
+			if err := failTaskFromPoll(ctx, nil, task, task.Status, reason); err != nil {
+				logger.LogError(ctx, common.LogText("sweepTimedOutTasks CAS update error for task %s: %v", task.TaskID, err))
+			} else if task.Status == model.TaskStatusFailure {
+				timedOutCount++
+			}
+			continue
+		}
 
 		oldStatus := task.Status
 		task.Status = model.TaskStatusFailure
@@ -170,8 +178,15 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 		for _, task := range tasks {
 			upstreamID := task.GetUpstreamTaskID()
 			if upstreamID == "" {
-				// 统计失败的未完成任务
-				nullTaskIds = append(nullTaskIds, task.ID)
+				if taskIsAppWallet(task) {
+					if err := failTaskFromPoll(ctx, nil, task, task.Status, "Upstream task not found"); err != nil {
+						logger.LogError(ctx, common.LogText("Failed to update video task %s: %s", task.TaskID, err.Error()))
+					} else if task.Status == model.TaskStatusFailure {
+						summary.NullTasksFailed++
+					}
+				} else {
+					nullTaskIds = append(nullTaskIds, task.ID)
+				}
 				continue
 			}
 			taskM[upstreamID] = task
@@ -251,7 +266,13 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
+				if taskIsAppWallet(t) {
+					if failErr := failTaskFromPoll(ctx, nil, t, t.Status, "Failed to get the channel information. Please contact the administrator"); failErr != nil {
+						return failErr
+					}
+				} else {
+					failedIDs = append(failedIDs, t.ID)
+				}
 			}
 		}
 		err = model.TaskBulkUpdateByID(failedIDs, map[string]any{
@@ -376,7 +397,13 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 
 		isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 		terminalTransition := isDone && snap.Status != task.Status
-		won, updateErr := task.UpdateWithStatus(snap.Status)
+		var won bool
+		var updateErr error
+		if terminalTransition {
+			won, updateErr = publishTerminalTask(ctx, adaptor, task, snap.Status, &responseItem.TaskInfo)
+		} else {
+			won, updateErr = task.UpdateWithStatus(snap.Status)
+		}
 		if updateErr != nil {
 			common.SysLog(common.LogText("UpdateSunoTask task error: %s", updateErr.Error()))
 			continue
@@ -384,9 +411,6 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		if !won {
 			logger.LogWarn(ctx, common.LogText("Batch task %s already transitioned by another process, skip billing", task.TaskID))
 			continue
-		}
-		if terminalTransition {
-			finalizeTerminalTask(ctx, adaptor, task, &responseItem.TaskInfo)
 		}
 	}
 	return nil
@@ -437,7 +461,13 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 		var failedIDs []int64
 		for _, upstreamID := range taskIds {
 			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
+				if taskIsAppWallet(t) {
+					if failErr := failTaskFromPoll(ctx, nil, t, t.Status, "Failed to get the channel information. Please contact the administrator"); failErr != nil {
+						return failErr
+					}
+				} else {
+					failedIDs = append(failedIDs, t.ID)
+				}
 			}
 		}
 		errUpdate := model.TaskBulkUpdateByID(failedIDs, map[string]any{
@@ -566,7 +596,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	}
 
 	now := time.Now().Unix()
-	shouldFinalizeBilling := false
 
 	task.Status = parsedStatus
 	switch parsedStatus {
@@ -594,7 +623,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 			// No URL from adaptor — construct proxy URL using public task ID
 			task.PrivateData.ResultURL = taskcommon.BuildProxyURL(task.TaskID)
 		}
-		shouldFinalizeBilling = true
 	case model.TaskStatusFailure:
 		logger.LogJson(ctx, common.LogText("Task %s failed", taskId), task)
 		task.Status = model.TaskStatusFailure
@@ -605,7 +633,6 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		task.FailReason = taskResult.Reason
 		logger.LogInfo(ctx, common.LogText("Task %s failed: %s", task.TaskID, task.FailReason))
 		taskResult.Progress = taskcommon.ProgressComplete
-		shouldFinalizeBilling = true
 	}
 	if taskResult.Progress != "" {
 		task.Progress = taskResult.Progress
@@ -613,13 +640,12 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
-		won, err := task.UpdateWithStatus(snap.Status)
+		won, err := publishTerminalTask(ctx, adaptor, task, snap.Status, taskResult)
 		if err != nil {
-			logger.LogError(ctx, common.LogText("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))
-			shouldFinalizeBilling = false
-		} else if !won {
+			return err
+		}
+		if !won {
 			logger.LogWarn(ctx, common.LogText("Task %s CAS lost or no-op update, skip billing", task.TaskID))
-			shouldFinalizeBilling = false
 		}
 	} else if !snap.Equal(task.Snapshot()) {
 		if _, err := task.UpdateWithStatus(snap.Status); err != nil {
@@ -630,20 +656,46 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		logger.LogDebug(ctx, "No update needed for task %s", task.TaskID)
 	}
 
-	if shouldFinalizeBilling {
-		finalizeTerminalTask(ctx, adaptor, task, taskResult)
-	}
-
 	return nil
 }
 
-// finalizeTerminalTask 终态统一收尾（状态 CAS 赢家调用，恰好一次）：采样 + 结算 + 失败兜底退款。
-func finalizeTerminalTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
-	perfmetrics.RecordTaskResult(task, taskResult)
-	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
-	if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
-		RefundTaskQuota(ctx, task, task.FailReason)
+// publishTerminalTask keeps App-wallet tasks pending until their financial
+// transaction commits. A crash before the subsequent CAS is safe to retry from
+// the persisted quota. Other funding paths retain their CAS-first lifecycle.
+func publishTerminalTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, fromStatus model.TaskStatus, result *relaycommon.TaskInfo) (won bool, err error) {
+	defer func() {
+		if !won {
+			// Never expose the attempted terminal state after a failed write.
+			task.Status = fromStatus
+			task.Progress = "0%"
+			task.FinishTime = 0
+		}
+	}()
+	if taskIsAppWallet(task) && !finalizeTerminalTask(ctx, adaptor, task, result) {
+		return false, fmt.Errorf("task %s financial finalization failed", task.TaskID)
 	}
+	won, err = task.UpdateWithStatus(fromStatus)
+	if err != nil || !won {
+		return won, err
+	}
+	perfmetrics.RecordTaskResult(task, result)
+	if !taskIsAppWallet(task) {
+		finalizeTerminalTask(ctx, adaptor, task, result)
+	}
+	return true, nil
+}
+
+// finalizeTerminalTask reports actual financial success separately from whether
+// a pricing path was applicable. Funding failures remain retryable.
+func finalizeTerminalTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) bool {
+	billingSettled, success := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	if !success {
+		return false
+	}
+	if task.Status == model.TaskStatusFailure && !billingSettled {
+		return RefundTaskQuota(ctx, task, task.FailReason)
+	}
+	return true
 }
 
 func redactVideoResponseBody(body []byte) []byte {
@@ -694,34 +746,35 @@ func truncateBase64(s string) string {
 // 优先级：1. tiered snapshot → 2. adaptor 调整 → 3. token 重算。
 //
 // 表达式求值失败会保留预扣额度，因此也视为已接管，避免错误全退。
-func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) bool {
+func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) (handled, success bool) {
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.TieredSnapshot != nil {
 		// 用量表达式结算只适用于成功任务；失败任务由调用方全额退款。
 		if task.Status == model.TaskStatusFailure {
-			return false
+			return false, true
 		}
 		result, usageFacts, err := EvaluateTaskCompletionUsage(bc.TieredSnapshot, taskResult.UsageFacts)
 		if err != nil {
 			logger.LogWarn(ctx, common.LogText("task %s expression settlement failed, keeping the pre-consumed quota: %v", task.TaskID, err))
-			return true
+			return true, true
 		}
 		if result.Clamp != nil {
 			logger.LogWarn(ctx, common.LogText("task %s expression settlement quota was clamped: %+v", task.TaskID, result.Clamp))
 		}
 		bc.TieredSnapshot.UsageFacts = usageFacts
 		bc.TieredSnapshot.EstimatedTier = result.MatchedTier
-		RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, common.NewMessage("Settled by the task usage expression"), result.Clamp)
-		return true
+		return true, RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, common.NewMessage("Settled by the task usage expression"), result.Clamp)
 	}
 	// 按次计费的成功任务保持预扣；失败任务由调用方全额退款。
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.PerCallBilling {
 		logger.LogInfo(ctx, common.LogText("task %s is billed per request, skipping difference settlement", task.TaskID))
-		return false
+		return false, true
 	}
-	// 优先让 adaptor 决定最终额度。
+	// Missing-channel and timeout failures have no adaptor and refund directly.
+	if adaptor == nil {
+		return false, true
+	}
 	if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
-		RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("Adjusted by the channel adaptor"))
-		return true
+		return true, RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("Adjusted by the channel adaptor"))
 	}
 	// 回退到 token 重算。
 	tokens := taskResult.TotalTokens
@@ -729,9 +782,9 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 		tokens = taskResult.CompletionTokens
 	}
 	if tokens > 0 {
-		return RecalculateTaskQuotaByTokens(ctx, task, tokens)
+		return recalculateTaskQuotaByTokens(ctx, task, tokens)
 	}
-	return false
+	return false, true
 }
 
 func classifyPollHTTP(statusCode int) string {
@@ -826,15 +879,8 @@ func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *mod
 		task.FinishTime = now
 	}
 	task.FailReason = reason
-	won, err := task.UpdateWithStatus(fromStatus)
-	if err != nil {
-		return err
-	}
-	if !won {
-		return nil
-	}
-	finalizeTerminalTask(ctx, adaptor, task, relaycommon.FailTaskInfo(reason))
-	return nil
+	_, err := publishTerminalTask(ctx, adaptor, task, fromStatus, relaycommon.FailTaskInfo(reason))
+	return err
 }
 
 func failTasksFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, tasks []*model.Task, reason string) error {

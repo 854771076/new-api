@@ -67,6 +67,9 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 // creates the external checkout session and persists the pending order. It is
 // shared by the dashboard and the OAuth app checkout endpoint.
 func createStripeSubscriptionOrder(ctx context.Context, user *model.User, plan *model.SubscriptionPlan) (string, error) {
+	if err := paymentComplianceError(); err != nil {
+		return "", err
+	}
 	if plan == nil {
 		return "", common.NewMessage("Subscription plan does not exist")
 	}

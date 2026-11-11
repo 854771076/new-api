@@ -4,6 +4,7 @@ type Midjourney struct {
 	Id          int    `json:"id"`
 	Code        int    `json:"code"`
 	UserId      int    `json:"user_id" gorm:"index"`
+	AppId       int    `json:"-" gorm:"index;default:0"`
 	Action      string `json:"action" gorm:"type:varchar(40);index"`
 	MjId        string `json:"mj_id" gorm:"index"`
 	Prompt      string `json:"prompt"`
@@ -128,20 +129,37 @@ func GetByOnlyMJId(mjId string) *Midjourney {
 }
 
 func GetByMJId(userId int, mjId string) *Midjourney {
+	return GetByMJIdScoped(userId, 0, mjId)
+}
+
+// GetByMJIdScoped resolves one Midjourney task for its owner. A non-zero appId
+// restricts the lookup to tasks that app created, so an OAuth app token cannot
+// read or act on another app's Midjourney task; appId == 0 keeps the platform
+// behavior.
+func GetByMJIdScoped(userId, appId int, mjId string) *Midjourney {
 	var mj *Midjourney
-	var err error
-	err = DB.Where("user_id = ? and mj_id = ?", userId, mjId).First(&mj).Error
-	if err != nil {
+	query := DB.Where("user_id = ? and mj_id = ?", userId, mjId)
+	if appId > 0 {
+		query = query.Where("app_id = ?", appId)
+	}
+	if err := query.First(&mj).Error; err != nil {
 		return nil
 	}
 	return mj
 }
 
 func GetByMJIds(userId int, mjIds []string) []*Midjourney {
+	return GetByMJIdsScoped(userId, 0, mjIds)
+}
+
+// GetByMJIdsScoped is the app-isolation-aware form of GetByMJIds.
+func GetByMJIdsScoped(userId, appId int, mjIds []string) []*Midjourney {
 	var mj []*Midjourney
-	var err error
-	err = DB.Where("user_id = ? and mj_id in (?)", userId, mjIds).Find(&mj).Error
-	if err != nil {
+	query := DB.Where("user_id = ? and mj_id in (?)", userId, mjIds)
+	if appId > 0 {
+		query = query.Where("app_id = ?", appId)
+	}
+	if err := query.Find(&mj).Error; err != nil {
 		return nil
 	}
 	return mj

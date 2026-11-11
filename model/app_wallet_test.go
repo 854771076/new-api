@@ -1,13 +1,16 @@
 package model
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -188,6 +191,16 @@ func TestUserAppWalletQuotaOperations(t *testing.T) {
 	assert.Equal(t, 40, getUserAppWalletQuota(t, 31, 7))
 	assert.Error(t, IncreaseUserAppUsedQuota(31, 7, -1))
 
+	// AdjustUserAppUsedQuota applies signed deltas and clamps at zero.
+	require.NoError(t, AdjustUserAppUsedQuota(31, 7, 15))
+	assert.Equal(t, 45, getUserAppWallet(t, 31, 7).UsedQuota)
+	require.NoError(t, AdjustUserAppUsedQuota(31, 7, -10))
+	assert.Equal(t, 35, getUserAppWallet(t, 31, 7).UsedQuota)
+	require.NoError(t, AdjustUserAppUsedQuota(31, 7, -100))
+	assert.Zero(t, getUserAppWallet(t, 31, 7).UsedQuota, "used quota never goes negative")
+	require.NoError(t, AdjustUserAppUsedQuota(31, 7, 0))
+	assert.ErrorIs(t, AdjustUserAppUsedQuota(31, 0, 1), ErrInvalidAppId)
+
 	// Settlement may overdraw the pool, matching DecreaseUserQuota semantics.
 	require.NoError(t, DecreaseUserAppQuota(31, 7, 60))
 	assert.Equal(t, -20, getUserAppWalletQuota(t, 31, 7))
@@ -203,6 +216,67 @@ func TestUserAppWalletQuotaOperations(t *testing.T) {
 	assert.ErrorIs(t, IncreaseUserAppUsedQuota(31, 0, 1), ErrInvalidAppId)
 }
 
+func TestTaskAccessorsScopeByApp(t *testing.T) {
+	db := openAppModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&Task{}, &Midjourney{}))
+
+	platformTask := &Task{TaskID: "task_platform", UserId: 1, AppId: 0, Platform: constant.TaskPlatform("openai"), Data: json.RawMessage(`{}`)}
+	appTask := &Task{TaskID: "task_app7", UserId: 1, AppId: 7, Platform: constant.TaskPlatform("openai"), Data: json.RawMessage(`{}`)}
+	otherUserTask := &Task{TaskID: "task_owner2", UserId: 2, AppId: 7, Platform: constant.TaskPlatform("openai"), Data: json.RawMessage(`{}`)}
+	for _, task := range []*Task{platformTask, appTask, otherUserTask} {
+		require.NoError(t, db.Create(task).Error)
+	}
+
+	got, exists, err := GetByTaskIdScoped(1, 7, "task_app7")
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.Equal(t, 7, got.AppId)
+
+	_, exists, err = GetByTaskIdScoped(1, 8, "task_app7")
+	require.NoError(t, err)
+	assert.False(t, exists, "another app must not read the task")
+
+	_, exists, err = GetByTaskIdScoped(1, 7, "task_platform")
+	require.NoError(t, err)
+	assert.False(t, exists, "an app must not read platform tasks")
+
+	_, exists, err = GetByTaskIdScoped(1, 0, "task_app7")
+	require.NoError(t, err)
+	assert.True(t, exists, "platform access is unscoped")
+
+	_, exists, err = GetByTaskIdScoped(1, 7, "task_owner2")
+	require.NoError(t, err)
+	assert.False(t, exists, "ownership is still enforced")
+
+	platforms := []constant.TaskPlatform{constant.TaskPlatform("openai")}
+	ids := []string{"task_platform", "task_app7"}
+
+	scoped, err := GetByTaskIdsForPlatformsScoped(1, 7, platforms, ids)
+	require.NoError(t, err)
+	require.Len(t, scoped, 1)
+	assert.Equal(t, "task_app7", scoped[0].TaskID)
+
+	all, err := GetByTaskIdsForPlatformsScoped(1, 0, platforms, ids)
+	require.NoError(t, err)
+	assert.Len(t, all, 2)
+
+	platformMj := &Midjourney{UserId: 1, AppId: 0, MjId: "mj_platform", ChannelId: 1}
+	appMj := &Midjourney{UserId: 1, AppId: 7, MjId: "mj_app7", ChannelId: 1}
+	for _, mj := range []*Midjourney{platformMj, appMj} {
+		require.NoError(t, db.Create(mj).Error)
+	}
+
+	assert.NotNil(t, GetByMJIdScoped(1, 7, "mj_app7"))
+	assert.Nil(t, GetByMJIdScoped(1, 8, "mj_app7"), "another app must not read the Midjourney task")
+	assert.Nil(t, GetByMJIdScoped(1, 7, "mj_platform"), "an app must not read platform Midjourney tasks")
+	assert.NotNil(t, GetByMJIdScoped(1, 0, "mj_app7"), "platform access is unscoped")
+
+	scopedMj := GetByMJIdsScoped(1, 7, []string{"mj_platform", "mj_app7"})
+	require.Len(t, scopedMj, 1)
+	assert.Equal(t, "mj_app7", scopedMj[0].MjId)
+	assert.Len(t, GetByMJIdsScoped(1, 0, []string{"mj_platform", "mj_app7"}), 2)
+}
+
 func TestIncreaseUserAppQuotaEnforcesWalletLimit(t *testing.T) {
 	setupAppModelTestDB(t)
 
@@ -215,7 +289,7 @@ func TestIncreaseUserAppQuotaEnforcesWalletLimit(t *testing.T) {
 func TestAppProductOrderTradeNoUnique(t *testing.T) {
 	setupAppModelTestDB(t)
 
-	first := &AppProduct{AppId: 1, Name: "first", PriceAmount: 1, Currency: "USD", QuotaAmount: 100, SortOrder: 2}
+	first := &AppProduct{AppId: 1, Name: "first", PriceAmount: 1, Currency: "USD", QuotaAmount: 100, SortOrder: 2, Enabled: true}
 	require.NoError(t, DB.Create(first).Error)
 	assert.NotZero(t, first.CreatedAt)
 
@@ -223,7 +297,7 @@ func TestAppProductOrderTradeNoUnique(t *testing.T) {
 	require.NoError(t, DB.Create(disabled).Error)
 	require.NoError(t, DB.Model(&AppProduct{}).Where("id = ?", disabled.Id).Update("enabled", false).Error)
 
-	otherApp := &AppProduct{AppId: 2, Name: "other", PriceAmount: 1, Currency: "USD", QuotaAmount: 100}
+	otherApp := &AppProduct{AppId: 2, Name: "other", PriceAmount: 1, Currency: "USD", QuotaAmount: 100, Enabled: true}
 	require.NoError(t, DB.Create(otherApp).Error)
 
 	product, err := GetAppProductById(first.Id)
@@ -293,7 +367,8 @@ func TestAppModelsDatabaseMatrix(t *testing.T) {
 				driver = postgres.Open(dsn)
 			}
 
-			db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "app_models_test_"}})
+			prefix := "app_models_" + strings.ReplaceAll(common.GetUUID(), "-", "")[:8] + "_"
+			db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: prefix}})
 			require.NoError(t, err)
 			previousDB, previousLogDB := DB, LOG_DB
 			previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
@@ -308,18 +383,44 @@ func TestAppModelsDatabaseMatrix(t *testing.T) {
 				&AppProduct{},
 				&AppProductOrder{},
 				&UserAppWallet{},
+				&Task{},
+				&Midjourney{},
 			}
+			var createdTables []string
 			t.Cleanup(func() {
-				_ = db.Migrator().DropTable(models...)
+				for _, table := range createdTables {
+					assert.NoError(t, db.Migrator().DropTable(table))
+				}
 				DB, LOG_DB = previousDB, previousLogDB
 				common.SetDatabaseTypes(previousMainType, previousLogType)
 				initCol()
 				if sqlDB, dbErr := db.DB(); dbErr == nil {
-					_ = sqlDB.Close()
+					assert.NoError(t, sqlDB.Close())
 				}
 			})
-
-			_ = db.Migrator().DropTable(models...)
+			for _, value := range models {
+				statement := &gorm.Statement{DB: db}
+				require.NoError(t, statement.Parse(value))
+				// Explicit TableName methods bypass NamingStrategy.TablePrefix.
+				if !strings.HasPrefix(statement.Schema.Table, prefix) {
+					statement.Schema.Table = prefix + statement.Schema.Table
+				}
+				for _, field := range statement.Schema.Fields {
+					for _, tag := range []string{"INDEX", "UNIQUEINDEX"} {
+						if index := field.TagSettings[tag]; index != "" {
+							field.TagSettings[tag] = prefix + index
+						}
+					}
+				}
+			}
+			for _, value := range models {
+				statement := &gorm.Statement{DB: db}
+				require.NoError(t, statement.Parse(value))
+				require.True(t, strings.HasPrefix(statement.Table, prefix))
+				require.False(t, db.Migrator().HasTable(value), "never migrate an existing table")
+				require.NoError(t, db.Migrator().CreateTable(value))
+				createdTables = append(createdTables, statement.Table)
+			}
 			for range 2 {
 				require.NoError(t, db.AutoMigrate(models...))
 			}
@@ -339,8 +440,12 @@ func TestAppModelsDatabaseMatrix(t *testing.T) {
 			// Simulate upgrading a released schema that lacks app_id while it
 			// already holds rows. SQLite is covered by the dedicated migration
 			// test above.
+			legacyTask := &Task{TaskID: dialect + "-legacy-task", UserId: 1, Platform: constant.TaskPlatform("openai"), Data: json.RawMessage(`{}`)}
+			require.NoError(t, db.Create(legacyTask).Error)
+			legacyMj := &Midjourney{UserId: 1, MjId: dialect + "-legacy-mj", ChannelId: 1}
+			require.NoError(t, db.Create(legacyMj).Error)
 			if dialect != "sqlite" {
-				legacyModels := []any{&SubscriptionPlan{}, &SubscriptionOrder{}, &UserSubscription{}, &TopUp{}}
+				legacyModels := []any{&SubscriptionPlan{}, &SubscriptionOrder{}, &UserSubscription{}, &TopUp{}, &Task{}, &Midjourney{}}
 				for _, model := range legacyModels {
 					require.NoError(t, db.Migrator().DropColumn(model, "app_id"))
 					assert.False(t, db.Migrator().HasColumn(model, "app_id"))
@@ -351,6 +456,12 @@ func TestAppModelsDatabaseMatrix(t *testing.T) {
 				for _, model := range legacyModels {
 					assert.True(t, db.Migrator().HasColumn(model, "app_id"))
 				}
+				reloadedTask := Task{}
+				require.NoError(t, db.Where("task_id = ?", legacyTask.TaskID).First(&reloadedTask).Error)
+				assert.Zero(t, reloadedTask.AppId, "legacy task rows default to the platform app")
+				reloadedMj := Midjourney{}
+				require.NoError(t, db.Where("mj_id = ?", legacyMj.MjId).First(&reloadedMj).Error)
+				assert.Zero(t, reloadedMj.AppId, "legacy Midjourney rows default to the platform app")
 			}
 
 			reloadedPlan := SubscriptionPlan{}
@@ -467,6 +578,8 @@ func TestPreConsumeUserSubscriptionAppIsolation(t *testing.T) {
 
 func TestPurchaseSubscriptionWithBalanceAppScope(t *testing.T) {
 	db := setupAppModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&User{}))
+	require.NoError(t, db.Create(&User{Id: 88, Username: "app-balance-buyer"}).Error)
 
 	plan := &SubscriptionPlan{
 		AppId:         5,

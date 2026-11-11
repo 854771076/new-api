@@ -782,10 +782,24 @@ func PurchaseSubscriptionWithBalance(userId int, planId int, appId int) error {
 	var chargedQuota int
 	var upgradeGroup string
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		plan, err := getSubscriptionPlanByIdTx(tx, planId)
-		if err != nil {
+		// Use the same user lock as callbacks and admin grants, before any
+		// snapshot read, even for free plans and users without an app wallet.
+		// SQLite acquires its writer lock explicitly before checking the limit.
+		if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+			if err := tx.Model(&User{}).Where("id = ?", userId).
+				UpdateColumn("id", gorm.Expr("id")).Error; err != nil {
+				return err
+			}
+		}
+		var userRow User
+		if err := lockForUpdate(tx).Select("id").Where("id = ?", userId).First(&userRow).Error; err != nil {
 			return err
 		}
+		var plan SubscriptionPlan
+		if err := tx.Where("id = ?", planId).First(&plan).Error; err != nil {
+			return err
+		}
+		plan.NormalizeDefaults()
 		if !plan.Enabled {
 			return common.NewMessage("Subscription plan is not enabled")
 		}
@@ -837,7 +851,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int, appId int) error {
 			}
 		}
 
-		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, plan, PaymentMethodBalance)
+		subscription, err := CreateUserSubscriptionFromPlanTx(tx, userId, &plan, PaymentMethodBalance)
 		if err != nil {
 			return err
 		}

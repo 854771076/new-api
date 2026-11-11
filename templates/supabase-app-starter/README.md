@@ -65,11 +65,12 @@ curl -X POST $GATEWAY/api/oauth-apps \
     "redirect_uris": ["https://<project-ref>.supabase.co/auth/v1/callback"],
     "post_logout_redirect_uris": ["https://<project-ref>.supabase.co/auth/v1/callback"],
     "scopes": ["openid","profile","email","api:read","api:write"],
+    "public_client": true,
     "supabase_project_ref": "abcdefghij"
   }'
 ```
 
-返回：**记下 `client_id`（形如 `nac_xxxxxxxxxxxxxxxx`）和 `client_secret`（只出现一次）**。
+返回：**记下 `client_id`（形如 `nac_xxxxxxxxxxxxxxxx`）**。该模板在浏览器中刷新网关令牌，必须使用 public client + PKCE，不生成或保存 `client_secret`。
 
 > 可选：给 App 配 `ai_model_whitelist`（细粒度 model_name，JSON 数组）——只有白名单内的模型会对这个 App 的 OAuth access_token 放行。默认不填 = 不限制。
 
@@ -81,7 +82,7 @@ Supabase Dashboard → Authentication → Providers → 找 **OIDC** / **Custom*
 |---|---|
 | Provider URL / Well-known | `https://<gateway-host>/.well-known/openid-configuration` |
 | Client ID | Step 1 拿到的 `client_id` |
-| Client Secret | Step 1 拿到的 `client_secret` |
+| Client Secret | `ignored-by-public-client`（Supabase 表单需要；网关 public client 不使用） |
 | Redirect URI | `https://<project-ref>.supabase.co/auth/v1/callback` |
 | Scopes | `openid profile email api:read api:write` |
 
@@ -170,18 +171,26 @@ bun run dev         # http://localhost:5173
    Authorization: Bearer <OAuth access_token>    ← 不是 Supabase JWT
    → middleware.OAuthTokenAuth 校验 + 注 user quota/group/client_id
    → controller.Relay: GenRelayInfo → 白名单检查（仅 OAuth token 入口）
-   → relay 上游 provider → 网关按 user Quota 扣减（复用现有 billing）
+   → relay 上游 provider → 网关只从 token 所属 App 的 app_quota / App 订阅扣费
+     （预扣、结算、退款均 App scoped，不扣平台钱包 quota）
 
 ③ App 业务数据（PostgREST）
    GET /ai_generations → Supabase 自动校验 auth.uid()，RLS 强制 client_id 匹配
 
-④ 用户充值（沿用网关）
-   App 跳转 网关 /app.html#/topup
-   Stripe/Creem/Waffo/Epay → CompleteSubscriptionOrder → 用户 Quota 增加
-   App 侧 Profile 页用 OAuth access_token 调
-     GET /v1/dashboard/billing/subscription  (scope api:read)
-     GET /v1/dashboard/billing/usage
-   轮询显示额度（/api/user/* 是管理端路由，OAuth token 不能访问）
+④ App 钱包与购买（只走 /oauth/*，不跳平台充值页）
+   GET /oauth/userinfo（openid + api:read）：app_quota / app_used_quota 是本 App 钱包
+     quota / used_quota 是平台统计，不是 App 可消费额度；App 钱包首次入账前为 0
+   POST /oauth/topup/checkout（api:write）：amount 是配置的展示单位整数，不是 quota
+     payment_method=balance 从用户平台钱包划转等额 quota 到 App 钱包，余额不足失败
+     payment_method=waffo_pancake（默认）返回 pending + checkout_url，确认支付后才入账
+   GET /oauth/subscription/plans / GET /oauth/products（api:read）：只返回本 App 目录
+   POST /oauth/subscription/checkout / POST /oauth/products/checkout（api:write）
+     balance 从 App 钱包扣款；套餐在线支持 epay/stripe/creem/waffo_pancake
+     商品在线仅支持 waffo_pancake
+   重新读取 /oauth/userinfo 的 app_quota 查看余额；pending 或浏览器返回 URL 不是付款凭证
+   当前没有 OAuth App 订单状态/订阅历史接口，不伪造本地账本或已付款状态
+   GET /oauth/logs（api:read）：用户级全量脱敏日志，非 App 隔离，page/page_size 服务端分页
+   /api/* 拒绝 OAuth token；/v1/dashboard/billing/* 不是 App 钱包接口
 ```
 
 ## 5. 注意事项

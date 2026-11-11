@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
@@ -108,6 +109,28 @@ func TestPrettyFlattensCellNewlines(t *testing.T) {
 	require.Len(t, lines, 2)
 	assert.Equal(t, "note", strings.TrimRight(lines[0], " "))
 	assert.Equal(t, "line1 line2", strings.TrimRight(lines[1], " "))
+}
+
+func TestPrettyEscapesTerminalControls(t *testing.T) {
+	for _, raw := range []string{
+		`"\u001b]52;c;clipboard\u0007"`,
+		`["\u001b[2J", "\u009b31m"]`,
+		`{"\u001b[2J":"\u0008hidden"}`,
+		`[{"\u001b[2J":"\u0008hidden"}]`,
+		`{"items":[],"total":"\u001b[2J"}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			got := render(t, raw)
+			assert.Contains(t, got, `\u`)
+			for _, r := range got {
+				assert.False(t, unicode.IsControl(r) && r != '\n', "terminal control %U", r)
+			}
+		})
+	}
+	var buf bytes.Buffer
+	err := Pretty(&buf, json.RawMessage("\x1b[2Jinvalid"))
+	require.Error(t, err)
+	assert.Equal(t, "\\u001b[2Jinvalid\n", buf.String())
 }
 
 func TestPrettyEmojiWidth(t *testing.T) {

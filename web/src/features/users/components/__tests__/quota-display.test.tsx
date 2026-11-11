@@ -55,6 +55,7 @@ import {
 
 import type { User } from '../../types'
 import { useUsersColumns } from '../users-columns'
+import { UsersMutateDrawer } from '../users-mutate-drawer'
 import { UsersProvider } from '../users-provider'
 import { UsersTable } from '../users-table'
 
@@ -508,6 +509,187 @@ it('updates the header unit and converted amounts together when currency setting
   for (const cell of screen.getAllByRole('cell')) {
     expect(cell).not.toHaveTextContent('¥')
   }
+})
+
+async function renderQuotaDrawer(appQuota: number | null = 500000) {
+  useActiveAppStore.getState().setAppId(7)
+  const row: User = {
+    id: 2,
+    username: 'quota-user',
+    display_name: '',
+    role: 1,
+    status: 1,
+    quota: 5000000,
+    used_quota: 0,
+    request_count: 0,
+    group: 'default',
+    app_quota: 1,
+  }
+  let balance = appQuota
+  const get = vi.spyOn(api, 'get').mockImplementation(async (url, config) => {
+    if (url === '/api/user/2') {
+      const appId = (config?.params as { app_id?: number } | undefined)?.app_id
+      return {
+        data: {
+          success: true,
+          data: {
+            ...row,
+            app_quota: appId === 8 ? 1500000 : (balance ?? undefined),
+          },
+        },
+      }
+    }
+    if (url === '/api/user/3') {
+      return {
+        data: {
+          success: true,
+          data: { ...row, id: 3, username: 'next-user', app_quota: 2000000 },
+        },
+      }
+    }
+    if (url === '/api/group/') {
+      return { data: { success: true, data: ['default'] } }
+    }
+    if (url === '/api/authz/catalog') {
+      return { data: { success: true, data: { resources: [], actions: [] } } }
+    }
+    return { data: { success: true, data: [] } }
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  clients.push(client)
+  const view = render(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <UsersProvider>
+          <UsersMutateDrawer open onOpenChange={() => {}} currentRow={row} />
+        </UsersProvider>
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  await screen.findByRole('dialog', { name: 'Update User' })
+  return {
+    get,
+    view,
+    client,
+    row,
+    setBalance: (value: number) => {
+      balance = value
+    },
+  }
+}
+
+it('refreshes the app-wallet preview after adjustment instead of retaining the list-row balance', async () => {
+  const { get, setBalance } = await renderQuotaDrawer()
+  vi.spyOn(api, 'post').mockImplementation(async () => {
+    setBalance(1000000)
+    return { data: { success: true } }
+  })
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  let dialog = await screen.findByRole('dialog', { name: 'Adjust Quota · #7' })
+  expect(within(dialog).getByText(/Current quota:/)).toHaveTextContent(
+    'Current quota: $1'
+  )
+  await userEvent.type(within(dialog).getByRole('spinbutton'), '1')
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Adjust Quota · #7' })
+    ).not.toBeInTheDocument()
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  dialog = await screen.findByRole('dialog', { name: 'Adjust Quota · #7' })
+  expect(within(dialog).getByText(/Current quota:/)).toHaveTextContent(
+    'Current quota: $2'
+  )
+  expect(get).toHaveBeenCalledWith('/api/user/2', { params: { app_id: 7 } })
+})
+
+it('closes the quota dialog on scope changes and loads the new scoped balance', async () => {
+  await renderQuotaDrawer()
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  await screen.findByRole('dialog', { name: 'Adjust Quota · #7' })
+  act(() => useActiveAppStore.getState().setAppId(8))
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Adjust Quota · #8' })
+    ).not.toBeInTheDocument()
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Adjust Quota · #8',
+  })
+  expect(within(dialog).getByText(/Current quota:/)).toHaveTextContent(
+    'Current quota: $3'
+  )
+})
+
+it('blocks adjustment when scoped balance is missing and retries the correct wallet', async () => {
+  const { setBalance } = await renderQuotaDrawer(null)
+  await screen.findByText('Failed to load')
+  expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeDisabled()
+  setBalance(500000)
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Adjust Quota · #7',
+  })
+  expect(within(dialog).getByText(/Current quota:/)).toHaveTextContent(
+    'Current quota: $1'
+  )
+})
+
+it('changing the managed row closes the previous adjustment and uses the next user wallet', async () => {
+  const { view, client, row } = await renderQuotaDrawer()
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  await screen.findByRole('dialog', { name: 'Adjust Quota · #7' })
+  view.rerender(
+    <I18nextProvider i18n={i18n}>
+      <QueryClientProvider client={client}>
+        <UsersProvider>
+          <UsersMutateDrawer
+            open
+            onOpenChange={() => {}}
+            currentRow={{ ...row, id: 3, username: 'next-user' }}
+          />
+        </UsersProvider>
+      </QueryClientProvider>
+    </I18nextProvider>
+  )
+  await waitFor(() =>
+    expect(
+      screen.queryByRole('dialog', { name: 'Adjust Quota · #7' })
+    ).not.toBeInTheDocument()
+  )
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Adjust Quota' })).toBeEnabled()
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Adjust Quota' }))
+  const dialog = await screen.findByRole('dialog', {
+    name: 'Adjust Quota · #7',
+  })
+  expect(within(dialog).getByText(/Current quota:/)).toHaveTextContent(
+    'Current quota: $4'
+  )
 })
 
 it('labels raw quota mode as tokens without introducing a currency symbol', () => {

@@ -2,13 +2,13 @@ package controller
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -51,6 +51,15 @@ func oauthAppAccess(c *gin.Context, requiredScope string) (*model.User, *model.O
 		return nil, nil, false
 	}
 	return user, app, true
+}
+
+// paymentComplianceError is response-free so shared checkout helpers cannot
+// bypass the gate or write a dashboard response into an OAuth response.
+func paymentComplianceError() error {
+	if !operation_setting.IsPaymentComplianceConfirmed() {
+		return common.NewMessage("Payment, redemption, subscription, and invitation reward features are disabled. The administrator must confirm compliance terms before enabling them.")
+	}
+	return nil
 }
 
 // oauthCheckoutError maps purchase failures to OAuth error responses. Business
@@ -120,6 +129,10 @@ func OAuthSubscriptionCheckout(c *gin.Context) {
 	paymentMethod := strings.TrimSpace(body.PaymentMethod)
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
+		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
 		if err := model.PurchaseSubscriptionWithBalance(user.Id, plan.Id, app.Id); err != nil {
 			oauthCheckoutError(c, err)
 			return
@@ -252,6 +265,10 @@ func OAuthProductCheckout(c *gin.Context) {
 	paymentMethod := strings.TrimSpace(body.PaymentMethod)
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
+		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
 		order, err := model.PurchaseAppProductWithBalance(user.Id, app.Id, product.Id)
 		if err != nil {
 			oauthCheckoutError(c, err)
@@ -282,12 +299,12 @@ func OAuthProductCheckout(c *gin.Context) {
 	}
 }
 
-// creditAppTopUpWithBalance moves platform balance into the token app's wallet.
-// The same quota is reserved from users.quota first, so a balance top-up can
-// never mint app quota out of nothing; every failure path refunds the platform
-// reservation. The pending top-up row is written first so a credit failure can
-// be marked failed instead of leaving an untraceable balance change.
+// creditAppTopUpWithBalance validates the amount before the model atomically
+// transfers platform balance and records the completed app top-up.
 func creditAppTopUpWithBalance(userId, appId int, amount int64) (int, error) {
+	if err := paymentComplianceError(); err != nil {
+		return 0, err
+	}
 	if amount < getMinTopup() {
 		return 0, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getMinTopup()})
 	}
@@ -295,51 +312,8 @@ func creditAppTopUpWithBalance(userId, appId int, amount int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := model.ValidateAppTopUpQuotaCapacity(userId, appId, quota); err != nil {
+	if err := model.TransferUserQuotaToApp(userId, appId, amount, quota); err != nil {
 		return 0, err
-	}
-
-	reserved, err := model.TryReserveUserQuota(userId, quota)
-	if err != nil {
-		return 0, err
-	}
-	if !reserved {
-		return 0, common.NewMessage("Insufficient balance")
-	}
-	refundPlatformQuota := func() {
-		if refundErr := model.IncreaseUserQuota(userId, quota, false); refundErr != nil {
-			common.SysError(common.LogText("failed to refund platform quota for app balance top-up (userId=%d, appId=%d, quota=%d): %s",
-				userId, appId, quota, refundErr.Error()))
-		}
-	}
-
-	tradeNo := fmt.Sprintf("APP_BALANCE-%d-%d-%s", appId, userId, common.GetRandomString(8))
-	topUp := &model.TopUp{
-		AppId:           appId,
-		UserId:          userId,
-		Amount:          amount,
-		TradeNo:         tradeNo,
-		PaymentMethod:   model.PaymentMethodBalance,
-		PaymentProvider: model.PaymentProviderBalance,
-		CreateTime:      common.GetTimestamp(),
-		Status:          common.TopUpStatusPending,
-	}
-	if err := topUp.Insert(); err != nil {
-		refundPlatformQuota()
-		return 0, err
-	}
-	if err := model.IncreaseUserAppQuota(userId, appId, quota); err != nil {
-		topUp.Status = common.TopUpStatusFailed
-		topUp.CompleteTime = common.GetTimestamp()
-		_ = topUp.Update()
-		refundPlatformQuota()
-		return 0, err
-	}
-	topUp.Status = common.TopUpStatusSuccess
-	topUp.CompleteTime = common.GetTimestamp()
-	if err := topUp.Update(); err != nil {
-		// The wallet was already credited, so only the audit record is stale.
-		common.SysError(common.LogText("failed to mark app balance top-up %s as success: %s", tradeNo, err.Error()))
 	}
 	return quota, nil
 }

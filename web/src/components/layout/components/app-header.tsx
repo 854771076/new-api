@@ -113,7 +113,7 @@ export function AppHeader({
   const notifications = useNotifications()
 
   return (
-    <Header>
+    <Header className='h-auto min-h-[var(--app-header-height,3rem)] [&>div]:min-h-[var(--app-header-height,3rem)]'>
       <div className='@container/system-brand flex min-w-0 flex-1 items-center gap-1'>
         <SystemBrand variant='inline' />
         <SystemUpdateAction presentation='version' />
@@ -124,7 +124,7 @@ export function AppHeader({
       ) : null}
 
       {rightContent ?? (
-        <div className='ms-auto flex shrink-0 items-center gap-1 sm:gap-2'>
+        <div className='ms-auto flex min-w-0 flex-wrap items-center justify-end gap-1 py-1 sm:gap-2 lg:shrink-0 lg:flex-nowrap lg:py-0'>
           {showTopNav && (
             <div className='me-1 hidden lg:block'>
               <TopNav links={links} />

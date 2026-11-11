@@ -311,8 +311,17 @@ func RevokeByRefreshToken(rawRefreshToken, expectedSID, reason string) error {
 	if expectedSID = strings.TrimSpace(expectedSID); expectedSID != "" && expectedSID != sid {
 		return ErrLoginSessionMismatch
 	}
-	_, err := model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
-	return err
+	revoked, err := model.RevokeUserSessionByRefreshHash(sid, hashRefreshSecret(secret), reason)
+	if err != nil || !revoked || reason != "logout" {
+		return err
+	}
+	// Only a successfully authenticated cookie revocation establishes ownership.
+	// Unknown secrets and repeated logout must not mutate unrelated OAuth grants.
+	session, err := model.GetUserSessionBySID(sid)
+	if err != nil {
+		return err
+	}
+	return model.RevokeOAuthRefreshTokensByUser(session.UserID)
 }
 
 func RefreshTokenSID(rawRefreshToken string) (string, bool) {

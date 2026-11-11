@@ -60,6 +60,15 @@ func parseOAuthAuthorizeRequest(c *gin.Context) (*OAuthAuthorizeRequest, error) 
 		CodeChallenge:       strings.TrimSpace(get("code_challenge")),
 		CodeChallengeMethod: strings.TrimSpace(get("code_challenge_method")),
 	}
+	// Fresh authentication and interactive prompt semantics are not implemented.
+	// Reject them rather than silently claiming freshness through auth_time.
+	if c.Request.URL.Query().Has("prompt") || c.Request.URL.Query().Has("max_age") {
+		return nil, errors.New("prompt and max_age are not supported")
+	}
+	_ = c.Request.ParseForm()
+	if c.Request.PostForm.Has("prompt") || c.Request.PostForm.Has("max_age") {
+		return nil, errors.New("prompt and max_age are not supported")
+	}
 	if req.ResponseType == "" {
 		return nil, errors.New("response_type is required")
 	}
@@ -285,12 +294,17 @@ func isSameOriginOAuthRequest(c *gin.Context) bool {
 // issueOAuthCode generates a single-use authorization code and redirects the
 // user back to the redirect_uri.
 func issueOAuthCode(c *gin.Context, app *model.OAuthApp, identity service.AuthIdentity, req *OAuthAuthorizeRequest) {
-	codePlaintext := model.GenerateOAuthAuthorizationCode()
+	codePlaintext, err := model.GenerateOAuthAuthorizationCode()
+	if err != nil {
+		redirectWithOAuthError(c, req.RedirectURI, req.State, oauthErrServerError, "internal error")
+		return
+	}
 	code := &model.OAuthAuthorizationCode{
 		CodeHash:            model.OAuthCodeHash(codePlaintext),
 		AppID:               app.Id,
 		UserID:              identity.UserID,
 		SessionID:           identity.SessionID,
+		AuthVersion:         identity.UserAuthVersion,
 		Scope:               model.NormalizeScopeString(req.Scope),
 		Nonce:               req.Nonce,
 		RedirectURI:         req.RedirectURI,

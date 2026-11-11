@@ -60,13 +60,24 @@ func AuthLogout(c *gin.Context) {
 				writeAuthSessionError(c, service.ErrLoginSessionMismatch)
 				return
 			}
-			if _, err := model.RevokeUserSession(identity.UserID, identity.SessionID, "logout"); err != nil {
+			// A signed but stale bearer must not revoke grants from later logins.
+			// Already-ended sessions still receive an idempotent logout response.
+			if _, _, err := service.ValidateLoginSession(identity); err == nil {
+				revoked, err := model.RevokeUserSession(identity.UserID, identity.SessionID, "logout")
+				if err != nil {
+					writeAuthSessionError(c, err)
+					return
+				}
+				if revoked {
+					if err := model.RevokeOAuthRefreshTokensByUser(identity.UserID); err != nil {
+						writeAuthSessionError(c, err)
+						return
+					}
+				}
+			} else if !errors.Is(err, service.ErrLoginSessionRevoked) && !errors.Is(err, gorm.ErrRecordNotFound) {
 				writeAuthSessionError(c, err)
 				return
 			}
-			// Revoke all OAuth refresh tokens for this user so that external
-			// applications cannot continue acting on the user's behalf.
-			_ = model.RevokeOAuthRefreshTokensByUser(identity.UserID)
 			cookieCleared := false
 			if cookieErr == nil && hasCookieSID && cookieSID == identity.SessionID {
 				if err := service.RevokeByRefreshToken(rawRefreshToken, identity.SessionID, "logout"); err != nil {
@@ -88,13 +99,6 @@ func AuthLogout(c *gin.Context) {
 		service.ClearRefreshCookie(c)
 		c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 		return
-	}
-	// Look up the session owner before revoking so we can also revoke the
-	// user's OAuth refresh tokens.
-	if sid, ok := service.RefreshTokenSID(rawRefreshToken); ok {
-		if session, err := model.GetUserSessionCached(sid); err == nil {
-			_ = model.RevokeOAuthRefreshTokensByUser(session.UserID)
-		}
 	}
 	if err := service.RevokeByRefreshToken(rawRefreshToken, expectedSID, "logout"); err != nil {
 		writeAuthSessionError(c, err)

@@ -546,7 +546,9 @@ func ensureSubscriptionPlanTableSQLite() error {
 ` + "`updated_at`" + ` bigint,
 PRIMARY KEY (` + "`id`" + `)
 )`
-		return DB.Exec(createSQL).Error
+		if err := DB.Exec(createSQL).Error; err != nil {
+			return err
+		}
 	}
 	var cols []struct {
 		Name string `gorm:"column:name"`
@@ -591,7 +593,7 @@ PRIMARY KEY (` + "`id`" + `)
 			return err
 		}
 	}
-	return nil
+	return DB.Exec("CREATE INDEX IF NOT EXISTS `idx_subscription_plans_app_id` ON `subscription_plans` (`app_id`)").Error
 }
 
 // migrateTokenModelLimitsToText migrates model_limits column from varchar(1024) to text

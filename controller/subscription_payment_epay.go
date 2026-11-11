@@ -62,6 +62,9 @@ func firstConfiguredEpayMethod() (string, error) {
 // pending subscription order and starts an epay payment. It is shared by the
 // dashboard and the OAuth app checkout endpoint.
 func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, paymentMethod string) (string, map[string]string, error) {
+	if err := paymentComplianceError(); err != nil {
+		return "", nil, err
+	}
 	if plan == nil {
 		return "", nil, common.NewMessage("Subscription plan does not exist")
 	}

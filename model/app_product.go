@@ -24,10 +24,7 @@ type AppProduct struct {
 
 	QuotaAmount int64 `json:"quota_amount" gorm:"type:bigint;not null;default:0"`
 
-	// Column default keeps a zero-value AppProduct enabled; callers that create
-	// a disabled product persist false with a map update (GORM omits a false
-	// value when the field has a default tag).
-	Enabled   bool `json:"enabled" gorm:"default:true"`
+	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order" gorm:"type:int;default:0"`
 
 	// Max purchases per user (0 = unlimited)
@@ -197,55 +194,69 @@ func ListAppProductOrders(appId, userId int, pageInfo *common.PageInfo) ([]AppPr
 // Abandoned checkouts must be moved to expired (see
 // UpdateAppProductOrderStatus) to release the slot.
 func CreateAppProductOrder(userId, appId, productId int, paymentMethod, paymentProvider string) (*AppProductOrder, error) {
+	var order *AppProductOrder
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		order, err = createAppProductOrderTx(tx, userId, appId, productId, paymentMethod, paymentProvider)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return order, nil
+}
+
+func createAppProductOrderTx(tx *gorm.DB, userId, appId, productId int, paymentMethod, paymentProvider string) (*AppProductOrder, error) {
 	if userId <= 0 || appId <= 0 || productId <= 0 {
 		return nil, ErrAppProductNotFound
 	}
+	// SQLite needs a write before the read to serialize limit checks too.
+	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+		if err := tx.Model(&AppProduct{}).Where("id = ?", productId).
+			UpdateColumn("id", gorm.Expr("id")).Error; err != nil {
+			return nil, err
+		}
+	}
 	order := &AppProductOrder{}
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		// Lock the product row so concurrent checkouts for the same product
-		// serialize their purchase-limit check.
-		var product AppProduct
-		if err := lockForUpdate(tx).Where("id = ?", productId).First(&product).Error; err != nil {
-			return ErrAppProductNotFound
+	// Lock the product row so concurrent checkouts for the same product
+	// serialize their purchase-limit check.
+	var product AppProduct
+	if err := lockForUpdate(tx).Where("id = ?", productId).First(&product).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrAppProductNotFound
 		}
-		if product.AppId != appId {
-			return ErrAppProductCrossApp
+		return nil, err
+	}
+	if product.AppId != appId {
+		return nil, ErrAppProductCrossApp
+	}
+	if !product.Enabled {
+		return nil, ErrAppProductDisabled
+	}
+	if product.QuotaAmount <= 0 || product.QuotaAmount > int64(common.MaxWalletQuota) {
+		return nil, ErrAppProductQuotaInvalid
+	}
+	if product.MaxPurchasePerUser > 0 {
+		var purchased int64
+		if err := tx.Model(&AppProductOrder{}).
+			Where("user_id = ? AND product_id = ? AND status IN ?", userId, productId,
+				[]string{AppProductOrderStatusPending, AppProductOrderStatusSuccess}).
+			Count(&purchased).Error; err != nil {
+			return nil, err
 		}
-		if !product.Enabled {
-			return ErrAppProductDisabled
+		if purchased >= int64(product.MaxPurchasePerUser) {
+			return nil, ErrAppProductPurchaseLimitExceeded
 		}
-		if product.QuotaAmount <= 0 {
-			return ErrAppProductQuotaInvalid
-		}
-		if product.MaxPurchasePerUser > 0 {
-			var purchased int64
-			if err := tx.Model(&AppProductOrder{}).
-				Where("user_id = ? AND product_id = ? AND status IN ?", userId, productId,
-					[]string{AppProductOrderStatusPending, AppProductOrderStatusSuccess}).
-				Count(&purchased).Error; err != nil {
-				return err
-			}
-			if purchased >= int64(product.MaxPurchasePerUser) {
-				return ErrAppProductPurchaseLimitExceeded
-			}
-		}
-		*order = AppProductOrder{
-			UserId:          userId,
-			AppId:           appId,
-			ProductId:       productId,
-			Money:           product.PriceAmount,
-			PriceAmount:     product.PriceAmount,
-			Currency:        product.Currency,
-			QuotaAmount:     product.QuotaAmount,
-			TradeNo:         fmt.Sprintf("%s%d-%d-%d-%s", AppProductOrderTradeNoPrefix, appId, userId, time.Now().UnixMilli(), common.GetRandomString(6)),
-			PaymentMethod:   paymentMethod,
-			PaymentProvider: paymentProvider,
-			Status:          AppProductOrderStatusPending,
-			CreateTime:      common.GetTimestamp(),
-		}
-		return tx.Create(order).Error
-	})
-	if err != nil {
+	}
+	*order = AppProductOrder{
+		UserId: userId, AppId: appId, ProductId: productId,
+		Money: product.PriceAmount, PriceAmount: product.PriceAmount,
+		Currency: product.Currency, QuotaAmount: product.QuotaAmount,
+		TradeNo:       fmt.Sprintf("%s%d-%d-%d-%s", AppProductOrderTradeNoPrefix, appId, userId, time.Now().UnixMilli(), common.GetRandomString(6)),
+		PaymentMethod: paymentMethod, PaymentProvider: paymentProvider,
+		Status: AppProductOrderStatusPending, CreateTime: common.GetTimestamp(),
+	}
+	if err := tx.Create(order).Error; err != nil {
 		return nil, err
 	}
 	return order, nil
@@ -301,8 +312,7 @@ func CompleteAppProductOrder(tradeNo, providerPayload, expectedPaymentProvider s
 	if pendingOrder == nil {
 		return ErrAppProductOrderNotFound
 	}
-	// Create the wallet row outside the transaction: a lost create race inside
-	// PostgreSQL would abort the whole transaction on the unique violation.
+	// Ensure the wallet exists before handling the callback, including replays.
 	if _, err := EnsureUserAppWallet(pendingOrder.UserId, pendingOrder.AppId); err != nil {
 		return err
 	}
@@ -383,43 +393,54 @@ func CompleteAppProductOrder(tradeNo, providerPayload, expectedPaymentProvider s
 	return nil
 }
 
-// PurchaseAppProductWithBalance buys a product with the app wallet. The order is
-// created first, which enforces the cross-app, enabled, and purchase-limit
-// checks. The price is converted with calcSubscriptionBalanceQuota (the same
-// PriceAmount -> quota rule used by subscription balance payment), then that
-// quota is reserved from the app wallet and the snapshot quota is credited by
-// CompleteAppProductOrder, so the credit stays idempotent. If completion fails,
-// the reservation is refunded and the order is marked failed; this keeps a
-// failed purchase from consuming the user's balance.
+// PurchaseAppProductWithBalance validates, debits, credits and completes the
+// order in one transaction. A failed purchase leaves no charge or pending order.
 func PurchaseAppProductWithBalance(userId, appId, productId int) (*AppProductOrder, error) {
-	order, err := CreateAppProductOrder(userId, appId, productId, PaymentMethodBalance, PaymentProviderBalance)
-	if err != nil {
-		return nil, err
-	}
-	requiredQuota, err := calcSubscriptionBalanceQuota(order.PriceAmount)
-	if err != nil {
-		_ = UpdateAppProductOrderStatus(order.TradeNo, PaymentProviderBalance, AppProductOrderStatusFailed)
-		return nil, err
-	}
-	reserved, err := TryReserveUserAppQuota(userId, appId, requiredQuota)
-	if err != nil {
-		_ = UpdateAppProductOrderStatus(order.TradeNo, PaymentProviderBalance, AppProductOrderStatusFailed)
-		return nil, err
-	}
-	if !reserved {
-		_ = UpdateAppProductOrderStatus(order.TradeNo, PaymentProviderBalance, AppProductOrderStatusFailed)
-		return nil, common.NewMessage("Insufficient balance")
-	}
-	if err := CompleteAppProductOrder(order.TradeNo, fmt.Sprintf("charged_quota=%d", requiredQuota), PaymentProviderBalance, 0); err != nil {
-		if refundErr := IncreaseUserAppQuota(userId, appId, requiredQuota); refundErr != nil {
-			common.SysError(common.LogText("failed to refund app product balance purchase trade_no=%s: %s", order.TradeNo, refundErr.Error()))
+	var order *AppProductOrder
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		order, err = createAppProductOrderTx(tx, userId, appId, productId, PaymentMethodBalance, PaymentProviderBalance)
+		if err != nil {
+			return err
 		}
-		_ = UpdateAppProductOrderStatus(order.TradeNo, PaymentProviderBalance, AppProductOrderStatusFailed)
+		if order.PriceAmount < 0 {
+			return common.NewMessage("Price cannot be negative")
+		}
+		requiredQuota, err := calcSubscriptionBalanceQuota(order.PriceAmount)
+		if err != nil {
+			return err
+		}
+		if _, err := ensureUserAppWallet(tx, userId, appId); err != nil {
+			return err
+		}
+		if requiredQuota > 0 {
+			result := tx.Model(&UserAppWallet{}).
+				Where("user_id = ? AND app_id = ? AND quota >= ?", userId, appId, requiredQuota).
+				Update("quota", gorm.Expr("quota - ?", requiredQuota))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return common.NewMessage("Insufficient balance")
+			}
+		}
+		if err := increaseUserAppQuota(tx, userId, appId, int(order.QuotaAmount)); err != nil {
+			return err
+		}
+		order.Status = AppProductOrderStatusSuccess
+		order.CompleteTime = common.GetTimestamp()
+		order.ProviderPayload = fmt.Sprintf("charged_quota=%d", requiredQuota)
+		return tx.Save(order).Error
+	})
+	if err != nil {
 		return nil, err
 	}
-	completed := GetAppProductOrderByTradeNo(order.TradeNo)
-	if completed == nil {
-		return order, nil
-	}
-	return completed, nil
+	RecordLog(userId, LogTypeTopup, common.NewMessage(
+		"App product purchased, product ID: {{product}}, quota added: {{quota}}, payment amount: {{amount}}, payment method: {{method}}",
+		map[string]any{
+			"product": productId, "quota": logger.FormatQuota(int(order.QuotaAmount)),
+			"amount": fmt.Sprintf("%.2f", order.Money), "method": order.PaymentMethod,
+		},
+	))
+	return order, nil
 }

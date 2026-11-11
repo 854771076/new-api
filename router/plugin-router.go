@@ -478,7 +478,7 @@ func (d *pluginRouteDispatcher) handOffNativeTaskQuery(c *gin.Context) {
 	if generation == nil || generation.RuntimeHandler() == nil {
 		return
 	}
-	task, exists, err := model.GetByTaskId(c.GetInt("id"), c.Param("task_id"))
+	task, exists, err := model.GetByTaskIdScoped(c.GetInt("id"), common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), c.Param("task_id"))
 	if err != nil || !exists || task.PrivateData.Execution == nil || task.PrivateData.Execution.TaskPlugin == nil {
 		return
 	}

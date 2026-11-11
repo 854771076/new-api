@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -30,9 +31,10 @@ import (
 type BillingSession struct {
 	relayInfo        *relaycommon.RelayInfo
 	funding          FundingSource
-	preConsumedQuota int    // 实际预扣额度（信任用户可能为 0）
-	tokenConsumed    int    // 令牌额度实际扣减量
-	extraReserved    int    // 发送前补充预扣的额度（订阅退款时需要单独回滚）
+	preConsumedQuota int // 实际预扣额度（信任用户可能为 0）
+	tokenConsumed    int // 令牌额度实际扣减量
+	extraReserved    int // 发送前补充预扣的额度（订阅退款时需要单独回滚）
+	appUsedQuota     int
 	trusted          bool   // 是否命中信任额度旁路
 	fundingSettled   bool   // funding.Settle 已成功，资金来源已提交
 	settled          bool   // Settle 全部完成（资金 + 令牌）
@@ -52,9 +54,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	}
 	delta := actualQuota - s.preConsumedQuota
 	if delta == 0 {
-		// App wallet requests still need the "used quota" statistic even when
-		// the settled amount matches the reservation exactly.
-		s.recordAppWalletUsedQuota(actualQuota)
+		_ = s.recordAppWalletUsedQuota(actualQuota)
 		s.settled = true
 		return nil
 	}
@@ -64,8 +64,7 @@ func (s *BillingSession) Settle(actualQuota int) error {
 			return err
 		}
 		s.fundingSettled = true
-		// 只在资金来源结算成功后记录一次已用额度，退款/回滚路径不记录。
-		s.recordAppWalletUsedQuota(actualQuota)
+		_ = s.recordAppWalletUsedQuota(actualQuota)
 	}
 	// 2) 调整令牌额度
 	var tokenErr error
@@ -89,21 +88,39 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	return tokenErr
 }
 
-// recordAppWalletUsedQuota accumulates the settled amount into the app wallet's
-// used_quota statistic. Platform wallets keep using users.used_quota, which is
-// maintained elsewhere. Errors are logged because they must not fail settlement.
-func (s *BillingSession) recordAppWalletUsedQuota(actualQuota int) {
-	if actualQuota <= 0 {
-		return
+func (s *BillingSession) PersistTask(ctx context.Context, task *model.Task, omitColumns ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.settled || s.refunded || s.fundingSettled {
+		return errors.New("billing session already finalized")
 	}
 	funding, ok := s.funding.(*WalletFunding)
 	if !ok || funding.appId <= 0 {
-		return
+		return task.InsertWithContext(ctx, omitColumns...)
 	}
-	if err := model.IncreaseUserAppUsedQuota(funding.userId, funding.appId, actualQuota); err != nil {
-		common.SysLog(common.LogText("error increasing app wallet used quota (userId=%d, appId=%d, amount=%d): %s",
-			funding.userId, funding.appId, actualQuota, err.Error()))
+	if err := task.InsertWithAppUsage(ctx, task.Quota-s.appUsedQuota, omitColumns...); err != nil {
+		return err
 	}
+	s.appUsedQuota = task.Quota
+	return nil
+}
+
+func (s *BillingSession) recordAppWalletUsedQuota(actualQuota int) error {
+	funding, ok := s.funding.(*WalletFunding)
+	if !ok || funding.appId <= 0 {
+		return nil
+	}
+	delta := actualQuota - s.appUsedQuota
+	if delta == 0 {
+		return nil
+	}
+	if err := model.AdjustUserAppUsedQuota(funding.userId, funding.appId, delta); err != nil {
+		common.SysLog(common.LogText("error adjusting app wallet used quota (userId=%d, appId=%d, delta=%d): %s",
+			funding.userId, funding.appId, delta, err.Error()))
+		return err
+	}
+	s.appUsedQuota = actualQuota
+	return nil
 }
 
 // Refund 退还所有预扣费，幂等安全，异步执行。
@@ -114,15 +131,6 @@ func (s *BillingSession) Refund(c *gin.Context) {
 		return
 	}
 	s.refunded = true
-	s.mu.Unlock()
-
-	logger.LogInfo(c, common.LogText("user %d request failed, refunding the pre-consumed quota (token_quota=%s, funding=%s)",
-		s.relayInfo.UserId,
-		logger.FormatQuota(s.tokenConsumed),
-		s.funding.Source(),
-	))
-
-	// 复制需要的值到闭包中
 	tokenId := s.relayInfo.TokenId
 	tokenKey := s.relayInfo.TokenKey
 	isPlayground := s.relayInfo.IsPlayground
@@ -130,11 +138,24 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	extraReserved := s.extraReserved
 	subscriptionId := s.relayInfo.SubscriptionId
 	funding := s.funding
+	appUsedQuota := s.appUsedQuota
+	s.mu.Unlock()
+
+	logger.LogInfo(c, common.LogText("user %d request failed, refunding the pre-consumed quota (token_quota=%s, funding=%s)",
+		s.relayInfo.UserId,
+		logger.FormatQuota(tokenConsumed),
+		funding.Source(),
+	))
 
 	gopool.Go(func() {
 		// 1) 退还资金来源
 		if err := funding.Refund(); err != nil {
 			common.SysLog(common.LogText("error refunding billing source: %s", err.Error()))
+		} else if wallet, ok := funding.(*WalletFunding); ok && wallet.appId > 0 && appUsedQuota > 0 {
+			if err := model.AdjustUserAppUsedQuota(wallet.userId, wallet.appId, -appUsedQuota); err != nil {
+				common.SysLog(common.LogText("error adjusting app wallet used quota (userId=%d, appId=%d, delta=%d): %s",
+					wallet.userId, wallet.appId, -appUsedQuota, err.Error()))
+			}
 		}
 		if extraReserved > 0 && funding.Source() == BillingSourceSubscription && subscriptionId > 0 {
 			if err := model.PostConsumeUserSubscriptionDelta(subscriptionId, -int64(extraReserved)); err != nil {

@@ -33,6 +33,8 @@ type OAuthRefreshToken struct {
 	AppID         int    `json:"app_id" gorm:"type:int;not null;index"`
 	UserID        int    `json:"user_id" gorm:"type:int;not null;index"`
 	SessionID     string `json:"session_id" gorm:"type:varchar(64);not null"`
+	AuthVersion   int64  `json:"-" gorm:"type:bigint;not null;default:0"`
+	AuthTime      int64  `json:"-" gorm:"type:bigint;not null;default:0"`
 	Scope         string `json:"scope" gorm:"type:varchar(512);not null"`
 	ExpiresAt     int64  `json:"expires_at" gorm:"type:bigint;not null;index"`
 	RevokedAt     int64  `json:"revoked_at" gorm:"type:bigint;default:0;index"`
@@ -51,12 +53,12 @@ func OAuthRefreshTokenHash(token string) string {
 }
 
 // GenerateOAuthRefreshToken returns a new opaque refresh token.
-func GenerateOAuthRefreshToken() string {
+func GenerateOAuthRefreshToken() (string, error) {
 	random := make([]byte, OAuthRefreshTokenBytes)
 	if _, err := rand.Read(random); err != nil {
-		return common.GetRandomString(48)
+		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(random)
+	return base64.RawURLEncoding.EncodeToString(random), nil
 }
 
 // CreateOAuthRefreshToken stores the hash of a refresh token.
@@ -67,7 +69,15 @@ func CreateOAuthRefreshToken(token *OAuthRefreshToken) error {
 	if token.CreatedAt == 0 {
 		token.CreatedAt = common.GetTimestamp()
 	}
-	return DB.Create(token).Error
+	if token.AuthTime <= 0 {
+		return ErrOAuthGrantSessionInvalid
+	}
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if _, err := validateOAuthGrantSession(tx, token.UserID, token.SessionID, token.AuthVersion, token.AuthTime, true); err != nil {
+			return err
+		}
+		return tx.Create(token).Error
+	})
 }
 
 // GetOAuthRefreshTokenByHash looks up a refresh token by its hash.
@@ -92,7 +102,7 @@ func GetOAuthRefreshTokenByHash(hash string) (*OAuthRefreshToken, error) {
 // rotated by a concurrent request, the entire app+user refresh token chain is
 // revoked and ErrOAuthRefreshTokenRevoked is returned. Returns the newly
 // created token row.
-func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64) (*OAuthRefreshToken, error) {
+func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64, appID int) (*OAuthRefreshToken, error) {
 	oldHash = strings.TrimSpace(oldHash)
 	if oldHash == "" || newHash == "" {
 		return nil, ErrOAuthRefreshTokenNotFound
@@ -108,6 +118,25 @@ func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64) (*OAut
 				return ErrOAuthRefreshTokenNotFound
 			}
 			return err
+		}
+		// Client binding is checked inside the transaction, before any side effects.
+		if old.AppID != appID {
+			return ErrOAuthRefreshTokenNotFound
+		}
+		if old.AuthTime <= 0 {
+			return ErrOAuthGrantSessionInvalid
+		}
+		if _, err := validateOAuthGrantSession(tx, old.UserID, old.SessionID, old.AuthVersion, old.AuthTime, true); err != nil {
+			return err
+		}
+		// A locking read observes a concurrent winner even at MySQL's default
+		// REPEATABLE READ isolation, after acquiring the shared user/session locks.
+		if err := lockForUpdate(tx).Where("token_hash = ?", oldHash).First(&old).Error; err != nil {
+			return err
+		}
+		now = common.GetTimestamp()
+		if newExpiresAt <= now || oldHash == newHash {
+			return ErrOAuthRefreshTokenExpired
 		}
 		replay := old.RevokedAt != 0
 		if !replay {
@@ -144,6 +173,8 @@ func RotateOAuthRefreshToken(oldHash, newHash string, newExpiresAt int64) (*OAut
 			AppID:         old.AppID,
 			UserID:        old.UserID,
 			SessionID:     old.SessionID,
+			AuthVersion:   old.AuthVersion,
+			AuthTime:      old.AuthTime,
 			Scope:         old.Scope,
 			ExpiresAt:     newExpiresAt,
 			PrevTokenHash: oldHash,

@@ -2,11 +2,16 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +32,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -515,7 +521,11 @@ func openTaskDialectDatabase(t *testing.T, models ...any) (*gorm.DB, common.Data
 	switch dialect {
 	case "", common.DatabaseTypeSQLite:
 		dialect = common.DatabaseTypeSQLite
-		driver = sqlite.Open(":memory:")
+		dsn := os.Getenv("TEST_TASK_SQLITE_DSN")
+		if dsn == "" {
+			dsn = ":memory:"
+		}
+		driver = sqlite.Open(dsn)
 	case common.DatabaseTypeMySQL:
 		require.NotEmpty(t, os.Getenv("TEST_MYSQL_DSN"))
 		driver = mysql.Open(os.Getenv("TEST_MYSQL_DSN"))
@@ -691,20 +701,595 @@ func TestExecuteTaskSubmissionRefundsWhenFinalReserveFails(t *testing.T) {
 	assert.False(t, c.Writer.Written())
 }
 
-func TestExecuteTaskSubmissionRejectsAppAccessTokens(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
-
-	submitted := false
-	outcome, taskErr := executeTaskSubmissionWith(c, &relaycommon.RelayInfo{AppId: 7}, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
-		submitted = true
-		return nil, nil
+// An app access token now submits async tasks like a platform token: billing
+// reserves and settles against the app wallet, and the persisted task records
+// the owning app so reads can be scoped to it.
+func TestExecuteTaskSubmissionAllowsAppAccessTokens(t *testing.T) {
+	db, dialect := openTaskDialectDatabase(t, &model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}, &model.UserAppWallet{})
+	oldDB, oldLogDB := model.DB, model.LOG_DB
+	oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
+	oldRedis, oldMemory, oldBatch, oldConsume, oldExport := common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled
+	model.DB, model.LOG_DB = db, db
+	common.SetDatabaseTypes(dialect, dialect)
+	common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = false, false, false, true, false
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = oldDB, oldLogDB
+		common.SetDatabaseTypes(oldMain, oldLog)
+		common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = oldRedis, oldMemory, oldBatch, oldConsume, oldExport
 	})
 
-	require.Nil(t, outcome)
-	require.NotNil(t, taskErr)
-	assert.Equal(t, http.StatusForbidden, taskErr.StatusCode)
-	assert.Equal(t, "app_task_unsupported", taskErr.Code)
-	assert.False(t, submitted)
+	withTieredBillingConfig(t, map[string]string{"document-model": "tiered_expr"}, map[string]string{
+		"document-model": `u("units") > 0 ? tier("bulk", u("units") * 0.01) : tier("small", 0.0)`,
+	})
+	const source = `
+export const meta={apiVersion:1,key:"app-settlement",name:"App settlement",version:"1.0.0",author:{name:"Test"},models:["document-model"],fetchMode:"per_task",usageSchema:{units:{type:"number",unit:"count"}}};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/compile",body:ctx.requestBody};}
+export function parseSubmitResponse(ctx,resp){return {taskId:"vendor-job",taskData:resp.body,immediate:{status:resp.body.status}};}
+export function extractUsage(){return {units:4};}
+export function parseTaskResult(){throw new Error("completed submissions must not poll");}
+export function buildQueryRequest(){throw new Error("completed submissions must not poll");}
+`
+	plugin, err := pluginruntime.CompilePlugin(source, pluginruntime.Options{})
+	require.NoError(t, err)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"SUCCESS"}`))
+	}))
+	defer server.Close()
+
+	const appId = 7
+	initial := int(20 * common.QuotaPerUnit)
+	user := model.User{Username: "task_app_user", AffCode: "task_app_aff", Quota: initial}
+	require.NoError(t, db.Create(&user).Error)
+	require.NoError(t, db.Create(&model.UserAppWallet{UserId: user.Id, AppId: appId, Quota: initial}).Error)
+	ch := model.Channel{Name: "test provider", Type: constant.ChannelTypeTaskPlugin}
+	require.NoError(t, db.Create(&ch).Error)
+
+	c := taskSubmissionTestContext()
+	c.Set("group", "default")
+	c.Set("username", user.Username)
+	c.Set("task_request", map[string]any{"model": "document-model"})
+	c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{Plugin: plugin})
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, "document-model")
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+	common.SetContextKey(c, constant.ContextKeyChannelId, ch.Id)
+	common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)
+	common.SetContextKey(c, constant.ContextKeyOAuthAppID, appId)
+
+	info := taskSubmissionRelayInfo(nil)
+	info.UserId = user.Id
+	info.AppId = appId
+	info.OriginModelName = "document-model"
+	info.UserGroup = "default"
+	info.UsingGroup = "default"
+	info.IsPlayground = true
+	info.UserSetting.BillingPreference = "wallet_only"
+	info.PublicTaskID = model.GenerateTaskID()
+	info.LockedChannel = &ch
+
+	outcome, taskErr := executeTaskSubmission(c, info)
+	require.Nil(t, taskErr)
+	require.NotNil(t, outcome)
+	want := common.QuotaRound(4 * 0.01 * common.QuotaPerUnit)
+	assert.Equal(t, want, outcome.Result.Quota)
+
+	var stored model.Task
+	require.NoError(t, db.Where("task_id = ?", info.PublicTaskID).First(&stored).Error)
+	assert.Equal(t, appId, stored.AppId)
+	assert.Equal(t, want, stored.Quota)
+	assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), stored.Status)
+
+	var wallet model.UserAppWallet
+	require.NoError(t, db.Where("user_id = ? AND app_id = ?", user.Id, appId).First(&wallet).Error)
+	assert.Equal(t, initial-want, wallet.Quota, "app wallet is charged")
+	assert.Equal(t, want, wallet.UsedQuota, "app usage is recorded once at settle")
+
+	var updatedUser model.User
+	require.NoError(t, db.First(&updatedUser, user.Id).Error)
+	assert.Equal(t, initial, updatedUser.Quota, "platform wallet is untouched")
+
+	var logs []model.Log
+	require.NoError(t, db.Where("user_id = ?", user.Id).Find(&logs).Error)
+	require.Len(t, logs, 1)
+	assert.Equal(t, want, logs[0].Quota)
+}
+
+func TestTaskAppPublicationCrash(t *testing.T) {
+	if os.Getenv("TEST_TASK_CRASH_CHILD") == "1" {
+		var driver gorm.Dialector
+		switch common.DatabaseType(os.Getenv("TEST_TASK_DB_DIALECT")) {
+		case "", common.DatabaseTypeSQLite:
+			driver = sqlite.Open(os.Getenv("TEST_TASK_SQLITE_DSN"))
+		case common.DatabaseTypeMySQL:
+			driver = mysql.Open(os.Getenv("TEST_MYSQL_DSN"))
+		case common.DatabaseTypePostgreSQL:
+			driver = postgres.New(postgres.Config{DSN: os.Getenv("TEST_POSTGRES_DSN"), PreferSimpleProtocol: true})
+		default:
+			t.Fatal("unsupported crash-test database")
+		}
+		db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: os.Getenv("TEST_TASK_CRASH_PREFIX")}})
+		require.NoError(t, err)
+		model.DB = db
+		if os.Getenv("TEST_TASK_CRASH_PHASE") == "before_commit" {
+			require.NoError(t, db.Callback().Create().After("gorm:create").Register("test:crash_before_commit", func(tx *gorm.DB) {
+				if tx.Error == nil && tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Task" {
+					// Exit without running transaction rollback or any deferred cleanup.
+					os.Exit(23)
+				}
+			}))
+		}
+		task := &model.Task{TaskID: "crash_task", UserId: 1, AppId: 7, Quota: 100}
+		require.NoError(t, task.InsertWithAppUsage(context.Background(), task.Quota))
+		os.Exit(23)
+	}
+
+	for _, phase := range []string{"before_commit", "after_commit"} {
+		t.Run(phase, func(t *testing.T) {
+			if dialect := os.Getenv("TEST_TASK_DB_DIALECT"); dialect == "" || dialect == "sqlite" {
+				t.Setenv("TEST_TASK_SQLITE_DSN", filepath.Join(t.TempDir(), "publication.db"))
+			}
+			db, _ := openTaskDialectDatabase(t, &model.Task{}, &model.UserAppWallet{})
+			require.NoError(t, db.Create(&model.UserAppWallet{UserId: 1, AppId: 7, Quota: 1000}).Error)
+			executable, err := os.Executable()
+			require.NoError(t, err)
+			cmd := exec.Command(executable, "-test.run=^TestTaskAppPublicationCrash$")
+			cmd.Env = append(os.Environ(), "TEST_TASK_CRASH_CHILD=1", "TEST_TASK_CRASH_PHASE="+phase,
+				"TEST_TASK_CRASH_PREFIX="+db.NamingStrategy.(schema.NamingStrategy).TablePrefix)
+			output, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr, "%s", output)
+			require.Equal(t, 23, exitErr.ExitCode(), "%s", output)
+			var wallet model.UserAppWallet
+			require.NoError(t, db.Where("user_id = ? AND app_id = ?", 1, 7).First(&wallet).Error)
+			var count int64
+			require.NoError(t, db.Model(&model.Task{}).Where("task_id = ?", "crash_task").Count(&count).Error)
+			assert.Equal(t, 1000, wallet.Quota)
+			if phase == "before_commit" {
+				assert.Zero(t, count)
+				assert.Zero(t, wallet.UsedQuota)
+			} else {
+				assert.EqualValues(t, 1, count)
+				assert.Equal(t, 100, wallet.UsedQuota)
+			}
+		})
+	}
+}
+
+func TestTaskAppCompletionTransactionDatabase(t *testing.T) {
+	db, dialect := openTaskDialectDatabase(t, &model.Task{}, &model.UserAppWallet{})
+	oldDB, oldType := model.DB, common.MainDatabaseType()
+	model.DB = db
+	common.SetDatabaseTypes(dialect, common.LogDatabaseType())
+	t.Cleanup(func() { model.DB = oldDB; common.SetDatabaseTypes(oldType, common.LogDatabaseType()) })
+	for index, tc := range []struct {
+		name    string
+		actual  int
+		failure string
+	}{
+		{"upward marker rollback", 140, "marker"},
+		{"downward marker rollback", 40, "marker"},
+		{"refund usage rollback", 0, "usage"},
+		{"downward capacity rollback", 40, "capacity"},
+		{"refund capacity rollback", 0, "capacity"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userID := index + 1
+			initial := 900
+			if tc.failure == "capacity" {
+				initial = common.MaxWalletQuota - 10
+			}
+			require.NoError(t, db.Create(&model.UserAppWallet{UserId: userID, AppId: 7, Quota: initial, UsedQuota: 100}).Error)
+			task := &model.Task{TaskID: tc.name, UserId: userID, AppId: 7, Status: model.TaskStatusInProgress, Quota: 100}
+			require.NoError(t, task.Insert())
+			injected := true
+			require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:completion_rollback", func(tx *gorm.DB) {
+				if !injected || tx.Statement.Schema == nil {
+					return
+				}
+				if values, ok := tx.Statement.Dest.(map[string]any); ok {
+					_, marker := values["quota"]
+					_, usage := values["used_quota"]
+					if tc.failure == "marker" && tx.Statement.Schema.Name == "Task" && marker || tc.failure == "usage" && tx.Statement.Schema.Name == "UserAppWallet" && usage {
+						tx.AddError(errors.New("injected financial write failure"))
+					}
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, db.Callback().Update().Remove("test:completion_rollback")) })
+			delta, err := task.SettleAppWalletQuota(context.Background(), tc.actual)
+			require.Error(t, err)
+			assert.Zero(t, delta)
+			assert.Equal(t, 100, task.Quota)
+			var wallet model.UserAppWallet
+			require.NoError(t, db.Where("user_id = ? AND app_id = ?", userID, 7).First(&wallet).Error)
+			assert.Equal(t, initial, wallet.Quota)
+			assert.Equal(t, 100, wallet.UsedQuota)
+			var persisted model.Task
+			require.NoError(t, db.First(&persisted, task.ID).Error)
+			assert.Equal(t, 100, persisted.Quota)
+			injected = false
+			if tc.failure == "capacity" {
+				require.NoError(t, db.Model(&wallet).Update("quota", 900).Error)
+				initial = 900
+			}
+			delta, err = task.SettleAppWalletQuota(context.Background(), tc.actual)
+			require.NoError(t, err)
+			assert.Equal(t, tc.actual-100, delta)
+			stale := persisted
+			delta, err = stale.SettleAppWalletQuota(context.Background(), tc.actual)
+			require.NoError(t, err)
+			assert.Zero(t, delta)
+			require.NoError(t, db.First(&wallet, wallet.Id).Error)
+			assert.Equal(t, initial+100-tc.actual, wallet.Quota)
+			assert.Equal(t, tc.actual, wallet.UsedQuota)
+		})
+	}
+}
+
+type appWalletCrashPollingAdaptor struct {
+	actual int
+}
+
+func (a *appWalletCrashPollingAdaptor) Init(*relaycommon.RelayInfo) {}
+func (a *appWalletCrashPollingAdaptor) FetchTask(string, string, *model.Task, string) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+}
+func (a *appWalletCrashPollingAdaptor) ParseTaskResult(*model.Task, *http.Response, []byte) (*relaycommon.TaskInfo, error) {
+	if a.actual == 0 {
+		return relaycommon.FailTaskInfo("provider failed"), nil
+	}
+	return &relaycommon.TaskInfo{Status: model.TaskStatusSuccess}, nil
+}
+func (a *appWalletCrashPollingAdaptor) AdjustBillingOnComplete(*model.Task, *relaycommon.TaskInfo) int {
+	return a.actual
+}
+
+// The subprocess exits at the real transaction boundary, without unwinding Go
+// defers. Restart polling must reconcile the durable marker, not reapply funds.
+func TestTaskAppCompletionCrash(t *testing.T) {
+	if os.Getenv("TEST_TASK_COMPLETION_CHILD") == "1" {
+		var driver gorm.Dialector
+		dialect := common.DatabaseType(os.Getenv("TEST_TASK_DB_DIALECT"))
+		switch dialect {
+		case "", common.DatabaseTypeSQLite:
+			dialect = common.DatabaseTypeSQLite
+			driver = sqlite.Open(os.Getenv("TEST_TASK_SQLITE_DSN"))
+		case common.DatabaseTypeMySQL:
+			driver = mysql.Open(os.Getenv("TEST_MYSQL_DSN"))
+		case common.DatabaseTypePostgreSQL:
+			driver = postgres.New(postgres.Config{DSN: os.Getenv("TEST_POSTGRES_DSN"), PreferSimpleProtocol: true})
+		default:
+			t.Fatal("unsupported completion crash-test database")
+		}
+		db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: os.Getenv("TEST_TASK_CRASH_PREFIX")}})
+		require.NoError(t, err)
+		pool := &taskSubmissionCommitPool{ConnPool: db.ConnPool}
+		db.ConnPool, db.Statement.ConnPool = pool, pool
+		model.DB, model.LOG_DB = db, db
+		common.SetDatabaseTypes(dialect, dialect)
+		common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled = false, false, false
+		constant.TaskTimeoutMinutes = 0
+		constant.TaskQueryLimit = 100
+		require.NoError(t, db.Callback().Update().After("gorm:update").Before("gorm:commit_or_rollback_transaction").Register("test:completion_crash", func(tx *gorm.DB) {
+			if tx.Error != nil || tx.Statement.Schema == nil || tx.Statement.Schema.Name != "Task" {
+				return
+			}
+			values, ok := tx.Statement.Dest.(map[string]any)
+			if !ok {
+				return
+			}
+			if _, marker := values["quota"]; !marker {
+				return
+			}
+			if os.Getenv("TEST_TASK_CRASH_PHASE") == "before_commit" {
+				os.Exit(23)
+			}
+			commitTx, ok := tx.Statement.ConnPool.(*taskSubmissionCommitTx)
+			require.True(t, ok)
+			commitTx.afterCommit = func() { os.Exit(23) }
+		}))
+		actual, err := strconv.Atoi(os.Getenv("TEST_TASK_COMPLETION_QUOTA"))
+		require.NoError(t, err)
+		service.GetTaskAdaptorFunc = func(constant.TaskPlatform) service.TaskPollingAdaptor {
+			return &appWalletCrashPollingAdaptor{actual: actual}
+		}
+		service.RunTaskPollingOnce(context.Background(), nil)
+		t.Fatal("financial crash boundary was not reached")
+	}
+	for _, actual := range []int{0, 40, 140} {
+		for _, phase := range []string{"before_commit", "after_commit"} {
+			t.Run(fmt.Sprintf("%d/%s", actual, phase), func(t *testing.T) {
+				if dialect := os.Getenv("TEST_TASK_DB_DIALECT"); dialect == "" || dialect == "sqlite" {
+					t.Setenv("TEST_TASK_SQLITE_DSN", filepath.Join(t.TempDir(), "completion.db"))
+				}
+				db, dialect := openTaskDialectDatabase(t, &model.Task{}, &model.UserAppWallet{}, &model.User{}, &model.Channel{}, &model.Log{})
+				oldDB, oldLogDB := model.DB, model.LOG_DB
+				oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
+				oldRedis, oldMemory, oldBatch, oldConsume, oldExport := common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled
+				oldFactory, oldTimeout, oldLimit := service.GetTaskAdaptorFunc, constant.TaskTimeoutMinutes, constant.TaskQueryLimit
+				model.DB, model.LOG_DB = db, db
+				common.SetDatabaseTypes(dialect, dialect)
+				common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = false, false, false, true, false
+				constant.TaskTimeoutMinutes = 0
+				constant.TaskQueryLimit = 100
+				service.GetTaskAdaptorFunc = func(constant.TaskPlatform) service.TaskPollingAdaptor {
+					return &appWalletCrashPollingAdaptor{actual: actual}
+				}
+				t.Cleanup(func() {
+					model.DB, model.LOG_DB = oldDB, oldLogDB
+					common.SetDatabaseTypes(oldMain, oldLog)
+					common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = oldRedis, oldMemory, oldBatch, oldConsume, oldExport
+					service.GetTaskAdaptorFunc, constant.TaskTimeoutMinutes, constant.TaskQueryLimit = oldFactory, oldTimeout, oldLimit
+				})
+				user := &model.User{Username: "completion_user", AffCode: "completion_aff", Quota: 1000, UsedQuota: 100, RequestCount: 1}
+				require.NoError(t, db.Create(user).Error)
+				channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin, Name: "completion", Key: "test", Status: common.ChannelStatusEnabled, UsedQuota: 100}
+				require.NoError(t, db.Create(channel).Error)
+				require.NoError(t, db.Create(&model.UserAppWallet{UserId: user.Id, AppId: 7, Quota: 900, UsedQuota: 100}).Error)
+				task := &model.Task{TaskID: "completion_task", UserId: user.Id, AppId: 7, ChannelId: channel.Id, Platform: "wallet-crash", Quota: 100, Status: model.TaskStatusInProgress, Progress: "50%", SubmitTime: time.Now().Unix()}
+				require.NoError(t, task.Insert())
+				executable, err := os.Executable()
+				require.NoError(t, err)
+				cmd := exec.Command(executable, "-test.run=^TestTaskAppCompletionCrash$")
+				cmd.Env = append(os.Environ(), "TEST_TASK_COMPLETION_CHILD=1", "TEST_TASK_CRASH_PHASE="+phase,
+					"TEST_TASK_CRASH_PREFIX="+db.NamingStrategy.(schema.NamingStrategy).TablePrefix,
+					"TEST_TASK_COMPLETION_QUOTA="+strconv.Itoa(actual))
+				output, err := cmd.CombinedOutput()
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, err, &exitErr, "%s", output)
+				require.Equal(t, 23, exitErr.ExitCode(), "%s", output)
+				var persisted model.Task
+				require.NoError(t, db.First(&persisted, task.ID).Error)
+				assert.EqualValues(t, model.TaskStatusInProgress, persisted.Status, "financial commit precedes terminal publication")
+				want := 100
+				if phase == "after_commit" {
+					want = actual
+				}
+				assert.Equal(t, want, persisted.Quota)
+				var wallet model.UserAppWallet
+				require.NoError(t, db.Where("user_id = ? AND app_id = ?", user.Id, 7).First(&wallet).Error)
+				assert.Equal(t, 1000-want, wallet.Quota)
+				assert.Equal(t, want, wallet.UsedQuota)
+				service.RunTaskPollingOnce(context.Background(), nil)
+				service.RunTaskPollingOnce(context.Background(), nil)
+				require.NoError(t, db.First(&persisted, task.ID).Error)
+				wantStatus := model.TaskStatus(model.TaskStatusSuccess)
+				if actual == 0 {
+					wantStatus = model.TaskStatusFailure
+				}
+				assert.Equal(t, wantStatus, persisted.Status)
+				assert.Equal(t, actual, persisted.Quota)
+				require.NoError(t, db.First(&wallet, wallet.Id).Error)
+				assert.Equal(t, 1000-actual, wallet.Quota)
+				assert.Equal(t, actual, wallet.UsedQuota)
+				var logs int64
+				require.NoError(t, db.Model(&model.Log{}).Count(&logs).Error)
+				if phase == "before_commit" {
+					assert.EqualValues(t, 1, logs)
+				} else {
+					assert.Zero(t, logs, "ancillary logs are not crash-atomic with the wallet")
+				}
+			})
+		}
+	}
+}
+
+type taskSubmissionCommitPool struct {
+	gorm.ConnPool
+}
+
+func (pool *taskSubmissionCommitPool) GetDBConn() (*sql.DB, error) {
+	return pool.ConnPool.(*sql.DB), nil
+}
+
+func (pool *taskSubmissionCommitPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	tx, err := pool.ConnPool.(gorm.TxBeginner).BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &taskSubmissionCommitTx{ConnPool: tx, TxCommitter: tx}, nil
+}
+
+type taskSubmissionCommitTx struct {
+	gorm.ConnPool
+	gorm.TxCommitter
+	afterCommit func()
+}
+
+func (tx *taskSubmissionCommitTx) Commit() error {
+	if err := tx.TxCommitter.Commit(); err != nil {
+		return err
+	}
+	if tx.afterCommit != nil {
+		tx.afterCommit()
+	}
+	return nil
+}
+
+func TestTaskAppUsageLifecycle(t *testing.T) {
+	for index, tc := range []struct {
+		name           string
+		action         string
+		streamed       bool
+		prepareFailure bool
+		insertFailure  bool
+		refundFailure  bool
+		ordinary       bool
+		actual         int
+	}{
+		{name: "refund before submit settlement", action: "refund", actual: 100},
+		{name: "downward completion before submit settlement", action: "recalculate", actual: 100},
+		{name: "refund with downward submit adjustment", action: "refund", actual: 60},
+		{name: "insertion failure rolls back usage", insertFailure: true, actual: 100},
+		{name: "preparation failure prevents publication", prepareFailure: true, actual: 100},
+		{name: "stream insertion failure remains billed", insertFailure: true, streamed: true, actual: 100},
+		{name: "stream preparation failure still settles", prepareFailure: true, streamed: true, actual: 100},
+		{name: "failed funding refund leaves unpublished usage rolled back", insertFailure: true, refundFailure: true, actual: 100},
+		{name: "ordinary app settlement unchanged", ordinary: true, actual: 100},
+		{name: "ordinary app downward settlement", ordinary: true, actual: 60},
+		{name: "ordinary app upward settlement", ordinary: true, actual: 140},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, dialect := openTaskDialectDatabase(t, &model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}, &model.UserAppWallet{})
+			oldDB, oldLogDB := model.DB, model.LOG_DB
+			oldMain, oldLog := common.MainDatabaseType(), common.LogDatabaseType()
+			oldRedis, oldMemory, oldBatch, oldConsume, oldExport := common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled
+			model.DB, model.LOG_DB = db, db
+			common.SetDatabaseTypes(dialect, dialect)
+			common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = false, false, false, true, false
+			t.Cleanup(func() {
+				model.DB, model.LOG_DB = oldDB, oldLogDB
+				common.SetDatabaseTypes(oldMain, oldLog)
+				common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled, common.DataExportEnabled = oldRedis, oldMemory, oldBatch, oldConsume, oldExport
+			})
+
+			const initial, reserved, appId = 1000, 100, 7
+			user := model.User{Username: fmt.Sprintf("usage_user_%d", index), AffCode: fmt.Sprintf("usage_aff_%d", index), Quota: initial}
+			require.NoError(t, db.Create(&user).Error)
+			require.NoError(t, db.Create(&model.UserAppWallet{UserId: user.Id, AppId: appId, Quota: initial}).Error)
+			channel := model.Channel{Name: "usage provider", Type: constant.ChannelTypeTaskPlugin}
+			require.NoError(t, db.Create(&channel).Error)
+			c := taskSubmissionTestContext()
+			c.Set("group", "default")
+			info := taskSubmissionRelayInfo(nil)
+			info.UserId, info.AppId = user.Id, appId
+			info.UserGroup = "default"
+			info.IsPlayground, info.ForcePreConsume = true, true
+			info.UserSetting.BillingPreference = "wallet_only"
+			quotaWarnings := false
+			info.UserSetting.QuotaWarningEnabled = &quotaWarnings
+			info.LockedChannel = &channel
+			info.PublicTaskID = model.GenerateTaskID()
+			info.PriceData.Quota = tc.actual
+			require.Nil(t, service.PreConsumeBilling(c, reserved, info))
+			var wallet model.UserAppWallet
+			require.NoError(t, db.Where("user_id = ? AND app_id = ?", user.Id, appId).First(&wallet).Error)
+			assert.Equal(t, initial-reserved, wallet.Quota)
+			assert.Zero(t, wallet.UsedQuota, "reservations alone do not record usage")
+
+			if tc.ordinary {
+				require.NoError(t, info.Billing.Settle(tc.actual))
+				require.NoError(t, info.Billing.Settle(tc.actual))
+				info.Billing.Refund(c)
+				require.NoError(t, db.First(&wallet, wallet.Id).Error)
+				assert.Equal(t, initial-tc.actual, wallet.Quota)
+				assert.Equal(t, tc.actual, wallet.UsedQuota)
+				return
+			}
+
+			pool := &taskSubmissionCommitPool{ConnPool: db.ConnPool}
+			db.ConnPool, db.Statement.ConnPool = pool, pool
+			refundDone := make(chan struct{}, 1)
+			preparationFailed := false
+			require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:billing_failure", func(tx *gorm.DB) {
+				if tx.Statement.Schema == nil || tx.Statement.Schema.Name != "UserAppWallet" {
+					return
+				}
+				values, ok := tx.Statement.Dest.(map[string]any)
+				if !ok {
+					return
+				}
+				if expr, ok := values["used_quota"].(clause.Expr); ok && expr.Vars[0].(int) > 0 && tc.prepareFailure && !preparationFailed {
+					preparationFailed = true
+					tx.AddError(errors.New("injected usage preparation failure"))
+				}
+				if expr, ok := values["quota"].(clause.Expr); ok && expr.SQL == "quota + ?" && tc.refundFailure {
+					tx.AddError(errors.New("injected funding refund failure"))
+				}
+			}))
+			require.NoError(t, db.Callback().Update().After("gorm:commit_or_rollback_transaction").Register("test:refund_done", func(tx *gorm.DB) {
+				if tx.Statement.Schema == nil || tx.Statement.Schema.Name != "UserAppWallet" {
+					return
+				}
+				values, ok := tx.Statement.Dest.(map[string]any)
+				if !ok {
+					return
+				}
+				if expr, ok := values["used_quota"].(clause.Expr); ok && expr.Vars[0].(int) < 0 {
+					refundDone <- struct{}{}
+				} else if expr, ok := values["quota"].(clause.Expr); ok && expr.SQL == "quota + ?" && (tc.prepareFailure || tc.insertFailure || tc.refundFailure) {
+					refundDone <- struct{}{}
+				}
+			}))
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:insert_failure", func(tx *gorm.DB) {
+				if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Task" && tc.insertFailure {
+					tx.AddError(errors.New("injected task insertion failure"))
+				}
+			}))
+			published := false
+			require.NoError(t, db.Callback().Create().After("gorm:commit_or_rollback_transaction").Register("test:early_completion", func(tx *gorm.DB) {
+				if tx.Error != nil || tx.Statement.Schema == nil || tx.Statement.Schema.Name != "Task" {
+					return
+				}
+				commitTx, ok := tx.Statement.ConnPool.(*taskSubmissionCommitTx)
+				require.True(t, ok)
+				commitTx.afterCommit = func() {
+					published = true
+					tasks := model.GetAllUnFinishSyncTasks(10)
+					require.Len(t, tasks, 1, "the poller can see the committed task before submit settlement")
+					require.NoError(t, db.First(&wallet, wallet.Id).Error)
+					assert.Equal(t, tc.actual, wallet.UsedQuota, "initial usage commits with publication")
+					switch tc.action {
+					case "refund":
+						require.True(t, service.RefundTaskQuota(context.Background(), tasks[0], "provider failed"))
+					case "recalculate":
+						service.RecalculateTaskQuota(context.Background(), tasks[0], 40, common.NewMessage("actual usage"))
+					}
+				}
+			}))
+
+			outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				if tc.streamed {
+					_, _ = c.Writer.WriteString("data: {}\n\n")
+				}
+				return &relay.TaskSubmitResult{Platform: "plugin", Quota: tc.actual}, nil
+			})
+			want := tc.actual
+			if tc.prepareFailure || tc.insertFailure {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, "task_insert_failed", taskErr.Code)
+				assert.Nil(t, outcome)
+				assert.False(t, published)
+				if !tc.streamed {
+					select {
+					case <-refundDone:
+					case <-time.After(5 * time.Second):
+						t.Fatal("billing refund did not finish")
+					}
+					info.Billing.Refund(c)
+					if !tc.refundFailure {
+						want = 0
+					}
+				}
+			} else {
+				require.Nil(t, taskErr)
+				require.NotNil(t, outcome)
+				assert.True(t, published)
+				if tc.action == "refund" {
+					want = 0
+				} else if tc.action == "recalculate" {
+					want = 40
+				}
+				require.NoError(t, info.Billing.Settle(tc.actual))
+				info.Billing.Refund(c)
+			}
+			require.NoError(t, db.First(&wallet, wallet.Id).Error)
+			assert.Equal(t, initial-want, wallet.Quota)
+			wantUsage := want
+			if tc.insertFailure && !tc.streamed {
+				wantUsage = 0
+			}
+			assert.Equal(t, wantUsage, wallet.UsedQuota, "only committed net usage remains")
+			var updated model.User
+			require.NoError(t, db.First(&updated, user.Id).Error)
+			assert.Equal(t, initial, updated.Quota, "platform funds are untouched")
+			if tc.streamed {
+				var logs []model.Log
+				require.NoError(t, db.Where("user_id = ?", user.Id).Find(&logs).Error)
+				require.Len(t, logs, 1)
+				assert.Equal(t, tc.actual, logs[0].Quota)
+				assert.False(t, info.Billing.NeedsRefund())
+			}
+		})
+	}
 }

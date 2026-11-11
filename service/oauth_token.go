@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +23,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 )
 
 const (
@@ -58,62 +61,69 @@ type oauthAccessClaims struct {
 	Scope       string `json:"scope"`
 	ClientID    string `json:"client_id"`
 	AuthVersion int64  `json:"uv"`
+	SessionID   string `json:"sid,omitempty"`
+	AuthTime    int64  `json:"auth_time,omitempty"`
 	jwt.RegisteredClaims
 }
 
 var (
-	oauthSigningKeyOnce sync.Once
-	oauthSigningKeyRSA  *rsa.PrivateKey
-	oauthSigningKeyErr  error
+	oauthSigningKeyMutex sync.Mutex
+	oauthSigningKeyRSA   *rsa.PrivateKey
+	oauthSigningKeyDB    *gorm.DB
 )
 
 // oauthSigningKey returns the RSA key used to sign OAuth access and ID tokens.
 // The key is persisted in the options table so JWKS clients can cache it and
-// tokens survive restarts. When the database is unavailable (for example in
-// unit tests) an in-memory key is used instead.
+// tokens survive restarts. Failed initialization is not cached: endpoints fail
+// closed until a persisted key can be read, and a later request may retry.
 func oauthSigningKey() (*rsa.PrivateKey, error) {
-	oauthSigningKeyOnce.Do(func() {
-		oauthSigningKeyRSA, oauthSigningKeyErr = loadOrCreateOAuthSigningKey()
-	})
-	return oauthSigningKeyRSA, oauthSigningKeyErr
+	oauthSigningKeyMutex.Lock()
+	defer oauthSigningKeyMutex.Unlock()
+	if oauthSigningKeyRSA != nil && oauthSigningKeyDB == model.DB {
+		return oauthSigningKeyRSA, nil
+	}
+	key, err := loadOrCreateOAuthSigningKey()
+	if err != nil {
+		return nil, err
+	}
+	oauthSigningKeyRSA, oauthSigningKeyDB = key, model.DB
+	return key, nil
 }
 
 func loadOrCreateOAuthSigningKey() (*rsa.PrivateKey, error) {
-	if model.DB != nil {
-		var option model.Option
-		err := model.DB.Where(&model.Option{Key: oauthSigningKeyOption}).First(&option).Error
-		switch {
-		case err == nil:
-			if key, parseErr := decodeOAuthPrivateKey(option.Value); parseErr == nil {
-				return key, nil
-			}
-		case !errors.Is(err, gorm.ErrRecordNotFound):
-			// Missing table or a transient read error: fall back to an in-memory
-			// key so OAuth endpoints keep working.
-			return generateOAuthPrivateKey()
-		}
-
-		key, genErr := generateOAuthPrivateKey()
-		if genErr != nil {
-			return nil, genErr
-		}
-		pemText, encErr := encodeOAuthPrivateKey(key)
-		if encErr != nil {
-			return key, nil
-		}
-		if createErr := model.DB.Create(&model.Option{Key: oauthSigningKeyOption, Value: pemText}).Error; createErr == nil {
-			return key, nil
-		}
-		// Another instance stored the key first; use that one.
-		var existing model.Option
-		if readErr := model.DB.Where(&model.Option{Key: oauthSigningKeyOption}).First(&existing).Error; readErr == nil {
-			if existingKey, parseErr := decodeOAuthPrivateKey(existing.Value); parseErr == nil {
-				return existingKey, nil
-			}
-		}
-		return key, nil
+	if model.DB == nil {
+		return nil, errors.New("oauth signing key database is unavailable")
 	}
-	return generateOAuthPrivateKey()
+	// Failed INSERT tracing can otherwise include the private PEM as SQL data.
+	// Suppress SQL logging only for this secret-bearing initialization path.
+	db := model.DB.Session(&gorm.Session{Logger: logger.Discard})
+	var option model.Option
+	err := db.Where(&model.Option{Key: oauthSigningKeyOption}).First(&option).Error
+	if err == nil {
+		// Corruption must not silently replace the key used by other replicas.
+		return decodeOAuthPrivateKey(option.Value)
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	key, err := generateOAuthPrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	pemText, err := encodeOAuthPrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	// Concurrent replicas race only on insertion, never overwrite. Even the
+	// winner reads back the shared persisted key before signing or advertising it.
+	if err := db.Clauses(clause.OnConflict{DoNothing: true}).
+		Create(&model.Option{Key: oauthSigningKeyOption, Value: pemText}).Error; err != nil {
+		return nil, err
+	}
+	if err := db.Where(&model.Option{Key: oauthSigningKeyOption}).First(&option).Error; err != nil {
+		return nil, err
+	}
+	return decodeOAuthPrivateKey(option.Value)
 }
 
 func generateOAuthPrivateKey() (*rsa.PrivateKey, error) {
@@ -138,7 +148,10 @@ func decodeOAuthPrivateKey(pemText string) (*rsa.PrivateKey, error) {
 		return nil, err
 	}
 	key, ok := parsed.(*rsa.PrivateKey)
-	if !ok {
+	if !ok || key.N.BitLen() < 2048 {
+		return nil, ErrOAuthTokenInvalid
+	}
+	if err := key.Validate(); err != nil {
 		return nil, ErrOAuthTokenInvalid
 	}
 	return key, nil
@@ -191,11 +204,27 @@ func signOAuthJWT(claims jwt.Claims) (string, error) {
 // app, and scope. The token carries the user's auth version so that logging
 // out or changing credentials invalidates it.
 func IssueOAuthAccessToken(userID int, clientID, scope string) (string, int64, error) {
-	if userID <= 0 || clientID == "" {
+	user, err := model.GetUserById(userID, true)
+	if err != nil || user.Status != common.UserStatusEnabled {
 		return "", 0, ErrOAuthTokenInvalid
 	}
-	user, err := model.GetUserById(userID, true)
-	if err != nil {
+	return issueOAuthAccessToken(userID, clientID, scope, user.AuthVersion, "", 0)
+}
+
+// IssueOAuthAccessTokenForGrant never upgrades a redeemed grant to the user's
+// current generation. Session-bound tokens remain invalid after concurrent logout.
+func IssueOAuthAccessTokenForGrant(grant *model.OAuthRefreshToken, clientID string) (string, int64, error) {
+	if grant == nil {
+		return "", 0, ErrOAuthTokenInvalid
+	}
+	if err := model.ValidateOAuthGrantSession(grant.UserID, grant.SessionID, grant.AuthVersion, grant.AuthTime); err != nil {
+		return "", 0, ErrOAuthTokenInvalid
+	}
+	return issueOAuthAccessToken(grant.UserID, clientID, grant.Scope, grant.AuthVersion, grant.SessionID, grant.AuthTime)
+}
+
+func issueOAuthAccessToken(userID int, clientID, scope string, authVersion int64, sid string, authTime int64) (string, int64, error) {
+	if userID <= 0 || clientID == "" || authVersion <= 0 {
 		return "", 0, ErrOAuthTokenInvalid
 	}
 	now := time.Now()
@@ -204,7 +233,9 @@ func IssueOAuthAccessToken(userID int, clientID, scope string) (string, int64, e
 		TokenUse:    oauthAccessTokenUse,
 		Scope:       scope,
 		ClientID:    clientID,
-		AuthVersion: user.AuthVersion,
+		AuthVersion: authVersion,
+		SessionID:   sid,
+		AuthTime:    authTime,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    OAuthIssuer(),
 			Subject:   strconv.Itoa(userID),
@@ -223,15 +254,24 @@ func IssueOAuthAccessToken(userID int, clientID, scope string) (string, int64, e
 // ID, client ID, scope, and auth version. It checks the signature, expiry, and
 // token use.
 func ParseOAuthAccessToken(raw string) (userID int, clientID, scope string, authVersion int64, err error) {
+	claims, err := parseOAuthAccessClaims(raw)
+	if err != nil {
+		return 0, "", "", 0, err
+	}
+	userID, err = strconv.Atoi(claims.Subject)
+	if err != nil || userID <= 0 {
+		return 0, "", "", 0, ErrOAuthTokenInvalid
+	}
+	return userID, claims.ClientID, claims.Scope, claims.AuthVersion, nil
+}
+
+func parseOAuthAccessClaims(raw string) (*oauthAccessClaims, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return 0, "", "", 0, ErrOAuthTokenInvalid
+		return nil, ErrOAuthTokenInvalid
 	}
 	claims := &oauthAccessClaims{}
 	parsed, err := jwt.ParseWithClaims(raw, claims, func(token *jwt.Token) (any, error) {
-		if token.Method.Alg() != jwt.SigningMethodRS256.Alg() {
-			return nil, fmt.Errorf("%w: unexpected signing method", ErrOAuthTokenInvalid)
-		}
 		key, err := oauthSigningKey()
 		if err != nil {
 			return nil, ErrOAuthTokenInvalid
@@ -240,18 +280,15 @@ func ParseOAuthAccessToken(raw string) (userID int, clientID, scope string, auth
 	}, jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}), jwt.WithIssuer(OAuthIssuer()), jwt.WithExpirationRequired(), jwt.WithIssuedAt(), jwt.WithLeeway(5*time.Second))
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return 0, "", "", 0, ErrOAuthTokenExpired
+			return nil, ErrOAuthTokenExpired
 		}
-		return 0, "", "", 0, fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
 	}
-	if !parsed.Valid || claims.TokenUse != oauthAccessTokenUse || claims.ClientID == "" {
-		return 0, "", "", 0, ErrOAuthTokenInvalid
+	if !parsed.Valid || claims.TokenUse != oauthAccessTokenUse || claims.ClientID == "" ||
+		claims.AuthVersion <= 0 || !slices.Contains(claims.Audience, claims.ClientID) {
+		return nil, ErrOAuthTokenInvalid
 	}
-	userID, err = strconv.Atoi(claims.Subject)
-	if err != nil || userID <= 0 {
-		return 0, "", "", 0, ErrOAuthTokenInvalid
-	}
-	return userID, claims.ClientID, claims.Scope, claims.AuthVersion, nil
+	return claims, nil
 }
 
 // IsOAuthAccessToken reports whether the raw token carries the OAuth issuer and
@@ -272,6 +309,7 @@ func IsOAuthAccessToken(raw string) bool {
 
 // idTokenClaims is the OIDC ID token claims structure.
 type idTokenClaims struct {
+	TokenUse string `json:"token_use"`
 	AuthTime int64  `json:"auth_time"`
 	Nonce    string `json:"nonce,omitempty"`
 	jwt.RegisteredClaims
@@ -279,12 +317,13 @@ type idTokenClaims struct {
 
 // IssueOAuthIDToken signs an OIDC ID token for the given user.
 func IssueOAuthIDToken(userID int, clientID, nonce string, authTime int64) (string, int64, error) {
-	if userID <= 0 || clientID == "" {
+	if userID <= 0 || clientID == "" || authTime <= 0 || authTime > time.Now().Unix() {
 		return "", 0, ErrOAuthTokenInvalid
 	}
 	now := time.Now()
 	expiresAt := now.Add(OAuthIDTokenTTL)
 	claims := idTokenClaims{
+		TokenUse: oauthIDTokenUse,
 		AuthTime: authTime,
 		Nonce:    nonce,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -415,7 +454,7 @@ func ParseOAuthIDToken(raw, expectedClientID string) (userID int, clientID strin
 		}
 		return 0, "", fmt.Errorf("%w: %v", ErrOAuthTokenInvalid, err)
 	}
-	if !parsed.Valid || len(claims.Audience) == 0 {
+	if !parsed.Valid || claims.TokenUse != oauthIDTokenUse || len(claims.Audience) == 0 {
 		return 0, "", ErrOAuthTokenInvalid
 	}
 	userID, err = strconv.Atoi(claims.Subject)
@@ -436,20 +475,29 @@ func ParseOAuthIDToken(raw, expectedClientID string) (userID int, clientID strin
 // invalidates the token immediately, so disabling or deleting an app revokes
 // its unexpired access tokens without waiting for them to expire.
 func ValidateOAuthAccessToken(raw string) (*model.User, string, error) {
-	userID, clientID, scope, authVersion, err := ParseOAuthAccessToken(raw)
+	claims, err := parseOAuthAccessClaims(raw)
 	if err != nil {
 		return nil, "", err
+	}
+	userID, err := strconv.Atoi(claims.Subject)
+	if err != nil || userID <= 0 {
+		return nil, "", ErrOAuthTokenInvalid
+	}
+	if claims.SessionID != "" {
+		if err := model.ValidateOAuthGrantSession(userID, claims.SessionID, claims.AuthVersion, claims.AuthTime); err != nil {
+			return nil, "", ErrOAuthTokenInvalid
+		}
 	}
 	user, err := model.GetUserById(userID, true)
 	if err != nil {
 		return nil, "", ErrOAuthTokenInvalid
 	}
-	if user.Status != common.UserStatusEnabled || user.AuthVersion != authVersion {
+	if user.Status != common.UserStatusEnabled || user.AuthVersion != claims.AuthVersion {
 		return nil, "", ErrOAuthTokenInvalid
 	}
-	app, err := model.GetOAuthAppByClientID(clientID)
+	app, err := model.GetOAuthAppByClientID(claims.ClientID)
 	if err != nil || !app.IsEnabled() {
 		return nil, "", ErrOAuthTokenInvalid
 	}
-	return user, scope, nil
+	return user, claims.Scope, nil
 }

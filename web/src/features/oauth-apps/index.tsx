@@ -35,6 +35,9 @@ export function OAuthAppsPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [editApp, setEditApp] = useState<OAuthApp | null>(null)
+  const [secretRecoveryApp, setSecretRecoveryApp] = useState<OAuthApp | null>(
+    null
+  )
   const [secretApp, setSecretApp] = useState<{
     name: string
     secret: string
@@ -70,18 +73,57 @@ export function OAuthAppsPage() {
     onError: (error) => handleServerError(error, t('Failed to create app')),
   })
 
+  const rotateMutation = useMutation({
+    mutationFn: async (variables: {
+      app: OAuthApp
+      finishUpdate?: boolean
+    }) => {
+      const res = await rotateOAuthAppSecret(variables.app.id)
+      if (!res.client_secret) throw new Error(t('Failed to rotate secret'))
+      return res
+    },
+    onSuccess: (res, variables) => {
+      setSecretApp({
+        name: variables.app.name,
+        secret: res.client_secret,
+        publicClient: false,
+      })
+      if (variables.finishUpdate) {
+        toast.success(t('App updated'))
+        setEditApp(null)
+        setSecretRecoveryApp(null)
+      }
+    },
+    onError: (error) => handleServerError(error, t('Failed to rotate secret')),
+  })
+
   const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      data,
-    }: {
-      id: number
+    mutationFn: (variables: {
+      app: OAuthApp
       data: Parameters<typeof updateOAuthApp>[1]
-    }) => updateOAuthApp(id, data),
-    onSuccess: () => {
+    }) => updateOAuthApp(variables.app.id, variables.data),
+    onSuccess: async (res, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['oauth-apps'] })
+      if (
+        variables.app.public_client &&
+        variables.data.public_client === false
+      ) {
+        const savedApp = res.data ?? { ...variables.app, ...variables.data }
+        setEditApp(savedApp)
+        try {
+          await rotateMutation.mutateAsync({
+            app: savedApp,
+            finishUpdate: true,
+          })
+        } catch {
+          // The update is already persisted. Do not claim full success or
+          // roll back blindly; keep the saved client available for rotation.
+          setSecretRecoveryApp(savedApp)
+        }
+        return
+      }
       toast.success(t('App updated'))
       setEditApp(null)
-      queryClient.invalidateQueries({ queryKey: ['oauth-apps'] })
     },
     onError: (error) => handleServerError(error, t('Failed to update app')),
   })
@@ -93,19 +135,6 @@ export function OAuthAppsPage() {
       queryClient.invalidateQueries({ queryKey: ['oauth-apps'] })
     },
     onError: (error) => handleServerError(error, t('Failed to delete app')),
-  })
-
-  const rotateMutation = useMutation({
-    mutationFn: rotateOAuthAppSecret,
-    onSuccess: (res, id) => {
-      const app = apps?.find((a) => a.id === id)
-      setSecretApp({
-        name: app?.name ?? '',
-        secret: res.client_secret,
-        publicClient: app?.public_client ?? false,
-      })
-    },
-    onError: (error) => handleServerError(error, t('Failed to rotate secret')),
   })
 
   return (
@@ -204,8 +233,13 @@ export function OAuthAppsPage() {
                       <Button
                         variant='outline'
                         size='sm'
-                        disabled={updateMutation.isPending}
-                        onClick={() => setEditApp(app)}
+                        disabled={
+                          updateMutation.isPending || rotateMutation.isPending
+                        }
+                        onClick={() => {
+                          setSecretRecoveryApp(null)
+                          setEditApp(app)
+                        }}
                       >
                         {t('Edit')}
                       </Button>
@@ -213,8 +247,10 @@ export function OAuthAppsPage() {
                         <Button
                           variant='outline'
                           size='sm'
-                          disabled={rotateMutation.isPending}
-                          onClick={() => rotateMutation.mutate(app.id)}
+                          disabled={
+                            rotateMutation.isPending || updateMutation.isPending
+                          }
+                          onClick={() => rotateMutation.mutate({ app })}
                         >
                           {t('Rotate Secret')}
                         </Button>
@@ -254,9 +290,22 @@ export function OAuthAppsPage() {
       {editApp && (
         <EditAppDialog
           app={editApp}
-          onOpenChange={(open) => !open && setEditApp(null)}
-          onSubmit={(data) => updateMutation.mutate({ id: editApp.id, data })}
-          loading={updateMutation.isPending}
+          onOpenChange={(open) => {
+            if (
+              !open &&
+              !updateMutation.isPending &&
+              !rotateMutation.isPending
+            ) {
+              setEditApp(null)
+              setSecretRecoveryApp(null)
+            }
+          }}
+          onSubmit={(data) => updateMutation.mutate({ app: editApp, data })}
+          loading={updateMutation.isPending || rotateMutation.isPending}
+          secretRecovery={secretRecoveryApp?.id === editApp.id}
+          onRetrySecret={() =>
+            rotateMutation.mutate({ app: editApp, finishUpdate: true })
+          }
         />
       )}
 
@@ -424,12 +473,12 @@ function AppForm({
             <img
               src={logoUrl}
               alt=''
-              className='size-12 shrink-0 rounded-md border bg-background object-contain'
+              className='bg-background size-12 shrink-0 rounded-md border object-contain'
             />
           ) : (
             <div
               aria-hidden='true'
-              className='flex size-12 shrink-0 items-center justify-center rounded-md border bg-muted text-lg font-semibold'
+              className='bg-muted flex size-12 shrink-0 items-center justify-center rounded-md border text-lg font-semibold'
             >
               {(name || '?').slice(0, 1).toUpperCase()}
             </div>
@@ -603,11 +652,15 @@ function EditAppDialog({
   onOpenChange,
   onSubmit,
   loading,
+  secretRecovery,
+  onRetrySecret,
 }: {
   app: OAuthApp
   onOpenChange: (open: boolean) => void
   onSubmit: (data: AppFormData) => void
   loading: boolean
+  secretRecovery: boolean
+  onRetrySecret: () => void
 }) {
   const { t } = useTranslation()
   return (
@@ -616,19 +669,38 @@ function EditAppDialog({
         <DialogHeader>
           <DialogTitle>{t('Edit OAuth Application')}</DialogTitle>
         </DialogHeader>
-        <AppForm
-          defaultValues={{
-            name: app.name,
-            logo_url: app.logo_url,
-            redirect_uris: app.redirect_uris,
-            post_logout_redirect_uris: app.post_logout_redirect_uris,
-            scopes: app.scopes,
-            public_client: app.public_client,
-          }}
-          onSubmit={onSubmit}
-          submitLabel={t('Save')}
-          loading={loading}
-        />
+        {secretRecovery ? (
+          <ErrorState
+            title={t('Failed to rotate secret')}
+            description={t(
+              'App saved, but no client secret was issued. Rotate the secret before using this confidential client.'
+            )}
+            action={
+              <Button
+                variant='outline'
+                size='sm'
+                disabled={loading}
+                onClick={onRetrySecret}
+              >
+                {t('Retry')}
+              </Button>
+            }
+          />
+        ) : (
+          <AppForm
+            defaultValues={{
+              name: app.name,
+              logo_url: app.logo_url,
+              redirect_uris: app.redirect_uris,
+              post_logout_redirect_uris: app.post_logout_redirect_uris,
+              scopes: app.scopes,
+              public_client: app.public_client,
+            }}
+            onSubmit={onSubmit}
+            submitLabel={t('Save')}
+            loading={loading}
+          />
+        )}
       </DialogContent>
     </Dialog>
   )

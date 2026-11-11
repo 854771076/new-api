@@ -136,15 +136,6 @@ func AdminCreateAppProduct(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	// The model column defaults enabled to true, so GORM omits a false value on
-	// insert. Persist an explicit "create disabled" choice with a map update.
-	if !product.Enabled {
-		if err := model.DB.Model(&model.AppProduct{}).Where("id = ?", product.Id).
-			Update("enabled", false).Error; err != nil {
-			common.ApiError(c, err)
-			return
-		}
-	}
 	common.ApiSuccess(c, product)
 }
 
@@ -181,8 +172,7 @@ func AdminUpdateAppProduct(c *gin.Context) {
 		common.ApiError(c, model.ErrAppProductNotFound)
 		return
 	}
-	// enabled is written through the map on purpose: the struct field has a
-	// gorm default, so Updates(struct) would silently skip false.
+	// Map updates preserve explicit false and other zero-valued fields.
 	updateMap := map[string]any{
 		"app_id":                   product.AppId,
 		"name":                     product.Name,
@@ -310,6 +300,9 @@ type AppProductCheckoutResult struct {
 // session failure can be recorded as a failed order instead of leaving an
 // untraceable payment.
 func CreateAppProductWaffoPancakeCheckout(ctx context.Context, user *model.User, product *model.AppProduct) (*AppProductCheckoutResult, error) {
+	if err := paymentComplianceError(); err != nil {
+		return nil, err
+	}
 	if user == nil {
 		return nil, common.NewMessage("User does not exist")
 	}

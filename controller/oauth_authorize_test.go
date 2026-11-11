@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -59,6 +60,11 @@ func setupOAuthAuthorizeTestEnv(t *testing.T) *oauthAuthorizeTestEnv {
 		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1,
 	}
 	require.NoError(t, db.Create(user).Error)
+	require.NoError(t, db.Create(&model.UserSession{
+		SID: "session-1", UserID: user.Id, UserAuthVersion: 1, Version: 1,
+		Status: model.UserSessionStatusActive, RefreshHash: "unused", LoginMethod: "password",
+		CreatedAt: 1700000000, LastActiveAt: time.Now().Unix(), ExpiresAt: 9999999999,
+	}).Error)
 
 	app := &model.OAuthApp{
 		Name: "Consent Test App", ClientID: model.GenerateOAuthClientID(),
@@ -81,7 +87,7 @@ func (env *oauthAuthorizeTestEnv) consentRequest(t *testing.T, scope, csrfToken 
 		"redirect_uri":          {"https://app.example.com/callback"},
 		"scope":                 {scope},
 		"state":                 {"state-123"},
-		"code_challenge":        {"challenge-123"},
+		"code_challenge":        {"E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"},
 		"code_challenge_method": {"S256"},
 		"csrf_token":            {csrfToken},
 		"consent":               {"allow"},
@@ -111,6 +117,129 @@ func assertNoOAuthGrant(t *testing.T) {
 	require.NoError(t, model.DB.Model(&model.OAuthAuthorizationCode{}).Count(&codes).Error)
 	assert.Zero(t, consents)
 	assert.Zero(t, codes)
+}
+
+func TestOAuthAuthorizeRejectsUnsupportedFreshnessParameters(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		for _, parameter := range []string{"prompt", "max_age"} {
+			for _, value := range []string{"", "0", "login"} {
+				t.Run(method+"/"+parameter+"/"+value, func(t *testing.T) {
+					form := url.Values{"response_type": {"code"}, parameter: {value}}
+					var c *gin.Context
+					if method == http.MethodPost {
+						c, _ = newOAuthFormContext(t, "/oauth/authorize", form)
+					} else {
+						c, _ = gin.CreateTestContext(httptest.NewRecorder())
+						c.Request = httptest.NewRequest(method, "/oauth/authorize?"+form.Encode(), nil)
+					}
+					_, err := parseOAuthAuthorizeRequest(c)
+					require.EqualError(t, err, "prompt and max_age are not supported")
+				})
+			}
+		}
+	}
+}
+
+func TestOAuthTokenLifecyclePreservesAuthenticationTime(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	csrf := service.IssueOAuthConsentCSRFToken(env.sessionID, env.app.Id)
+	request := env.consentRequest(t, "openid profile", csrf)
+	request.Header.Set("Origin", "http://gateway.example")
+	c, recorder := env.newConsentContext(request)
+	OAuthAuthorizeConsent(c)
+	c.Writer.WriteHeaderNow()
+	require.Equal(t, http.StatusFound, recorder.Code)
+	location, err := url.Parse(recorder.Header().Get("Location"))
+	require.NoError(t, err)
+	rawCode := location.Query().Get("code")
+	require.NotEmpty(t, rawCode)
+	type tokenResponse struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
+	}
+	exchange := func(form url.Values) tokenResponse {
+		form.Set("client_id", env.app.ClientID)
+		form.Set("client_secret", "test-secret")
+		c, recorder := newOAuthFormContext(t, "/oauth/token", form)
+		OAuthToken(c)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+		assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+		var response tokenResponse
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		_, _, err := service.ParseOAuthIDToken(response.IDToken, env.app.ClientID)
+		require.NoError(t, err)
+		claims := jwt.MapClaims{}
+		_, _, err = jwt.NewParser().ParseUnverified(response.IDToken, claims)
+		require.NoError(t, err)
+		assert.Equal(t, float64(1700000000), claims["auth_time"], "ID token must not fabricate a fresh authentication")
+		grant, err := model.GetOAuthRefreshTokenByHash(model.OAuthRefreshTokenHash(response.RefreshToken))
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), grant.AuthVersion)
+		assert.Equal(t, int64(1700000000), grant.AuthTime)
+		_, _, err = service.ValidateOAuthAccessToken(response.AccessToken)
+		require.NoError(t, err)
+		return response
+	}
+	response := exchange(url.Values{
+		"grant_type": {"authorization_code"}, "code": {rawCode},
+		"redirect_uri":  {"https://app.example.com/callback"},
+		"code_verifier": {"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"},
+	})
+	response = exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {response.RefreshToken}})
+	response = exchange(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {response.RefreshToken}})
+	revoked, err := model.RevokeUserSession(env.user.Id, env.sessionID, "logout")
+	require.NoError(t, err)
+	require.True(t, revoked)
+	_, _, err = service.ValidateOAuthAccessToken(response.AccessToken)
+	require.ErrorIs(t, err, service.ErrOAuthTokenInvalid)
+	c, recorder = newOAuthFormContext(t, "/oauth/token", url.Values{
+		"client_id": {env.app.ClientID}, "client_secret": {"test-secret"},
+		"grant_type": {"refresh_token"}, "refresh_token": {response.RefreshToken},
+	})
+	OAuthToken(c)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), "invalid_grant")
+}
+
+func TestOAuthTokenKeyFailureDoesNotConsumeGrants(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	code := &model.OAuthAuthorizationCode{
+		CodeHash: model.OAuthCodeHash("key-retry-code"), AppID: env.app.Id, UserID: env.user.Id,
+		SessionID: env.sessionID, AuthVersion: 1, Scope: "openid", RedirectURI: "https://app.example.com/callback",
+		CodeChallenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", CodeChallengeMethod: model.OAuthPKCEMethodS256,
+		ExpiresAt: time.Now().Add(time.Minute).Unix(),
+	}
+	require.NoError(t, model.CreateOAuthAuthorizationCode(code))
+	refresh := &model.OAuthRefreshToken{TokenHash: model.OAuthRefreshTokenHash("key-retry-refresh"), AppID: env.app.Id,
+		UserID: env.user.Id, SessionID: env.sessionID, AuthVersion: 1, AuthTime: code.AuthTime, Scope: "openid", ExpiresAt: time.Now().Add(time.Hour).Unix()}
+	require.NoError(t, model.CreateOAuthRefreshToken(refresh))
+	forms := []url.Values{
+		{"grant_type": {"authorization_code"}, "code": {"key-retry-code"}, "redirect_uri": {code.RedirectURI},
+			"code_verifier": {"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"}},
+		{"grant_type": {"refresh_token"}, "refresh_token": {"key-retry-refresh"}},
+	}
+	require.NoError(t, model.DB.Migrator().DropTable(&model.Option{}))
+	for _, form := range forms {
+		form.Set("client_id", env.app.ClientID)
+		form.Set("client_secret", "test-secret")
+		c, recorder := newOAuthFormContext(t, "/oauth/token", form)
+		OAuthToken(c)
+		require.Equal(t, http.StatusInternalServerError, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "server_error")
+	}
+	storedCode, err := model.GetOAuthAuthorizationCodeByHash(code.CodeHash)
+	require.NoError(t, err)
+	assert.Zero(t, storedCode.ConsumedAt)
+	storedRefresh, err := model.GetOAuthRefreshTokenByHash(refresh.TokenHash)
+	require.NoError(t, err)
+	assert.Zero(t, storedRefresh.RevokedAt)
+	require.NoError(t, model.DB.AutoMigrate(&model.Option{}))
+	for _, form := range forms {
+		c, recorder := newOAuthFormContext(t, "/oauth/token", form)
+		OAuthToken(c)
+		require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	}
 }
 
 func TestOAuthAuthorizeConsentRejectsEscalatedScope(t *testing.T) {
@@ -241,12 +370,14 @@ func TestOAuthLogoutDoesNotTrustUnverifiedIDTokenHint(t *testing.T) {
 	env := setupOAuthAuthorizeTestEnv(t)
 	rawRefreshToken := "refresh-token-forged-hint"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     env.app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       env.app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	gin.SetMode(gin.TestMode)
@@ -266,12 +397,14 @@ func TestOAuthLogoutRevokesWithVerifiedIDTokenHint(t *testing.T) {
 	env := setupOAuthAuthorizeTestEnv(t)
 	rawRefreshToken := "refresh-token-verified-hint"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     env.app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       env.app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 	idToken, _, err := service.IssueOAuthIDToken(env.user.Id, env.app.ClientID, "", time.Now().Unix())
 	require.NoError(t, err)
@@ -294,12 +427,14 @@ func TestOAuthLogoutClientAuthRequiresSessionIdentity(t *testing.T) {
 	env := setupOAuthAuthorizeTestEnv(t)
 	rawRefreshToken := "refresh-token-client-auth"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     env.app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       env.app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	tests := []struct {
@@ -406,12 +541,14 @@ func TestDeleteOAuthAppEvictsCacheAndRejectsAccessToken(t *testing.T) {
 
 	rawRefreshToken := "refresh-token-deleted-app"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     env.app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       env.app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	gin.SetMode(gin.TestMode)
@@ -448,12 +585,14 @@ func TestUpdateOAuthAppDisableEvictsCacheAndRevokesRefreshTokens(t *testing.T) {
 
 	rawRefreshToken := "refresh-token-disabled-app"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     env.app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       env.app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	gin.SetMode(gin.TestMode)
@@ -557,12 +696,14 @@ func TestOAuthTokenPublicClientRefreshRotatesWithoutSecret(t *testing.T) {
 
 	rawRefreshToken := "public-refresh-token"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	c, recorder := newOAuthFormContext(t, "/oauth/token", url.Values{
@@ -655,12 +796,14 @@ func TestOAuthRevokePublicClientWithoutSecret(t *testing.T) {
 
 	rawRefreshToken := "public-revoke-token"
 	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
-		TokenHash: model.OAuthRefreshTokenHash(rawRefreshToken),
-		AppID:     app.Id,
-		UserID:    env.user.Id,
-		SessionID: env.sessionID,
-		Scope:     "openid",
-		ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		TokenHash:   model.OAuthRefreshTokenHash(rawRefreshToken),
+		AppID:       app.Id,
+		UserID:      env.user.Id,
+		SessionID:   env.sessionID,
+		AuthVersion: 1,
+		AuthTime:    1700000000,
+		Scope:       "openid",
+		ExpiresAt:   time.Now().Add(time.Hour).Unix(),
 	}))
 
 	c, recorder := newOAuthFormContext(t, "/oauth/revoke", url.Values{

@@ -113,14 +113,16 @@ func taskIsSubscription(task *model.Task) bool {
 }
 
 // taskAdjustFunding 调整任务的资金来源（钱包或订阅），delta > 0 表示扣费，delta < 0 表示退还。
+// 钱包任务优先回落，App 任务由 WalletFunding 路由到 App 钱包。
 func taskAdjustFunding(task *model.Task, delta int) error {
 	if taskIsSubscription(task) {
 		return model.PostConsumeUserSubscriptionDelta(task.PrivateData.SubscriptionId, int64(delta))
 	}
-	if delta > 0 {
-		return model.DecreaseUserQuota(task.UserId, delta, false)
-	}
-	return model.IncreaseUserQuota(task.UserId, -delta, false)
+	return (&WalletFunding{userId: task.UserId, appId: task.AppId}).Settle(delta)
+}
+
+func taskIsAppWallet(task *model.Task) bool {
+	return task.AppId > 0 && !taskIsSubscription(task)
 }
 
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
@@ -262,14 +264,24 @@ func taskModelName(task *model.Task) string {
 // 返回资金来源是否已成功退还；失败时保留 quota，供显式重试或人工对账。
 func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool {
 	quota := task.Quota
-	if quota == 0 {
-		return true
-	}
-
-	// 1. 退还资金来源（钱包或订阅）
-	if err := taskAdjustFunding(task, -quota); err != nil {
-		logger.LogWarn(ctx, common.LogText("failed to refund the funding source, task %s: %s", task.TaskID, err.Error()))
-		return false
+	if taskIsAppWallet(task) {
+		delta, err := task.SettleAppWalletQuota(ctx, 0)
+		if err != nil {
+			logger.LogWarn(ctx, common.LogText("failed to refund the funding source, task %s: %s", task.TaskID, err.Error()))
+			return false
+		}
+		quota = -delta
+		if quota == 0 {
+			return true
+		}
+	} else {
+		if quota == 0 {
+			return true
+		}
+		if err := taskAdjustFunding(task, -quota); err != nil {
+			logger.LogWarn(ctx, common.LogText("failed to refund the funding source, task %s: %s", task.TaskID, err.Error()))
+			return false
+		}
 	}
 
 	// 2. 退还令牌额度
@@ -296,9 +308,11 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 
 	// 5. 资金退款完成后再清除持久化标记。
 	// 回写失败必须显式告警，避免漏掉潜在的重复退款风险。
-	task.Quota = 0
-	if err := task.UpdateQuota(); err != nil {
-		logger.LogError(ctx, common.LogText("refund succeeded but clearing the task quota failed, task %s: %s", task.TaskID, err.Error()))
+	if !taskIsAppWallet(task) {
+		task.Quota = 0
+		if err := task.UpdateQuota(); err != nil {
+			logger.LogError(ctx, common.LogText("refund succeeded but clearing the task quota failed, task %s: %s", task.TaskID, err.Error()))
+		}
 	}
 	return true
 }
@@ -307,17 +321,26 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 // actualQuota 是任务完成后的实际应扣额度，与预扣额度 (task.Quota) 做差额结算。
 // reason 写入日志内容（例如按 token 重算或 adaptor 调整）。
 // clamps 可选：若计算 actualQuota 时发生额度饱和，将其记入日志 admin_info（仅管理员可见）。
-func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) {
+func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int, reason *common.Message, clamps ...*common.QuotaClamp) bool {
 	if actualQuota < 0 {
-		return
+		return false
 	}
 	preConsumedQuota := task.Quota
 	quotaDelta := actualQuota - preConsumedQuota
+	if taskIsAppWallet(task) {
+		var err error
+		quotaDelta, err = task.SettleAppWalletQuota(ctx, actualQuota)
+		if err != nil {
+			logger.LogError(ctx, common.LogText("failed to adjust funding for the difference, task %s: %s", task.TaskID, err.Error()))
+			return false
+		}
+		preConsumedQuota = actualQuota - quotaDelta
+	}
 
 	if quotaDelta == 0 {
 		logger.LogInfo(ctx, common.LogText("task %s pre-consumed quota matches the actual quota (%s, %s)",
 			task.TaskID, logger.LogQuota(actualQuota), reason.Error()))
-		return
+		return true
 	}
 
 	logger.LogInfo(ctx, common.LogText("task %s settles the difference: delta=%s (actual %s, pre-consumed %s, %s)",
@@ -328,18 +351,20 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		reason.Error(),
 	))
 
-	// 调整资金来源
-	if err := taskAdjustFunding(task, quotaDelta); err != nil {
-		logger.LogError(ctx, common.LogText("failed to adjust funding for the difference, task %s: %s", task.TaskID, err.Error()))
-		return
+	if !taskIsAppWallet(task) {
+		if err := taskAdjustFunding(task, quotaDelta); err != nil {
+			logger.LogError(ctx, common.LogText("failed to adjust funding for the difference, task %s: %s", task.TaskID, err.Error()))
+			return false
+		}
 	}
 
-	// 调整令牌额度
+	// These ancillary counters/logs are best-effort, only for the financial winner.
 	taskAdjustTokenQuota(ctx, task, quotaDelta)
-
-	task.Quota = actualQuota
-	if err := task.UpdateQuota(); err != nil {
-		logger.LogError(ctx, common.LogText("failed to write back the settled task quota, task %s: %s", task.TaskID, err.Error()))
+	if !taskIsAppWallet(task) {
+		task.Quota = actualQuota
+		if err := task.UpdateQuota(); err != nil {
+			logger.LogError(ctx, common.LogText("failed to write back the settled task quota, task %s: %s", task.TaskID, err.Error()))
+		}
 	}
 
 	// 提交阶段已经累计过一次请求；结算阶段只调整最终用量。
@@ -374,14 +399,21 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		Other:     other,
 		NodeName:  task.PrivateData.NodeName,
 	})
+	return true
 }
 
 // RecalculateTaskQuotaByTokens 根据实际 token 消耗重新计费（异步差额结算）。
 // 当任务成功且返回了 totalTokens 时，根据模型倍率和分组倍率重新计算实际扣费额度，
 // 与预扣费的差额进行补扣或退还。支持钱包和订阅计费来源。
 func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTokens int) bool {
+	handled, success := recalculateTaskQuotaByTokens(ctx, task, totalTokens)
+	return handled && success
+}
+
+// Distinguish an inapplicable token price from a retryable financial failure.
+func recalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTokens int) (handled, success bool) {
 	if totalTokens <= 0 {
-		return false
+		return false, true
 	}
 
 	modelName := taskModelName(task)
@@ -390,7 +422,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 	modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
 	// 只有配置了倍率(非固定价格)时才按 token 重新计费
 	if !hasRatioSetting || modelRatio <= 0 {
-		return false
+		return false, true
 	}
 
 	// 获取用户和组的倍率信息
@@ -402,7 +434,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		}
 	}
 	if group == "" {
-		return false
+		return false, true
 	}
 
 	groupRatio := ratio_setting.GetGroupRatio(group)
@@ -430,8 +462,7 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		"group_ratio":      fmt.Sprintf("%.2f", finalGroupRatio),
 		"other_multiplier": fmt.Sprintf("%.4f", otherMultiplier),
 	})
-	RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
-	return true
+	return true, RecalculateTaskQuota(ctx, task, actualQuota, reason, clamp)
 }
 
 // EvaluateTaskCompletionUsage evaluates actual facts against the frozen task

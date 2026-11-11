@@ -31,6 +31,7 @@ import {
   sideDrawerFormClassName,
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
 import { PermissionMatrix } from '@/components/permission-matrix'
 import { Button } from '@/components/ui/button'
 import { Combobox } from '@/components/ui/combobox'
@@ -63,6 +64,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Textarea } from '@/components/ui/textarea'
+import { useActiveApp } from '@/hooks/use-active-app'
 import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
@@ -71,14 +73,12 @@ import {
   normalizeAdminPermissions,
   type AdminPermissionMatrix,
 } from '@/lib/admin-permissions'
-import { useActiveApp } from '@/hooks/use-active-app'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { accountPasswordSchema } from '@/lib/password-policy'
 import { ROLE } from '@/lib/roles'
 import { AuthOperationError } from '@/lib/secure-verification'
-
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -143,30 +143,45 @@ export function UsersMutateDrawer({
     defaultValues: USER_FORM_DEFAULT_VALUES,
   })
 
-  // Load existing data when updating
+  const { appId, isPlatform } = useActiveApp()
+  const userId = currentRow?.id
+  const userQuery = useQuery({
+    queryKey: ['user-detail', userId, appId],
+    queryFn: async () => {
+      if (userId === undefined) throw new Error(t('Failed to load'))
+      const result = requireServerSuccess(await getUser(userId, appId))
+      if (!result.data) throw new Error(t('Failed to load'))
+      return result.data
+    },
+    enabled: open && userId !== undefined,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const scopedUser = userQuery.data
+  const quotaReady =
+    !!scopedUser &&
+    !userQuery.isFetching &&
+    !userQuery.isError &&
+    (isPlatform ||
+      (typeof scopedUser.app_quota === 'number' &&
+        Number.isFinite(scopedUser.app_quota)))
+
+  // Scope changes discard open adjustments and any previous user's form.
   useEffect(() => {
-    if (open && isUpdate && currentRow) {
-      // For update, fetch fresh data
-      getUser(currentRow.id)
-        .then((result) => {
-          if (result.success && result.data) {
-            loadedPermissions.current = result.data.admin_permissions
-            form.reset(transformUserToFormDefaults(result.data))
-          } else {
-            handleServerError(result, t('Failed to load'))
-          }
-        })
-        .catch((error) => handleServerError(error, t('Failed to load')))
-    } else if (open && !isUpdate) {
-      // For create, reset to defaults
-      form.reset(USER_FORM_DEFAULT_VALUES)
-    }
-  }, [open, isUpdate, currentRow, form, t])
+    setQuotaDialogOpen(false)
+    loadedPermissions.current = undefined
+    form.reset(USER_FORM_DEFAULT_VALUES)
+  }, [open, userId, appId, form])
+
+  useEffect(() => {
+    if (!open || !scopedUser) return
+    loadedPermissions.current = scopedUser.admin_permissions
+    form.reset(transformUserToFormDefaults(scopedUser))
+  }, [open, userId, appId, scopedUser, form])
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
   const tokensOnly = currencyMeta.kind === 'tokens'
-  const { isPlatform } = useActiveApp()
 
   const currentQuotaRaw = form.watch('quota_dollars') || 0
   const selectedRole = form.watch('role')
@@ -264,11 +279,7 @@ export function UsersMutateDrawer({
   const refreshUserData = async () => {
     if (!currentRow) return
     try {
-      const result = requireServerSuccess(await getUser(currentRow.id))
-      if (result.success && result.data) {
-        loadedPermissions.current = result.data.admin_permissions
-        form.reset(transformUserToFormDefaults(result.data))
-      }
+      await userQuery.refetch({ throwOnError: true })
       triggerRefresh()
     } catch (error) {
       handleServerError(error, t('Failed to load'))
@@ -441,6 +452,14 @@ export function UsersMutateDrawer({
                     )}
                   />
 
+                  {!quotaReady && !userQuery.isFetching && (
+                    <ErrorState
+                      title={t('Failed to load')}
+                      className='min-h-0'
+                      onRetry={() => void userQuery.refetch()}
+                    />
+                  )}
+
                   <FormField
                     control={form.control}
                     name='quota_dollars'
@@ -466,6 +485,7 @@ export function UsersMutateDrawer({
                           <Button
                             type='button'
                             variant='outline'
+                            disabled={!quotaReady}
                             onClick={() => setQuotaDialogOpen(true)}
                           >
                             <Pencil className='mr-1 h-4 w-4' />
@@ -588,7 +608,15 @@ export function UsersMutateDrawer({
             <SheetClose render={<Button variant='outline' />}>
               {t('Close')}
             </SheetClose>
-            <Button form='user-form' type='submit' disabled={isSubmitting}>
+            <Button
+              form='user-form'
+              type='submit'
+              disabled={
+                isSubmitting ||
+                (isUpdate &&
+                  (!scopedUser || userQuery.isFetching || userQuery.isError))
+              }
+            >
               {isSubmitting ? t('Saving...') : t('Save changes')}
             </Button>
           </SheetFooter>
@@ -596,8 +624,9 @@ export function UsersMutateDrawer({
       </Sheet>
 
       {/* Adjust Quota Dialog */}
-      {currentRow && (
+      {currentRow && quotaReady && (
         <UserQuotaDialog
+          key={`${currentRow.id}:${appId}`}
           open={quotaDialogOpen}
           onOpenChange={setQuotaDialogOpen}
           userId={currentRow.id}
@@ -606,7 +635,7 @@ export function UsersMutateDrawer({
           currentQuota={
             isPlatform
               ? parseQuotaFromDollars(currentQuotaRaw || 0)
-              : Number(currentRow.app_quota || 0)
+              : Number(scopedUser?.app_quota ?? 0)
           }
           onSuccess={refreshUserData}
         />

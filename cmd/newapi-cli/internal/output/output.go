@@ -76,7 +76,7 @@ func Pretty(w io.Writer, raw json.RawMessage) error {
 	dec.UseNumber()
 	v, err := decodeOrdered(dec)
 	if err != nil {
-		if _, writeErr := w.Write(append(raw, '\n')); writeErr != nil {
+		if _, writeErr := fmt.Fprintln(w, terminalText(string(raw))); writeErr != nil {
 			return writeErr
 		}
 		return err
@@ -85,7 +85,7 @@ func Pretty(w io.Writer, raw json.RawMessage) error {
 	case []any:
 		if len(t) > 0 && !slices.ContainsFunc(t, isObject) {
 			for _, item := range t {
-				fmt.Fprintln(w, prettyValue(item))
+				fmt.Fprintln(w, terminalText(prettyValue(item)))
 			}
 			return nil
 		}
@@ -95,7 +95,7 @@ func Pretty(w io.Writer, raw json.RawMessage) error {
 			writeTable(w, items)
 			for _, k := range []string{"total", "page", "page_size"} {
 				if val, ok := t.values[k]; ok {
-					fmt.Fprintf(w, "%s: %v\n", k, val)
+					fmt.Fprintf(w, "%s: %s\n", k, terminalText(prettyValue(val)))
 				}
 			}
 			return nil
@@ -103,10 +103,10 @@ func Pretty(w io.Writer, raw json.RawMessage) error {
 		keys := slices.Clone(t.keys)
 		slices.Sort(keys)
 		for _, k := range keys {
-			fmt.Fprintf(w, "%s: %s\n", k, prettyValue(t.values[k]))
+			fmt.Fprintf(w, "%s: %s\n", terminalText(k), terminalText(prettyValue(t.values[k])))
 		}
 	default:
-		fmt.Fprintln(w, prettyValue(v))
+		fmt.Fprintln(w, terminalText(prettyValue(v)))
 	}
 	return nil
 }
@@ -190,15 +190,19 @@ func truncateCell(s string) string {
 	return string([]rune(s)[:maxCellRunes]) + "…"
 }
 
-// singleLine collapses embedded line breaks so one record never spans rows.
-func singleLine(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '\n', '\r', '\t':
-			return ' '
+func terminalText(s string) string {
+	var text strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			text.WriteByte(' ')
+		case unicode.IsControl(r):
+			fmt.Fprintf(&text, "\\u%04x", r)
+		default:
+			text.WriteRune(r)
 		}
-		return r
-	}, s)
+	}
+	return text.String()
 }
 
 // wideRanges lists the East Asian Wide/Fullwidth blocks and emoji planes that
@@ -283,9 +287,11 @@ func writeTable(w io.Writer, items []any) {
 			}
 		}
 	}
+	headings := make([]string, len(cols))
 	widths := make([]int, len(cols))
 	for i, c := range cols {
-		widths[i] = displayWidth(c)
+		headings[i] = terminalText(c)
+		widths[i] = displayWidth(headings[i])
 	}
 	cells := make([][]string, len(rows))
 	for r, row := range rows {
@@ -295,12 +301,12 @@ func writeTable(w io.Writer, items []any) {
 			if v, ok := row.values[c]; ok {
 				text = prettyValue(v)
 			}
-			cells[r][i] = truncateCell(singleLine(text))
+			cells[r][i] = truncateCell(terminalText(text))
 			widths[i] = max(widths[i], displayWidth(cells[r][i]))
 		}
 	}
 	lines := make([][]string, 0, len(cells)+1)
-	lines = append(lines, cols)
+	lines = append(lines, headings)
 	lines = append(lines, cells...)
 	for _, line := range lines {
 		var sb strings.Builder

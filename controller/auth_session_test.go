@@ -67,6 +67,58 @@ func TestAuthLogoutRejectsRefreshCookieSessionMismatch(t *testing.T) {
 	}
 }
 
+func TestAuthLogoutAuthenticatesCookieBeforeOAuthSideEffects(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	login, err := service.CreateLoginSession(env.user.Id, "password", "127.0.0.1", "logout-test")
+	require.NoError(t, err)
+	otherLogin, err := service.CreateLoginSession(env.user.Id, "password", "127.0.0.1", "other-login")
+	require.NoError(t, err)
+	for i, session := range []service.LoginSessionView{login.Session, otherLogin.Session} {
+		require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
+			TokenHash: model.OAuthRefreshTokenHash(session.SID), AppID: env.app.Id, UserID: env.user.Id,
+			SessionID: session.SID, AuthVersion: 1, AuthTime: session.CreatedAt, Scope: "openid", ExpiresAt: time.Now().Add(time.Hour).Unix(),
+		}))
+		assert.NotEmpty(t, session.SID, "session %d", i)
+	}
+	logout := func(cookie, bearer string) {
+		c, recorder := newOAuthFormContext(t, "/api/user/auth/logout", nil)
+		if cookie != "" {
+			c.Request.AddCookie(&http.Cookie{Name: service.RefreshCookieName, Value: cookie})
+		}
+		if bearer != "" {
+			c.Request.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		AuthLogout(c)
+		require.Equal(t, http.StatusOK, recorder.Code)
+	}
+	logout(login.Session.SID+".wrong-secret", "")
+	var active int64
+	require.NoError(t, model.DB.Model(&model.OAuthRefreshToken{}).Where("revoked_at = 0").Count(&active).Error)
+	assert.Equal(t, int64(2), active, "a known SID without its secret cannot revoke any grants")
+	stored, err := model.GetUserSessionBySID(login.Session.SID)
+	require.NoError(t, err)
+	assert.Equal(t, model.UserSessionStatusActive, stored.Status)
+
+	logout(login.RefreshToken, "")
+	stored, err = model.GetUserSessionBySID(login.Session.SID)
+	require.NoError(t, err)
+	assert.Equal(t, model.UserSessionStatusRevoked, stored.Status)
+	require.NoError(t, model.DB.Model(&model.OAuthRefreshToken{}).Where("revoked_at = 0").Count(&active).Error)
+	assert.Zero(t, active, "authenticated logout revokes user-wide OAuth refresh grants")
+
+	// Grants from a later login cannot be mutated by retrying the old cookie or bearer.
+	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{
+		TokenHash: "post-logout-grant", AppID: env.app.Id, UserID: env.user.Id,
+		SessionID: otherLogin.Session.SID, AuthVersion: 1, AuthTime: otherLogin.Session.CreatedAt,
+		Scope: "openid", ExpiresAt: time.Now().Add(time.Hour).Unix(),
+	}))
+	logout(login.RefreshToken, "")
+	logout("", login.AccessToken)
+	newGrant, err := model.GetOAuthRefreshTokenByHash("post-logout-grant")
+	require.NoError(t, err)
+	assert.Zero(t, newGrant.RevokedAt, "idempotent logout must not touch grants from later logins")
+}
+
 func TestWriteAuthSessionErrorMapsSessionGrowthLimits(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {

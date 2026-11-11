@@ -577,7 +577,7 @@ func getTaskOriginModelName(c *gin.Context) string {
 	}
 
 	userId := c.GetInt("id")
-	if task, exist, err := model.GetByTaskId(userId, taskId); err == nil && exist && task != nil {
+	if task, exist, err := model.GetByTaskIdScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskId); err == nil && exist && task != nil {
 		return task.Properties.OriginModelName
 	}
 	return ""

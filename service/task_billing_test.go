@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -58,6 +62,7 @@ func TestMain(m *testing.M) {
 		&model.Midjourney{},
 		&model.TopUp{},
 		&model.UserSubscription{},
+		&model.UserAppWallet{},
 		&model.SystemTask{},
 		&model.SystemTaskLock{},
 	); err != nil {
@@ -82,6 +87,7 @@ func truncate(t *testing.T) {
 		model.DB.Exec("DELETE FROM midjourneys")
 		model.DB.Exec("DELETE FROM top_ups")
 		model.DB.Exec("DELETE FROM user_subscriptions")
+		model.DB.Exec("DELETE FROM user_app_wallets")
 		model.DB.Exec("DELETE FROM system_task_locks")
 		model.DB.Exec("DELETE FROM system_tasks")
 	})
@@ -141,10 +147,27 @@ func seedChargedAccounting(t *testing.T, userID, channelID, tokenID, quota, requ
 	}
 }
 
-func makeTask(userId, channelId, quota, tokenId int, billingSource string, subscriptionId int) *model.Task {
+func seedAppWallet(t *testing.T, userId, appId, quota, usedQuota int) {
+	t.Helper()
+	require.NoError(t, model.DB.Create(&model.UserAppWallet{UserId: userId, AppId: appId, Quota: quota, UsedQuota: usedQuota}).Error)
+}
+
+func getAppWallet(t *testing.T, userId, appId int) model.UserAppWallet {
+	t.Helper()
+	var wallet model.UserAppWallet
+	require.NoError(t, model.DB.Where("user_id = ? AND app_id = ?", userId, appId).First(&wallet).Error)
+	return wallet
+}
+
+func makeTask(userId, channelId, quota, tokenId int, billingSource string, subscriptionId int, appIds ...int) *model.Task {
+	appId := 0
+	if len(appIds) > 0 {
+		appId = appIds[0]
+	}
 	return &model.Task{
 		TaskID:    "task_" + time.Now().Format("150405.000"),
 		UserId:    userId,
+		AppId:     appId,
 		ChannelId: channelId,
 		Quota:     quota,
 		Status:    model.TaskStatus(model.TaskStatusInProgress),
@@ -629,7 +652,7 @@ func TestSettleMidjourneyTaskBillingRequiresPersistedTask(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, prepared)
 
-	billed, err := SettleMidjourneyTaskBilling(relayInfo, task, prepared)
+	billed, err := SettleMidjourneyTaskBilling(context.Background(), relayInfo, task, prepared)
 
 	require.Error(t, err)
 	assert.False(t, billed)
@@ -674,7 +697,7 @@ func TestMidjourneyRefundRestoresEveryAccountingElementOnBillingChannel(t *testi
 	assert.Equal(t, billingChannelID, task.BillingChannelId)
 	require.NoError(t, task.Insert())
 
-	billed, err := SettleMidjourneyTaskBilling(relayInfo, task, prepared)
+	billed, err := SettleMidjourneyTaskBilling(context.Background(), relayInfo, task, prepared)
 	require.NoError(t, err)
 	require.True(t, billed)
 	assert.Equal(t, initialUserQuota-chargedQuota, getUserQuota(t, userID))
@@ -709,6 +732,65 @@ func TestMidjourneyRefundRestoresEveryAccountingElementOnBillingChannel(t *testi
 
 	assert.True(t, RefundMidjourneyQuota(ctx, task, "duplicate poll"))
 	assert.Equal(t, int64(1), countLogs(t))
+}
+
+func TestMidjourneyAppBillingSettlesAndRefundsAppWallet(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID, appID = 55, 55, 55, 45
+	const platformQuota, appQuota, tokenQuota, chargedQuota = 10000, 10000, 5000, 3000
+	seedUser(t, userID, platformQuota)
+	seedToken(t, tokenID, userID, "sk-midjourney-app", tokenQuota)
+	seedChannel(t, channelID)
+	seedAppWallet(t, userID, appID, appQuota, 0)
+
+	relayInfo := &relaycommon.RelayInfo{
+		UserId:    userID,
+		AppId:     appID,
+		TokenId:   tokenID,
+		TokenKey:  "sk-midjourney-app",
+		UserQuota: appQuota,
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelId: channelID,
+		},
+	}
+	task := &model.Midjourney{UserId: userID, Action: "IMAGINE", MjId: "mj-app-accounting", ChannelId: channelID, Progress: "0%"}
+
+	prepared, err := PrepareMidjourneyTaskBilling(relayInfo, task, chargedQuota, true)
+	require.NoError(t, err)
+	require.True(t, prepared)
+	assert.Equal(t, appID, task.AppId)
+	require.NoError(t, task.Insert())
+
+	billed, err := SettleMidjourneyTaskBilling(context.Background(), relayInfo, task, prepared)
+	require.NoError(t, err)
+	require.True(t, billed)
+
+	wallet := getAppWallet(t, userID, appID)
+	assert.Equal(t, appQuota-chargedQuota, wallet.Quota, "app pool is charged")
+	assert.Equal(t, chargedQuota, wallet.UsedQuota, "app usage is recorded at settle")
+	assert.Equal(t, platformQuota, getUserQuota(t, userID), "platform wallet is untouched")
+	assert.Equal(t, tokenQuota-chargedQuota, getTokenRemainQuota(t, tokenID))
+	persisted := getMidjourneyTask(t, task.Id)
+	assert.Equal(t, appID, persisted.AppId)
+
+	seedChargedAccounting(t, userID, channelID, tokenID, chargedQuota, 1)
+
+	assert.True(t, RefundMidjourneyQuota(ctx, task, "Composition failed"))
+	wallet = getAppWallet(t, userID, appID)
+	assert.Equal(t, appQuota, wallet.Quota, "app pool is refunded")
+	assert.Zero(t, wallet.UsedQuota)
+	assert.Equal(t, platformQuota, getUserQuota(t, userID), "platform wallet is untouched")
+	assert.Equal(t, tokenQuota, getTokenRemainQuota(t, tokenID))
+	usedQuota, requestCount := getUserUsageAccounting(t, userID)
+	assert.Zero(t, usedQuota)
+	assert.Equal(t, 1, requestCount)
+	assert.Zero(t, getChannelUsedQuota(t, channelID))
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Equal(t, model.LogTypeRefund, log.Type)
+	assert.Equal(t, chargedQuota, log.Quota)
 }
 
 func TestSettleMidjourneyTaskBillingFundingFailureClearsMarkers(t *testing.T) {
@@ -747,7 +829,7 @@ func TestSettleMidjourneyTaskBillingFundingFailureClearsMarkers(t *testing.T) {
 		model.DB.Exec("DROP TRIGGER IF EXISTS fail_midjourney_user_update")
 	})
 
-	billed, err := SettleMidjourneyTaskBilling(relayInfo, task, prepared)
+	billed, err := SettleMidjourneyTaskBilling(context.Background(), relayInfo, task, prepared)
 
 	require.Error(t, err)
 	assert.False(t, billed)
@@ -801,7 +883,7 @@ func TestSettleMidjourneyTaskBillingTokenFailureKeepsFundingRefundable(t *testin
 		model.DB.Exec("DROP TRIGGER IF EXISTS fail_midjourney_token_update")
 	})
 
-	billed, err := SettleMidjourneyTaskBilling(relayInfo, task, prepared)
+	billed, err := SettleMidjourneyTaskBilling(context.Background(), relayInfo, task, prepared)
 
 	require.Error(t, err)
 	require.True(t, billed)
@@ -916,6 +998,368 @@ func TestRefundTaskQuota_Wallet(t *testing.T) {
 	assert.Equal(t, "test-model", log.ModelName)
 	assert.Zero(t, task.Quota)
 	assert.Zero(t, getTaskQuota(t, task.ID))
+}
+
+func TestAppWalletSettlementUsesPersistedQuota(t *testing.T) {
+	for _, actual := range []int{0, 40, 140} {
+		t.Run(fmt.Sprint(actual), func(t *testing.T) {
+			truncate(t)
+			seedUser(t, 91, 1000)
+			seedChannel(t, 91)
+			seedAppWallet(t, 91, 7, 900, 100)
+			seedChargedAccounting(t, 91, 91, 0, 100, 1)
+			task := makeTask(91, 91, 100, 0, BillingSourceWallet, 0, 7)
+			require.NoError(t, task.Insert())
+			stale := *task
+			// The caller's quota may even already equal the requested target.
+			task.Quota = actual
+			if actual == 0 {
+				require.True(t, RefundTaskQuota(context.Background(), task, "failed"))
+				require.True(t, RefundTaskQuota(context.Background(), &stale, "duplicate"))
+			} else {
+				require.True(t, RecalculateTaskQuota(context.Background(), task, actual, common.NewMessage("actual usage")))
+				require.True(t, RecalculateTaskQuota(context.Background(), &stale, actual, common.NewMessage("duplicate")))
+			}
+			assert.Equal(t, actual, stale.Quota)
+			assert.Equal(t, actual, getTaskQuota(t, task.ID))
+			wallet := getAppWallet(t, 91, 7)
+			assert.Equal(t, 1000-actual, wallet.Quota)
+			assert.Equal(t, actual, wallet.UsedQuota)
+			used, requests := getUserUsageAccounting(t, 91)
+			assert.Equal(t, actual, used)
+			assert.Equal(t, 1, requests)
+			assert.EqualValues(t, actual, getChannelUsedQuota(t, 91))
+			assert.EqualValues(t, 1, countLogs(t))
+		})
+	}
+}
+
+func TestAppWalletSettlementConcurrentObservers(t *testing.T) {
+	truncate(t)
+	seedAppWallet(t, 92, 7, 10, 100)
+	task := makeTask(92, 0, 100, 0, BillingSourceWallet, 0, 7)
+	require.NoError(t, task.Insert())
+	observers := []model.Task{*task, *task}
+	start := make(chan struct{})
+	deltas := make([]int, len(observers))
+	errs := make([]error, len(observers))
+	var wg sync.WaitGroup
+	for i := range observers {
+		wg.Go(func() {
+			<-start
+			deltas[i], errs[i] = observers[i].SettleAppWalletQuota(context.Background(), 140)
+		})
+	}
+	close(start)
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	assert.ElementsMatch(t, []int{40, 0}, deltas)
+	wallet := getAppWallet(t, 92, 7)
+	assert.Equal(t, -30, wallet.Quota, "final charges can overdraw")
+	assert.Equal(t, 140, wallet.UsedQuota)
+	assert.Equal(t, 140, getTaskQuota(t, task.ID))
+}
+
+func TestAppWalletSettlementRejectsForeignTaskAndCapacityOverflow(t *testing.T) {
+	truncate(t)
+	seedAppWallet(t, 93, 7, common.MaxWalletQuota-10, 100)
+	task := makeTask(93, 0, 100, 0, BillingSourceWallet, 0, 7)
+	require.NoError(t, task.Insert())
+	for _, tc := range []struct {
+		name              string
+		user, app, actual int
+	}{
+		{"refund capacity", 93, 7, 0},
+		{"downward capacity", 93, 7, 40},
+		{"wrong owner", 94, 7, 140},
+		{"wrong app", 93, 8, 140},
+		{"oversized charge", 93, 7, common.MaxQuota + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := *task
+			caller.UserId, caller.AppId = tc.user, tc.app
+			delta, err := caller.SettleAppWalletQuota(context.Background(), tc.actual)
+			require.Error(t, err)
+			assert.Zero(t, delta)
+			assert.Equal(t, 100, caller.Quota)
+			wallet := getAppWallet(t, 93, 7)
+			assert.Equal(t, common.MaxWalletQuota-10, wallet.Quota)
+			assert.Equal(t, 100, wallet.UsedQuota)
+			assert.Equal(t, 100, getTaskQuota(t, task.ID))
+		})
+	}
+}
+
+func TestAppWalletTerminalWriteFailuresRemainRetryable(t *testing.T) {
+	for _, actual := range []int{0, 40, 140} {
+		for _, failure := range []string{"wallet", "usage", "marker", "terminal"} {
+			t.Run(fmt.Sprintf("%d/%s", actual, failure), func(t *testing.T) {
+				truncate(t)
+				seedUser(t, 94, 1000)
+				seedChannel(t, 94)
+				seedAppWallet(t, 94, 7, 900, 100)
+				seedChargedAccounting(t, 94, 94, 0, 100, 1)
+				task := makeTask(94, 94, 100, 0, BillingSourceWallet, 0, 7)
+				task.PrivateData.BillingContext.TieredSnapshot = &billingexpr.BillingSnapshot{
+					ExprString: `tier("actual", u("units"))`, GroupRatio: 1, QuotaPerUnit: 1,
+					ExprVersion: 1, TaskUsageBilling: true, UsageFacts: map[string]any{"units": float64(100)},
+				}
+				require.NoError(t, task.Insert())
+				injected := true
+				require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register("test:app_terminal_failure", func(tx *gorm.DB) {
+					if !injected || tx.Statement.Schema == nil {
+						return
+					}
+					values, _ := tx.Statement.Dest.(map[string]any)
+					_, quota := values["quota"]
+					_, usage := values["used_quota"]
+					wallet := tx.Statement.Schema.Name == "UserAppWallet"
+					marker := tx.Statement.Schema.Name == "Task" && quota
+					_, terminal := tx.Statement.Dest.(*model.Task)
+					if failure == "wallet" && wallet && quota || failure == "usage" && wallet && usage || failure == "marker" && marker || failure == "terminal" && terminal {
+						tx.AddError(errors.New("injected app terminal write failure"))
+					}
+				}))
+				t.Cleanup(func() { require.NoError(t, model.DB.Callback().Update().Remove("test:app_terminal_failure")) })
+				adaptor := &scriptedPollingAdaptor{parse: &relaycommon.TaskInfo{
+					Status: model.TaskStatusSuccess, UsageFacts: map[string]any{"units": float64(actual)},
+				}}
+				ch := &model.Channel{Id: 94, Type: constant.ChannelTypeTaskPlugin}
+				poll := func() error {
+					return updateVideoSingleTask(context.Background(), adaptor, ch, task.TaskID, map[string]*model.Task{task.TaskID: task})
+				}
+				require.Error(t, poll())
+				var persisted model.Task
+				require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+				assert.EqualValues(t, model.TaskStatusInProgress, persisted.Status)
+				assert.EqualValues(t, model.TaskStatusInProgress, task.Status, "failed publication is not exposed in memory")
+				want := 100
+				if failure == "terminal" {
+					want = actual
+				}
+				assert.Equal(t, want, persisted.Quota)
+				assert.Equal(t, want, task.Quota)
+				wallet := getAppWallet(t, 94, 7)
+				assert.Equal(t, 1000-want, wallet.Quota)
+				assert.Equal(t, want, wallet.UsedQuota)
+				injected = false
+				*task = persisted
+				require.NoError(t, poll())
+				require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+				assert.Equal(t, model.TaskStatus(model.TaskStatusSuccess), persisted.Status)
+				assert.Equal(t, actual, persisted.Quota)
+				wallet = getAppWallet(t, 94, 7)
+				assert.Equal(t, 1000-actual, wallet.Quota)
+				assert.Equal(t, actual, wallet.UsedQuota)
+				assert.EqualValues(t, 1, countLogs(t), "committed financial adjustment is not logged twice")
+			})
+		}
+	}
+}
+
+func TestAppWalletPendingSnapshotCannotOverwriteFinancialMarker(t *testing.T) {
+	truncate(t)
+	seedAppWallet(t, 95, 7, 900, 100)
+	task := makeTask(95, 0, 100, 0, BillingSourceWallet, 0, 7)
+	require.NoError(t, task.Insert())
+	stale := *task
+	delta, err := task.SettleAppWalletQuota(context.Background(), 40)
+	require.NoError(t, err)
+	assert.Equal(t, -60, delta)
+	stale.Progress = "60%"
+	_, err = stale.UpdateWithStatus(model.TaskStatusInProgress)
+	require.NoError(t, err)
+	assert.Equal(t, 40, getTaskQuota(t, task.ID))
+	task.Status = model.TaskStatusSuccess
+	won, err := task.UpdateWithStatus(model.TaskStatusInProgress)
+	require.NoError(t, err)
+	require.True(t, won)
+	// A late timeout/failure must not refund an already published success.
+	stale.Status = model.TaskStatusFailure
+	_, err = stale.SettleAppWalletQuota(context.Background(), 0)
+	require.Error(t, err)
+	wallet := getAppWallet(t, 95, 7)
+	assert.Equal(t, 960, wallet.Quota)
+	assert.Equal(t, 40, wallet.UsedQuota)
+}
+
+func TestAppWalletFailureEntryPointsDoNotPublishOnFundingFailure(t *testing.T) {
+	for _, entry := range []string{"single", "batch", "poll cutoff", "timeout", "missing channel", "missing task id"} {
+		t.Run(entry, func(t *testing.T) {
+			truncate(t)
+			seedUser(t, 96, 1000)
+			seedChannel(t, 96)
+			seedAppWallet(t, 96, 7, 900, 100)
+			task := makeTask(96, 96, 100, 0, BillingSourceWallet, 0, 7)
+			task.Progress = "50%"
+			task.SubmitTime = time.Now().Unix()
+			oldTimeout, oldLimit, oldFactory := constant.TaskTimeoutMinutes, constant.TaskQueryLimit, GetTaskAdaptorFunc
+			constant.TaskTimeoutMinutes, constant.TaskQueryLimit = 60, 100
+			GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return &mockAdaptor{} }
+			t.Cleanup(func() {
+				constant.TaskTimeoutMinutes, constant.TaskQueryLimit, GetTaskAdaptorFunc = oldTimeout, oldLimit, oldFactory
+			})
+			if entry == "timeout" {
+				task.SubmitTime -= 7200
+			}
+			if entry == "missing channel" {
+				task.ChannelId = 99999
+			}
+			if entry == "missing task id" {
+				task.TaskID = ""
+			}
+			require.NoError(t, task.Insert())
+			injected := true
+			require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register("test:app_failure_marker", func(tx *gorm.DB) {
+				if injected && tx.Statement.Schema != nil && tx.Statement.Schema.Name == "Task" {
+					if values, ok := tx.Statement.Dest.(map[string]any); ok {
+						if _, marker := values["quota"]; marker {
+							tx.AddError(errors.New("injected refund marker failure"))
+						}
+					}
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, model.DB.Callback().Update().Remove("test:app_failure_marker")) })
+			poll := func() {
+				switch entry {
+				case "single":
+					_ = updateVideoSingleTask(context.Background(), &scriptedPollingAdaptor{statusCode: 404}, &model.Channel{Id: 96}, task.TaskID, map[string]*model.Task{task.TaskID: task})
+				case "batch", "missing channel":
+					a := &scriptedBatchPollingAdaptor{results: map[string]*BatchTaskResult{task.TaskID: {TaskInfo: *relaycommon.FailTaskInfo("failed")}}}
+					_ = updateBatchTasks(context.Background(), a, task.ChannelId, []string{task.TaskID}, map[string]*model.Task{task.TaskID: task})
+				case "poll cutoff":
+					_ = failTaskFromPoll(context.Background(), nil, task, task.Status, "Failed to query the upstream task status")
+				case "timeout":
+					sweepTimedOutTasks(context.Background())
+				case "missing task id":
+					RunTaskPollingOnce(context.Background(), nil)
+				}
+			}
+			poll()
+			var persisted model.Task
+			require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+			assert.EqualValues(t, model.TaskStatusInProgress, persisted.Status)
+			assert.Equal(t, 100, persisted.Quota)
+			wallet := getAppWallet(t, 96, 7)
+			assert.Equal(t, 900, wallet.Quota)
+			assert.Equal(t, 100, wallet.UsedQuota)
+			injected = false
+			*task = persisted
+			poll()
+			require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+			assert.EqualValues(t, model.TaskStatusFailure, persisted.Status)
+			assert.Zero(t, persisted.Quota)
+			wallet = getAppWallet(t, 96, 7)
+			assert.Equal(t, 1000, wallet.Quota)
+			assert.Zero(t, wallet.UsedQuota)
+		})
+	}
+}
+
+func TestRefundTaskQuota_AppWallet(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, tokenID, channelID, appID = 61, 61, 61, 21
+	const initQuota, appInit, preConsumed = 10000, 8000, 3000
+	const tokenRemain = 5000
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-app-refund", tokenRemain)
+	seedChannel(t, channelID)
+	// The submit phase already charged the app pool and recorded its usage.
+	seedAppWallet(t, userID, appID, appInit-preConsumed, preConsumed)
+	seedChargedAccounting(t, userID, channelID, tokenID, preConsumed, 1)
+
+	task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0, appID)
+	require.NoError(t, model.DB.Create(task).Error)
+
+	assert.True(t, RefundTaskQuota(ctx, task, "app task failed"))
+
+	wallet := getAppWallet(t, userID, appID)
+	assert.Equal(t, appInit, wallet.Quota, "app pool is refunded")
+	assert.Zero(t, wallet.UsedQuota, "app usage is reversed")
+	assert.Equal(t, initQuota, getUserQuota(t, userID), "platform wallet is untouched")
+	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
+	assert.Zero(t, getTokenUsedQuota(t, tokenID))
+	usedQuota, requestCount := getUserUsageAccounting(t, userID)
+	assert.Zero(t, usedQuota)
+	assert.Equal(t, 1, requestCount)
+	assert.Zero(t, getChannelUsedQuota(t, channelID))
+	assert.Zero(t, task.Quota)
+	log := getLastLog(t)
+	require.NotNil(t, log)
+	assert.Equal(t, model.LogTypeRefund, log.Type)
+	assert.Equal(t, preConsumed, log.Quota)
+}
+
+func TestRecalculate_AppWalletDeltas(t *testing.T) {
+	cases := []struct {
+		name        string
+		userID      int
+		appID       int
+		preConsumed int
+		actualQuota int
+		appQuota    int
+		appUsed     int
+		wantQuota   int
+		wantUsed    int
+	}{
+		{"positive delta", 71, 31, 2000, 3000, 8000, 2000, 7000, 3000},
+		{"negative delta", 72, 32, 5000, 3000, 8000, 5000, 10000, 3000},
+		{"negative delta floors usage at zero", 73, 33, 5000, 0, 8000, 1000, 13000, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			ctx := context.Background()
+			const initQuota = 20000
+
+			seedUser(t, tc.userID, initQuota)
+			seedToken(t, tc.userID, tc.userID, fmt.Sprintf("sk-app-%d", tc.userID), 5000)
+			seedChannel(t, tc.userID)
+			seedAppWallet(t, tc.userID, tc.appID, tc.appQuota, tc.appUsed)
+			seedChargedAccounting(t, tc.userID, tc.userID, tc.userID, tc.preConsumed, 1)
+
+			task := makeTask(tc.userID, tc.userID, tc.preConsumed, tc.userID, BillingSourceWallet, 0, tc.appID)
+			require.NoError(t, model.DB.Create(task).Error)
+			require.True(t, RecalculateTaskQuota(ctx, task, tc.actualQuota, common.NewMessage("adaptor adjustment")))
+
+			wallet := getAppWallet(t, tc.userID, tc.appID)
+			assert.Equal(t, tc.wantQuota, wallet.Quota)
+			assert.Equal(t, tc.wantUsed, wallet.UsedQuota)
+			assert.Equal(t, initQuota, getUserQuota(t, tc.userID), "platform wallet is untouched")
+			usedQuota, _ := getUserUsageAccounting(t, tc.userID)
+			assert.Equal(t, tc.actualQuota, usedQuota)
+			assert.Equal(t, tc.actualQuota, task.Quota)
+		})
+	}
+}
+
+func TestRecalculate_AppSubscriptionSkipsAppWalletUsage(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+
+	const userID, channelID, appID, subID = 81, 81, 41, 8
+	const preConsumed, actualQuota = 2000, 3000
+	const subTotal, subUsed int64 = 100000, 50000
+	const appQuota, appUsed = 8000, 5000
+
+	seedUser(t, userID, 0)
+	seedChannel(t, channelID)
+	seedSubscription(t, subID, userID, subTotal, subUsed)
+	seedAppWallet(t, userID, appID, appQuota, appUsed)
+	seedChargedAccounting(t, userID, channelID, 0, preConsumed, 1)
+
+	task := makeTask(userID, channelID, preConsumed, 0, BillingSourceSubscription, subID, appID)
+	RecalculateTaskQuota(ctx, task, actualQuota, common.NewMessage("subscription adjustment"))
+
+	assert.Equal(t, subUsed+int64(actualQuota-preConsumed), getSubscriptionUsed(t, subID))
+	wallet := getAppWallet(t, userID, appID)
+	assert.Equal(t, appQuota, wallet.Quota, "subscription tasks never touch the app pool")
+	assert.Equal(t, appUsed, wallet.UsedQuota, "subscription tasks never write app wallet usage")
 }
 
 func TestRefundTaskQuota_Subscription(t *testing.T) {
@@ -1441,7 +1885,7 @@ func TestSettle_PerCallBilling_SkipsAdaptorAdjust(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: 2000}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, _ := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Per-call: no adjustment despite adaptor returning 2000
 	assert.False(t, settled)
@@ -1469,7 +1913,7 @@ func TestSettle_PerCallBilling_SkipsTotalTokens(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: 0}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess, TotalTokens: 9999}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, _ := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Per-call: no recalculation by tokens
 	assert.False(t, settled)
@@ -1498,7 +1942,7 @@ func TestSettle_NonPerCallBilling_AppliesAdaptorAdjustment(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: adaptorQuota}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, _ := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Non-per-call: adaptor adjustment applies (refund 2000)
 	assert.True(t, settled)
@@ -1529,7 +1973,7 @@ func TestSettle_TieredEvaluationFailureKeepsPreConsumedCharge(t *testing.T) {
 		TaskUsageBilling: true,
 	}
 
-	settled := settleTaskBillingOnComplete(ctx, &mockAdaptor{}, task, &relaycommon.TaskInfo{Status: model.TaskStatusFailure})
+	settled, _ := settleTaskBillingOnComplete(ctx, &mockAdaptor{}, task, &relaycommon.TaskInfo{Status: model.TaskStatusFailure})
 
 	assert.True(t, settled)
 	assert.Equal(t, preConsumed, task.Quota)
@@ -1559,7 +2003,7 @@ func TestSettle_TieredFailureReturnsFalseForCallerRefund(t *testing.T) {
 		EstimatedTier:    "base",
 	}
 
-	settled := settleTaskBillingOnComplete(
+	settled, _ := settleTaskBillingOnComplete(
 		ctx,
 		&mockAdaptor{adjustReturn: 1},
 		task,
@@ -1596,7 +2040,7 @@ func TestSettle_TieredSuccessStillRecomputes(t *testing.T) {
 		EstimatedTier:    "base",
 	}
 
-	settled := settleTaskBillingOnComplete(
+	settled, _ := settleTaskBillingOnComplete(
 		ctx,
 		&mockAdaptor{adjustReturn: 1},
 		task,
@@ -1669,7 +2113,7 @@ func TestSettle_TieredUsageFactsMergeCompletionOverSubmission(t *testing.T) {
 				EstimatedTier:    "base",
 			}
 
-			settled := settleTaskBillingOnComplete(
+			settled, _ := settleTaskBillingOnComplete(
 				context.Background(),
 				&mockAdaptor{},
 				task,
@@ -1718,7 +2162,7 @@ func TestSettle_TieredSnapshotWriteBackUsesSettledFactsAndMatchedTier(t *testing
 		EstimatedTier:    "720P",
 	}
 
-	settled := settleTaskBillingOnComplete(
+	settled, _ := settleTaskBillingOnComplete(
 		context.Background(),
 		&mockAdaptor{},
 		task,
@@ -1794,7 +2238,7 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 			seedChannel(t, channelID)
 
 			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
-			settled := settleTaskBillingOnComplete(
+			settled, _ := settleTaskBillingOnComplete(
 				context.Background(),
 				&mockAdaptor{},
 				task,

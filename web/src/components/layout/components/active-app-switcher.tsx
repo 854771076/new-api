@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -67,34 +68,36 @@ export function ActiveAppSwitcher() {
           : `${app.name} (${t('Disabled')})`,
     })),
   ]
-  // Fall back to the platform entry while apps load, when loading fails, or
-  // when the persisted app no longer exists.
-  const selectedValue = items.some((item) => item.value === appId)
-    ? appId
-    : PLATFORM_APP_ID
+  // Until the list can reconcile a missing app, show the actual financial
+  // scope rather than presenting Platform while requests still use this ID.
+  if (!items.some((item) => item.value === appId)) {
+    items.push({ value: appId, label: `${t('App')} #${appId}` })
+  }
 
   return (
-    <div className='hidden lg:block'>
+    <div className='min-w-0 shrink-0'>
       <Select
         items={items}
-        value={selectedValue}
+        value={appId}
         onValueChange={(value) => {
           if (value !== null) setAppId(value)
         }}
       >
         <SelectTrigger
-          className='w-32 xl:w-44'
+          className='w-24 sm:w-32 xl:w-44'
           aria-label={t('Active App')}
           title={t('Switch application')}
         >
           <SelectValue />
         </SelectTrigger>
         <SelectContent align='end' alignItemWithTrigger={false}>
-          {items.map((item) => (
-            <SelectItem key={item.value} value={item.value}>
-              {item.label}
-            </SelectItem>
-          ))}
+          <SelectGroup>
+            {items.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
         </SelectContent>
       </Select>
     </div>

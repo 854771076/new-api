@@ -10,11 +10,6 @@
 //   Authorization: Bearer <Supabase access_token>
 //   → supabase.auth.getUser(jwt) 解析真实用户；缺失或校验失败返回 401。
 //
-// gateway_user_id 来源（按顺序，全部由服务端控制或已验证）：
-//   1. auth.users.app_metadata.gateway_user_id（只有 service_role / Admin API 可写）
-//   2. 用 app_metadata.gateway_access_token 调网关 /oauth/userinfo 得到的 sub
-//   3. 已验证的 OIDC identity_data.sub（GATEWAY_OIDC_PROVIDER 指定的 provider）
-//
 // 环境变量：
 //   SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY  —— Edge Function 运行时自动提供
 //   GATEWAY_BASE_URL                          —— 可选；网关地址，用于补全显示名
@@ -55,7 +50,10 @@ function json(body: unknown, status = 200): Response {
 }
 
 function positiveInt(value: unknown): number | null {
-  const parsed = typeof value === 'number' ? value : Number.parseInt(String(value ?? ''), 10);
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value))) {
+    return null;
+  }
+  const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
@@ -95,39 +93,33 @@ Deno.serve(async (req) => {
       return json({ ok: false, error: 'invalid or expired token' }, 401);
     }
 
+    const clientId = await getOrInitAppClientId(supabase);
+    if (!clientId) {
+      return json({ ok: false, error: 'app_config.client_id is not configured' }, 500);
+    }
+    const configuredProvider = Deno.env.get('GATEWAY_OIDC_PROVIDER') || 'custom:newapi';
+    const gatewayProvider = configuredProvider.startsWith('custom:')
+      ? configuredProvider
+      : `custom:${configuredProvider}`;
+    const identities = user.identities?.filter((item) => item.provider === gatewayProvider) ?? [];
+    const identity = identities.length === 1 ? identities[0] : undefined;
+    const gatewayUserId = positiveInt(identity?.identity_data?.sub);
+    const audience = identity?.identity_data?.aud;
+    const identityClientId = typeof audience === 'string'
+      ? audience
+      : Array.isArray(audience) && audience.length === 1 ? audience[0] : null;
+    if (!gatewayUserId || identityClientId !== clientId) {
+      return json({ ok: false, error: 'gateway identity does not match this app' }, 403);
+    }
+
     const gatewayUrl = Deno.env.get('GATEWAY_BASE_URL') || '';
-    const gatewayProvider = Deno.env.get('GATEWAY_OIDC_PROVIDER') || 'newapi';
     const gatewayAccessToken =
       typeof user.app_metadata?.gateway_access_token === 'string'
         ? user.app_metadata.gateway_access_token
         : '';
-
     let gatewayProfile: GatewayProfile | null = null;
     if (gatewayUrl && gatewayAccessToken) {
       gatewayProfile = await fetchGatewayProfile(gatewayUrl, gatewayAccessToken);
-    }
-
-    // gateway_user_id 只能来自服务端事实：app_metadata、已验证的 OIDC sub，
-    // 或网关 userinfo 的校验结果。
-    let gatewayUserId = positiveInt(user.app_metadata?.gateway_user_id);
-    if (!gatewayUserId && gatewayProfile) {
-      gatewayUserId = gatewayProfile.sub;
-    }
-    if (!gatewayUserId) {
-      const identity = user.identities?.find(
-        (item) =>
-          item.provider === gatewayProvider ||
-          item.provider === `custom:${gatewayProvider}`,
-      );
-      gatewayUserId = positiveInt(identity?.identity_data?.sub);
-    }
-    if (!gatewayUserId) {
-      return json({ ok: true, skipped: 'no gateway_user_id' });
-    }
-
-    const clientId = await getOrInitAppClientId(supabase);
-    if (!clientId) {
-      return json({ ok: false, error: 'app_config.client_id is not configured' }, 500);
     }
 
     const { data, error } = await supabase
@@ -177,10 +169,12 @@ async function getOrInitAppClientId(
     .maybeSingle();
   if (error) {
     console.error('[user-sync] app_config read failed:', error.message);
+    return '';
   }
-  if (cfg?.client_id) return cfg.client_id;
-
   const fromEnv = Deno.env.get('GATEWAY_CLIENT_ID');
+  if (cfg?.client_id) {
+    return fromEnv && fromEnv !== cfg.client_id ? '' : cfg.client_id;
+  }
   if (!fromEnv) return '';
 
   const { error: writeError } = await supabase

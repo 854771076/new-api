@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -12,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"gorm.io/gorm"
 )
 
 type TaskStatus string
@@ -54,6 +56,7 @@ type Task struct {
 	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
 	Platform   constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
 	UserId     int                   `json:"user_id" gorm:"index"`
+	AppId      int                   `json:"app_id" gorm:"index;default:0"` // 发起任务的 App，0 表示平台
 	Group      string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
 	ChannelId  int                   `json:"channel_id" gorm:"index"`
 	Quota      int                   `json:"quota"`
@@ -268,6 +271,7 @@ func InitTask(platform constant.TaskPlatform, relayInfo *commonRelay.RelayInfo) 
 	t := &Task{
 		TaskID:      taskID,
 		UserId:      relayInfo.UserId,
+		AppId:       relayInfo.AppId,
 		Group:       relayInfo.UsingGroup,
 		SubmitTime:  time.Now().Unix(),
 		Status:      TaskStatusNotStart,
@@ -436,13 +440,23 @@ func GetUniqueByOnlyTaskId(taskId string) (*Task, bool, error) {
 }
 
 func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
+	return GetByTaskIdScoped(userId, 0, taskId)
+}
+
+// GetByTaskIdScoped resolves one task for its owner. A non-zero appId restricts
+// the lookup to tasks created by that app, so an OAuth app token cannot read a
+// task another app created for the same user. appId == 0 keeps the platform
+// behavior and matches tasks from every source.
+func GetByTaskIdScoped(userId, appId int, taskId string) (*Task, bool, error) {
 	if taskId == "" {
 		return nil, false, nil
 	}
 	var task *Task
-	var err error
-	err = DB.Where("user_id = ? and task_id = ?", userId, taskId).
-		First(&task).Error
+	query := DB.Where("user_id = ? and task_id = ?", userId, taskId)
+	if appId > 0 {
+		query = query.Where("app_id = ?", appId)
+	}
+	err := query.First(&task).Error
 	exist, err := RecordExist(err)
 	if err != nil {
 		return nil, false, err
@@ -451,14 +465,21 @@ func GetByTaskId(userId int, taskId string) (*Task, bool, error) {
 }
 
 func GetByTaskIdsForPlatforms(userID int, platforms []constant.TaskPlatform, taskIDs []string) ([]*Task, error) {
+	return GetByTaskIdsForPlatformsScoped(userID, 0, platforms, taskIDs)
+}
+
+// GetByTaskIdsForPlatformsScoped is the app-isolation-aware form of
+// GetByTaskIdsForPlatforms: a non-zero appID only returns tasks of that app.
+func GetByTaskIdsForPlatformsScoped(userID, appID int, platforms []constant.TaskPlatform, taskIDs []string) ([]*Task, error) {
 	if len(platforms) == 0 || len(taskIDs) == 0 {
 		return nil, nil
 	}
 	var tasks []*Task
-	err := DB.
-		Where("user_id = ? AND platform IN ? AND task_id IN ?", userID, platforms, taskIDs).
-		Find(&tasks).Error
-	if err != nil {
+	query := DB.Where("user_id = ? AND platform IN ? AND task_id IN ?", userID, platforms, taskIDs)
+	if appID > 0 {
+		query = query.Where("app_id = ?", appID)
+	}
+	if err := query.Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -495,6 +516,81 @@ func (Task *Task) InsertWithContext(ctx context.Context, omitColumns ...string) 
 		tx = tx.Omit(omitColumns...)
 	}
 	return tx.Create(Task).Error
+}
+
+// Initial usage and task visibility must survive or roll back together.
+func (task *Task) InsertWithAppUsage(ctx context.Context, usedQuotaDelta int, omitColumns ...string) error {
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := adjustUserAppUsedQuota(tx, task.UserId, task.AppId, usedQuotaDelta); err != nil {
+			return err
+		}
+		if len(omitColumns) > 0 {
+			tx = tx.Omit(omitColumns...)
+		}
+		return tx.Create(task).Error
+	})
+}
+
+// SettleAppWalletQuota reconciles the persisted charge, wallet and app usage in
+// one transaction. Its signed delta is zero for retries, even with a stale caller.
+// Positive final charges may overdraw the wallet; refunds must fit its capacity.
+func (task *Task) SettleAppWalletQuota(ctx context.Context, actualQuota int) (int, error) {
+	if task.ID <= 0 || task.UserId <= 0 || task.AppId <= 0 || actualQuota < 0 || actualQuota > common.MaxQuota {
+		return 0, errors.New("invalid app wallet task settlement")
+	}
+	var delta int
+	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var persisted Task
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ? AND app_id = ?", task.ID, task.UserId, task.AppId).First(&persisted).Error; err != nil {
+			return err
+		}
+		if persisted.PrivateData.BillingSource == "subscription" && persisted.PrivateData.SubscriptionId > 0 {
+			return errors.New("subscription task cannot settle an app wallet")
+		}
+		if persisted.Quota < 0 || persisted.Quota > common.MaxQuota {
+			return errors.New("invalid persisted task quota")
+		}
+		// A stale terminal observer must not change finances after another
+		// observer has published a different terminal outcome.
+		if persisted.Status == TaskStatusSuccess || persisted.Status == TaskStatusFailure {
+			if (task.Status == TaskStatusSuccess || task.Status == TaskStatusFailure) && task.Status != persisted.Status {
+				return errors.New("task financial outcome already published")
+			}
+			if persisted.Status == TaskStatusSuccess && actualQuota != persisted.Quota || persisted.Status == TaskStatusFailure && actualQuota != 0 {
+				return errors.New("task financial outcome already published")
+			}
+		}
+		delta = actualQuota - persisted.Quota
+		if delta == 0 {
+			return nil
+		}
+		if delta < 0 {
+			if err := increaseUserAppQuota(tx, task.UserId, task.AppId, -delta); err != nil {
+				return err
+			}
+		} else {
+			if _, err := ensureUserAppWallet(tx, task.UserId, task.AppId); err != nil {
+				return err
+			}
+			result := tx.Model(&UserAppWallet{}).Where("user_id = ? AND app_id = ?", task.UserId, task.AppId).
+				Update("quota", gorm.Expr("quota - ?", delta))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		if err := adjustUserAppUsedQuota(tx, task.UserId, task.AppId, delta); err != nil {
+			return err
+		}
+		return tx.Model(&persisted).Update("quota", actualQuota).Error
+	})
+	if err != nil {
+		return 0, err
+	}
+	task.Quota = actualQuota
+	return delta, nil
 }
 
 type taskSnapshot struct {
@@ -555,7 +651,17 @@ func (t *Task) UpdateQuota() error {
 // falls back to INSERT ON CONFLICT when the WHERE-guarded UPDATE matches
 // zero rows, which silently bypasses the CAS guard.
 func (t *Task) UpdateWithStatus(fromStatus TaskStatus) (bool, error) {
-	result := DB.Model(t).Where("status = ?", fromStatus).Select("*").Updates(t)
+	query := DB.Model(t).Where("status = ?", fromStatus).Select("*")
+	legacyMarkerClear := t.SubmitTime > 0 && t.SubmitTime < TaskRefundLegacyCutoff && t.Status == TaskStatusFailure && t.Quota == 0
+	if t.AppId > 0 && !(t.PrivateData.BillingSource == "subscription" && t.PrivateData.SubscriptionId > 0) && !legacyMarkerClear {
+		// Poll snapshots never own the durable financial marker. A terminal
+		// publication must still match the quota finalized by this observer.
+		query = query.Omit("quota")
+		if t.Status == TaskStatusSuccess || t.Status == TaskStatusFailure {
+			query = query.Where("quota = ?", t.Quota)
+		}
+	}
+	result := query.Updates(t)
 	if result.Error != nil {
 		return false, result.Error
 	}

@@ -77,6 +77,9 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 // persists the pending order and creates the Creem checkout link. It is shared
 // by the dashboard and the OAuth app checkout endpoint.
 func createCreemSubscriptionOrder(ctx context.Context, user *model.User, plan *model.SubscriptionPlan) (string, string, error) {
+	if err := paymentComplianceError(); err != nil {
+		return "", "", err
+	}
 	if plan == nil {
 		return "", "", common.NewMessage("Subscription plan does not exist")
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	taskdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -400,10 +401,37 @@ func oauthPolicyModelName(c *gin.Context, modelName string) string {
 	if taskID == "" {
 		return ""
 	}
-	if task, exists, err := model.GetByTaskId(c.GetInt("id"), taskID); err == nil && exists && task != nil {
+	if task, exists, err := model.GetByTaskIdScoped(c.GetInt("id"), common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskID); err == nil && exists && task != nil {
 		return task.Properties.OriginModelName
 	}
 	return ""
+}
+
+func checkOAuthMidjourneyModelWhitelist(c *gin.Context, modelName string, relayMode int) *types.NewAPIError {
+	if modelName != "" || common.GetContextKeyString(c, constant.ContextKeyOAuthAppClientID) == "" {
+		return checkOAuthAppModelWhitelist(c, modelName)
+	}
+	appID := common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID)
+	switch relayMode {
+	case relayconstant.RelayModeMidjourneyTaskFetch, relayconstant.RelayModeMidjourneyTaskImageSeed:
+		if task := model.GetByMJIdScoped(c.GetInt("id"), appID, c.Param("id")); task != nil {
+			modelName = service.CovertMjpActionToModelName(task.Action)
+		}
+	case relayconstant.RelayModeMidjourneyTaskFetchByCondition:
+		var condition struct {
+			IDs []string `json:"ids"`
+		}
+		if err := common.UnmarshalBodyReusable(c, &condition); err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		for _, task := range model.GetByMJIdsScoped(c.GetInt("id"), appID, condition.IDs) {
+			if apiErr := checkOAuthAppModelWhitelist(c, service.CovertMjpActionToModelName(task.Action)); apiErr != nil {
+				return apiErr
+			}
+		}
+		return nil
+	}
+	return checkOAuthAppModelWhitelist(c, modelName)
 }
 
 // taskErrorFromOAuthPolicy adapts an OAuth whitelist rejection to the task

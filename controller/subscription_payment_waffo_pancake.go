@@ -81,6 +81,9 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 // configuration, persists the pending order and creates the Pancake checkout
 // session. It is shared by the dashboard and the OAuth app checkout endpoint.
 func createWaffoPancakeSubscriptionOrder(ctx context.Context, user *model.User, plan *model.SubscriptionPlan) (*waffoPancakeSubscriptionCheckoutResult, error) {
+	if err := paymentComplianceError(); err != nil {
+		return nil, err
+	}
 	if plan == nil {
 		return nil, common.NewMessage("Subscription plan does not exist")
 	}
