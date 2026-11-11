@@ -90,58 +90,55 @@ GET /api/oauth-apps/<app-id>        # response contains created_by
 # or simply read the developer's `sub` from GET /oauth/userinfo after login.
 ```
 
-Set it as `INITIAL_ADMIN_SUB` in the deployment environment and use one of:
+Set the numeric gateway subject as `INITIAL_ADMIN_SUB`; it is not a Supabase
+UUID. Provision the first owner out of band after that person completes one
+OAuth login. No request-time or first-signup grant is permitted. If `created_by`
+is `0` (legacy app), the operator must explicitly choose the owner.
 
-- seed `app_admins` with that `sub` in the first migration (preferred), or
-- let the server perform an **idempotent first-run grant** when `app_admins` has
-  no `owner` **and** the verified `sub` from `getUser()` equals
-  `INITIAL_ADMIN_SUB`.
-
-The second option is safe because the `sub` is fixed by the developer, not by
-whoever arrives first. If `created_by` is `0` (legacy app), grant the first owner
-manually with the SQL below.
-
-Prerequisite: that person completes one OAuth login so a row exists in
-`auth.users` and `auth.identities` with the provider `sub`.
-
-Preferred: store administrators in your own table.
+Use `app_admins(client_id, user_id, role, created_at)` with a unique constraint
+on `(client_id, user_id)`, RLS enabled, and writes restricted to `service_role`.
+Before granting, verify the selected active OAuth app's project ref and the
+`custom:newapi` provider's issuer/client configuration. Resolve only provider-owned
+`auth.identities`, not editable user metadata:
 
 ```sql
--- app_admins: user_id primary key, gateway_sub text unique, admin_role text,
--- granted_by text, created_at timestamptz default now()
-insert into public.app_admins (user_id, gateway_sub, admin_role, granted_by)
-select i.user_id, i.identity_data->>'sub', 'owner', 'bootstrap'
-from auth.identities i
-where i.provider = 'custom:newapi'
-  and i.identity_data->>'sub' = '<gateway-sub>'
-on conflict (user_id) do update set admin_role = 'owner';
+DO $bootstrap$
+DECLARE
+  gateway_sub text := '<positive-numeric-gateway-sub>';
+  app_client text := '<selected-client-id>';
+  resolved_user uuid;
+BEGIN
+  IF gateway_sub !~ '^[1-9][0-9]*$' OR app_client !~ '^[A-Za-z0-9_-]+$' THEN
+    RAISE EXCEPTION 'Invalid bootstrap binding';
+  END IF;
+  SELECT i.user_id INTO STRICT resolved_user
+  FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
+  WHERE i.provider = 'custom:newapi'
+    AND i.identity_data->>'sub' = gateway_sub
+    AND pg_catalog.jsonb_typeof(i.identity_data->'aud') = 'array'
+    AND pg_catalog.jsonb_typeof(i.identity_data->'aud'->0) = 'string'
+    AND i.identity_data->'aud'->>0 = app_client
+    AND (SELECT count(*) FROM auth.identities linked
+         WHERE linked.user_id = u.id AND linked.provider = 'custom:newapi') = 1;
+  INSERT INTO public.app_admins (client_id, user_id, role, created_at)
+  VALUES (app_client, resolved_user, 'owner', now())
+  ON CONFLICT (client_id, user_id) DO NOTHING;
+END;
+$bootstrap$;
 ```
 
-Alternative: write `app_metadata` (only `service_role` can do this).
-
-```sql
-update auth.users u
-set raw_app_meta_data =
-      coalesce(u.raw_app_meta_data, '{}'::jsonb)
-      || jsonb_build_object('admin_role', 'owner')
-where u.id = (
-  select i.user_id
-  from auth.identities i
-  where i.provider = 'custom:newapi'
-    and i.identity_data->>'sub' = '<gateway-sub>'
-  limit 1
-);
-```
-
-Run it with `supabase db query "<sql>"` against the linked project (or commit it
-as a one-off migration). Direct SQL is acceptable for the one-time bootstrap;
-for grants made at runtime, call the Auth Admin API
-(`auth.admin.updateUserById(id, { app_metadata })`) instead. Then:
+Run with `supabase db query --remote=<20-char-project-ref> --yes "<sql>"`.
+The identity is checked in the grant transaction; zero or multiple matches abort.
+For a metadata-based single-App deployment, the protected SQL column is
+`auth.users.raw_app_meta_data` (`app_metadata` is the Auth API property), never
+`raw_user_meta_data`. Do not use a global metadata role across multiple Apps.
+Then:
 
 1. The bootstrapped user signs out and in again (or calls
    `supabase.auth.refreshSession()`) so the new claim is in the session.
-2. Server code reads the role with `supabase.auth.getUser()` — it hits the Auth
-   server, so it sees the change immediately; `getSession()` does not.
+2. Server code verifies the user with `supabase.auth.getUser()`, then checks the
+   App-scoped `app_admins` role with the protected helper below. A cached
+   `getSession()` or a global metadata role is not an authorization boundary.
 3. Verify `GET /api/admin/me` returns the identity for that user and `403` for a
    normal user.
 4. Record who granted it, when, and why in the audit log or the change record.
@@ -178,18 +175,19 @@ Requirements:
 - Admin RLS helper (if the browser client also reads admin data):
 
 ```sql
--- security definer so the policy can read auth.users.app_metadata
+-- current_app_client_id() verifies the protected provider identity (supabase.md §3).
 create or replace function public.is_app_admin()
 returns boolean
 language sql
 stable
 security definer
-set search_path = public
+set search_path = ''
 as $$
-  select coalesce(
-    (select (u.app_metadata->>'admin_role') in ('admin', 'owner')
-       from auth.users u where u.id = auth.uid()),
-    false
+  select exists (
+    select 1 from public.app_admins a
+    where a.user_id = auth.uid()
+      and a.client_id = public.current_app_client_id()
+      and a.client_id <> '' and a.role in ('admin', 'owner')
   );
 $$;
 
@@ -219,9 +217,10 @@ export async function requireAdmin() {
     },
   );
 
-  const { data } = await supabase.auth.getUser();
-  const role = data.user?.app_metadata?.admin_role;
-  if (!data.user || (role !== 'admin' && role !== 'owner')) {
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) throw new Response('unauthorized', { status: 401 });
+  const { data: isAdmin, error: roleError } = await supabase.rpc('is_app_admin');
+  if (roleError || isAdmin !== true) {
     throw new Response('forbidden', { status: 403 });
   }
   return data.user;
@@ -247,20 +246,31 @@ async function request(path: string, init?: RequestInit) {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
     credentials: 'same-origin',
   });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message ?? res.statusText);
-  return res.json();
+  const json = await res.json();
+  if (!res.ok || json.success !== true) throw new Error(json.message ?? res.statusText);
+  return json;
 }
 
 export const dataProvider: DataProvider = {
   getList: async ({ resource, pagination, sorters, filters }) => {
     const params = new URLSearchParams();
-    const { current = 1, pageSize = 20 } = pagination ?? {};
-    params.set('page', String(current));
+    const { currentPage = 1, pageSize = 20 } = pagination ?? {};
+    params.set('page', String(currentPage));
     params.set('page_size', String(pageSize));
-    for (const sorter of sorters ?? []) params.set('sort', `${sorter.field}:${sorter.order}`);
-    for (const filter of filters ?? []) params.append('filter', `${filter.field}:${filter.value}`);
+    if ((sorters?.length ?? 0) > 1) throw new Error('Multiple sorters are not supported');
+    const sorter = sorters?.[0];
+    if (sorter) {
+      params.set('sort', sorter.field);
+      params.set('order', sorter.order);
+    }
+    for (const filter of filters ?? []) {
+      if (!('field' in filter) || filter.operator !== 'eq') {
+        throw new Error('Only equality field filters are supported');
+      }
+      params.set(filter.field, String(filter.value));
+    }
     const json = await request(`/${resource}?${params}`);
-    return { data: json.data, total: json.total };
+    return { data: json.data.items, total: json.data.total };
   },
   getOne: async ({ resource, id }) => ({ data: (await request(`/${resource}/${id}`)).data }),
   create: async ({ resource, variables }) => ({
@@ -297,8 +307,11 @@ Wiring rules:
   `notification`.
 - Use the Next.js router provider (or a small custom one) so Refine URLs map to
   `app/(admin)/**`.
-- Map `useTable` to antd `Table` with `manualPagination`, `manualSorting`,
-  `manualFiltering`; never paginate in the browser over a full table.
+- Set Refine pagination/sort/filter modes to `server` and bind Ant Design `Table`
+  pagination and `onChange` to that state. This example supports one sorter and
+  simple field filters; reject unsupported logical operators rather than silently
+  treating them as supported. Route Handlers whitelist sort/filter fields.
+  Never paginate in the browser over a full table.
 
 ## 7. Ant Design in the App Router
 

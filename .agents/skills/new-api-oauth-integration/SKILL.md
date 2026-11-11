@@ -182,7 +182,7 @@ All AI traffic goes to `/v1/*` with the OAuth access token; that token is not a 
 - Never forward cookies, `client_secret`, or dashboard PATs upstream; preserve the upstream status and content type.
 - Retry a `401` exactly once after refresh, then surface it.
 - Relay billing for an OAuth access token is **App-scoped**: pre-consume, settlement, and refund all use the quota pool of the App that owns the token (`app_quota`), never the user's platform wallet.
-- Async task endpoints (video, music, and other task submissions) reject App access tokens with HTTP `403` and body `{"code":"app_task_unsupported","message":"Async tasks are not supported for app access tokens"}`. Handle it as a capability limit, not an auth or quota failure; task flows need a dashboard key or PAT.
+- Async task endpoints (video, music, and other task submissions, including Midjourney) accept App access tokens. Pre-consume, completion-delta settlement, and refunds all use the App quota pool, the App wallet `used_quota` is maintained alongside platform statistics, and tasks are isolated by `app_id`: an App token can only read, remix, or cancel tasks its own App created, and Midjourney fetch/action endpoints resolve tasks within that same App.
 
 ## Step 4: Users, Quota, and Payments
 
@@ -224,20 +224,9 @@ Mandatory for any app that stores new-api users or business data in Supabase; co
 | Session refresh | `proxy.ts` (`middleware.ts` before Next.js 16) | `getUser()` keeps the cookie session fresh and protects routes |
 | Trusted server / Edge Function | `service_role` / secret | Bypasses RLS; never expose it and never prefix it with `NEXT_PUBLIC_` |
 
-- **RLS + `client_id` is the enforcement point**: every business table carries `client_id text not null`, policies compare it to `current_app_client_id()` (security definer) and `auth.uid()`, and `client_id` is derived from the JWT, never from the request body. A check that exists only in a Client Component or a query filter is not authorization.
-  - **⚠️ `current_app_client_id()` 必须从 `user_metadata.aud` 取，不要从 `app_metadata.client_id`**：Supabase OAuth 回调自动填充的 `app_metadata` 只有 `provider` / `providers`，**不会自动写入 `client_id`**。new-api OAuth 的 `client_id` 实际落在 JWT 的 `user_metadata.aud` 数组里（上游 OIDC provider 的 `aud` claim）。函数实现模板：
-    ```sql
-    CREATE OR REPLACE FUNCTION public.current_app_client_id()
-      RETURNS text LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO 'public' AS $$
-      select coalesce(
-        auth.jwt() -> 'app_metadata' ->> 'client_id',          -- 兜底：手动设置过的
-        (auth.jwt() -> 'user_metadata' -> 'aud' ->> 0),         -- 主路径：new-api OAuth 写入 aud[0]
-        ''
-      );
-    $$;
-    ```
-    这个坑导致的症状是：**所有 Server Component 查询返回空结果，但 anon client 直接打 storage API 能拿到数据**。修之前先 `select current_app_client_id()` 看返回值是不是你的 OAuth app `client_id`。
-- Edge Functions verify the caller with `supabase.auth.getUser()`, derive `gateway_user_id` / `client_id` from `app_metadata`, and use the service-role key only inside the function. Work beyond the function limits returns a job id (see **Long-Running Work and Supabase Limits** in `references/standards/supabase.md`).
+- **RLS + `client_id` is the enforcement point**: every business table carries `client_id text not null`; policies enforce both `current_app_client_id()` and `auth.uid()`. Derive the App from trusted server-controlled mapping/config, bound to exactly one verified `auth.identities` row with `provider = 'custom:newapi'` and its provider-owned `identity_data.sub` / audience. Use the fail-closed helper in `references/standards/supabase.md` §3; missing, malformed, mismatched, or ambiguous identities must deny access.
+  - Never trust `user_metadata`, `raw_user_meta_data`, or request fields for tenant, gateway identity, or admin grants — users can edit that metadata, including `aud` and `sub`. Supabase's automatically populated `app_metadata.provider` / `providers` is not an App binding; any server-written mapping must first verify the provider identity and configured issuer/client. Empty RLS results are not a reason to fall back to editable claims or anon Storage access.
+- Edge Functions verify the caller with `supabase.auth.getUser()`, resolve `gateway_user_id` / `client_id` through the same protected provider identity and server mapping/config, and use the service-role key only inside the function. Work beyond the function limits returns a job id (see **Long-Running Work and Supabase Limits** in `references/standards/supabase.md`).
 - **Media goes to Supabase Storage**: the database keeps only `bucket` + `path` (`{client_id}/{user_id}/{uuid}.{ext}`), reads use short-lived signed URLs from a private bucket, and MIME type and size are validated server-side.
 - The app-side `seed-assets.ts` uploads a `pack.json` asset library and upserts by `(client_id, provider_id)`; bootstrap runs it when a pack root is given (see **Seeding the Asset Packs** in `references/standards/supabase.md`).
 
@@ -294,7 +283,7 @@ Optional surface with a different stack: Next.js App Router + Ant Design 5 + `@r
 - [ ] State, verifier, and session cookies are `HttpOnly`, `Secure` in production, and `SameSite=Lax`.
 - [ ] Gateway tokens stay in memory and are never logged or written to `user_metadata`; a rotated refresh token replaces the old one.
 - [ ] OAuth tokens are used for `/v1/*` and `/oauth/*` (`userinfo`, `subscription/*`, `products*`, `topup/checkout`, `logs`) only; every `/api/*` dashboard endpoint rejects them.
-- [ ] App access tokens are never sent to async task endpoints; the `403 app_task_unsupported` response is treated as a capability limit.
+- [ ] Async tasks and Midjourney calls made with an App access token settle against the App quota pool and can only access tasks created by the same App (`app_id` isolation); no `app_task_unsupported` capability limit applies.
 - [ ] A browser return URL or `pending` order is never proof of payment; admin permissions come from your own store and the server guard.
 - [ ] `SUPABASE_SECRET_KEY` is imported only by `server-only` code and never exposed through `NEXT_PUBLIC_*`.
 - [ ] All media lives in Supabase Storage private buckets; only `bucket` + `path` is in Postgres.

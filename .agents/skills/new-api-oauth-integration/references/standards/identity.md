@@ -54,7 +54,7 @@ newapi-cli api PUT /api/oauth-apps/<id> --data '{
 }'
 ```
 
-对于 `status=1` 且带 `supabase_project_ref` 的 public client（典型的 outfit-demo 形态），可以直接**复用**而不是新建：跳过 supabase link / custom provider 步骤，直接拿 `client_id` + `supabase_project_ref` 写 `.env.local`。
+对于 `status=1` 且带有效 20 字符 `supabase_project_ref` 的 public client，可以**复用**，但仍须校验当前项目、issuer、client_id、PKCE 和 scopes。bootstrap 的 override 必须唯一匹配当前 App 列表；所有 Supabase keys/db 命令显式使用 `--remote=<ref>`。已有 `.env.local` 或进程环境的项目/App/网关绑定必须一致；已有加密 key 必须保持原值且为 canonical base64 编码的 32 字节，缺失才使用 CSPRNG 生成，空值、重复或格式错误都中止。迁移目录属于旧项目时使用独立工作副本，不要复用或重新绑定旧项目迁移。
 
 ## 2. Choose an integration mode
 
@@ -231,14 +231,14 @@ curl -s "https://<project>.supabase.co/auth/v1/admin/custom-providers" \
   -H "apikey: $SUPABASE_SECRET_KEY" -H "Authorization: Bearer $SUPABASE_SECRET_KEY"
 
 # 幂等安全的检查：如果 GET 返回的 providers 数组里 identifier="custom:newapi"
-# 且 issuer 匹配、pkce_enabled=true、email_optional=true，就跳过 POST。
+# 且 issuer/client_id/scopes 匹配、pkce_enabled=true、email_optional=true，就跳过 POST。
 # 否则 DELETE 后重建：
 curl -X DELETE "https://<project>.supabase.co/auth/v1/admin/custom-providers/custom:newapi" \
   -H "apikey: $SUPABASE_SECRET_KEY" -H "Authorization: Bearer $SUPABASE_SECRET_KEY"
 ```
 
 - **Gateway 必须先可达再创建**：Auth service 在 provider 创建时立即拉 issuer 的 `.well-known/openid-configuration`，gateway HTTPS 不可达会导致 provider 创建失败（或 discovery_document 为空，后续登录 500）。
-- `supabase db push` 之前先 `supabase link --project-ref <ref>`。link 完成后用 `supabase projects api-keys` 拿 anon + service_role 写入 `.env.local`。
+- `supabase db push --remote=<ref> --yes` 之前先成功执行 `supabase link --project-ref <ref>`；link 失败必须中止。用 `supabase projects api-keys --remote=<ref> --reveal` 拿 anon + service_role，捕获输出不打印密钥；保留已有 `.env.local` 的加密 key 和部署绑定。
 - **Supabase site_url / additional_redirect_urls** 的配置方式见 `local-acceptance.md`（`http://localhost:*` 默认允许；非 localhost 域名必须显式加入）。
 
 - The Auth service fetches the issuer's discovery document when the provider is created, so the gateway must already be publicly reachable over HTTPS and `ServerAddress` must equal the issuer. `discovery` must list `none` in `token_endpoint_auth_methods_supported` (public client).
@@ -311,17 +311,30 @@ is the reference implementation and:
 
 ### `sub` vs `auth.users.id` 映射
 
-`newapi-cli api GET /api/user/self` 返回的 `id`（整数）= OAuth `sub` 声明，
-存放在 Supabase `auth.users.raw_user_meta_data->>'sub'`。而 `auth.users.id`
-（UUID）才是业务表 `app_admins.user_id` 需要的值。两者不能混用。
-bootstrap.ps1 / bootstrap.sh 自动处理这个映射；手动设置时用：
+`newapi-cli api GET /api/user/self` 的正整数 `id` = OAuth `sub`；可信来源是
+Auth 管理的 `auth.identities.identity_data`，不是用户可编辑的
+`raw_user_meta_data`。`auth.users.id`（UUID）才是 `app_admins.user_id`。
+`INITIAL_ADMIN_SUB` 保留网关数字 subject，不要改成 UUID。
+bootstrap.ps1 / bootstrap.sh 校验当前 App、项目与 provider 配置后自动映射。
+手动解析时，先校验 `<newapi_user_id>` 为正整数字符串，并使用受信任配置中的
+`<client_id>`；查询必须恰好返回一行（不能用 `LIMIT 1` 隐藏歧义）：
 
 ```sql
-SELECT id::text FROM auth.users
-WHERE raw_user_meta_data->>'sub' = '<newapi_user_id>'
-  AND raw_app_meta_data->>'provider' = 'custom:newapi'
-LIMIT 1;
+SELECT u.id::text
+FROM auth.identities i JOIN auth.users u ON u.id = i.user_id
+WHERE i.provider = 'custom:newapi'
+  AND i.identity_data->>'sub' = '<newapi_user_id>'
+  AND i.identity_data->>'sub' ~ '^[1-9][0-9]*$'
+  AND pg_catalog.jsonb_typeof(i.identity_data->'aud') = 'array'
+  AND pg_catalog.jsonb_typeof(i.identity_data->'aud'->0) = 'string'
+  AND i.identity_data->'aud'->>0 = '<client_id>'
+  AND (SELECT count(*) FROM auth.identities linked
+       WHERE linked.user_id = u.id AND linked.provider = 'custom:newapi') = 1;
 ```
+
+用 `supabase db query --remote=<20-char-project-ref> --read-only "<sql>"`。
+授权插入时必须再次验证唯一身份，使用 `app_admins(client_id,user_id)` 复合唯一键；
+完整事务示例见 `admin-dashboard.md` §3.1。
 
 The first-owner grant itself is described in `admin-dashboard.md` (section 3.1).
 
@@ -368,7 +381,7 @@ then call `supabase.auth.signOut()`.
 
 ### OAuth access token 能调的外部端点（除了 /v1/models）
 
-new-api 暴露以下 `/oauth/...` 端点供 OAuth access token 直接调用，避免外部 app 去碰 dashboard PAT 或走 `/api/user/self`。所有端点按 token 的 `client_id` 限定到单个 App。
+new-api 暴露以下 `/oauth/...` 端点供 OAuth access token 直接调用，避免外部 app 去碰 dashboard PAT 或走 `/api/user/self`。套餐、商品、充值按 token 的 `client_id` 限定到单个 App；`/oauth/logs` 当前是 token 用户的全量脱敏日志，不按 App 过滤。
 
 | Endpoint | Scope | Request | Response |
 |----------|-------|---------|----------|
@@ -378,11 +391,11 @@ new-api 暴露以下 `/oauth/...` 端点供 OAuth access token 直接调用，�
 | `GET /oauth/products` | `api:read` | — | `{ "products": [ { id, name, description, price_amount, currency, quota_amount, max_purchase_per_user } ] }` |
 | `POST /oauth/products/checkout` | `api:write` | `{ "product_id": 1, "payment_method": "balance" }` | 余额支付 `{ "status": "success", "order_id": "...", "quota_amount": ... }`；waffo_pancake 返回 `checkout_url` |
 | `POST /oauth/topup/checkout` | `api:write` | `{ "amount": 10, "payment_method": "balance" }` | 余额支付 `{ "status": "success", "payment_method": "balance", "quota": ... }`；在线支付 `{ "status": "pending", "checkout_url": "...", "order_id": "...", "expires_at": "..." }` |
-| `GET /oauth/logs` | `api:read` | query `page=1&page_size=20&order=desc` | `{ total, items: [ { id, created_at, type, username, token_name, model_name, quota, prompt_tokens, completion_tokens, use_time, is_stream, channel_id, channel_name, group, request_id, upstream_request_id } ] }`；**脱敏**：绝不包含 prompt/response 原文、上游 API key、other 字段 |
+| `GET /oauth/logs` | `api:read` | query `page=1&page_size=20`；默认 1/20，page 最大 10000、page_size 上限 100；无效/非正值使用默认值；`order` 不支持 | `{ total, page, page_size, items: [ { id, created_at, username, token_name, model_name, quota, prompt_tokens, completion_tokens, use_time, channel_name, group, request_id } ] }`；token 用户的**全量**日志，非 App 隔离；不含 `content`、`other`、`ip`、`user_id`、`token_id`、`channel_id`、`type`、`is_stream`、`upstream_request_id` |
 
 - `POST /oauth/topup/checkout` 的 `balance` 是**从用户平台余额划转到该 App 额度池**，不是免费发放；余额不足返回 `400 checkout_failed`。在线充值当前支持 `waffo_pancake`（也是省略 `payment_method` 时的默认值），套餐还支持 `epay` / `stripe` / `creem`。
 - `GET /oauth/userinfo` 的 `quota` 是平台钱包，`app_quota` 是 token 所属 App 的额度池；OAuth relay 的预扣/结算/退款只作用于 App 额度池。平台 `quota` 语义不变。
-- App access token 调异步任务接口返回 `403`，body 为 `{"code":"app_task_unsupported","message":"Async tasks are not supported for app access tokens"}`；异步任务需用 dashboard key 或 PAT。
+- App access token 可直接调用异步任务与 Midjourney 接口；预扣、完成后的差额结算与失败退款都走该 App 的额度池，App 钱包 `used_quota` 与平台统计同步累加。任务按 `app_id` 隔离：App token 只能查询、remix、取消本 App 创建的任务，Midjourney 的 fetch/action 接口同样只命中本 App 的任务。
 - 所有端点只认 OAuth access token；不接受 PAT。
 - 后端不创建数据库迁移；TopUp 记录沿用 dashboard 侧同一 schema（App 充值记录带 `app_id`）。
-- bootstrap.sh/.ps1 已自动把新建 OAuth app 的 scopes 设为 `openid profile email api:read api:write`，并同步到 Supabase provider 的 scopes。外部 app 登录时用户授权后即可同时拿到额度、购买 App 套餐/商品、发起充值、查看消费日志。
+- bootstrap.sh/.ps1 只复用当前已启用的 public OAuth app，不创建或修改 OAuth app；缺少 `openid profile email api:read api:write` 时中止。Supabase provider 同步这些 scopes。外部 app 登录授权后即可拿到额度、购买 App 套餐/商品、发起充值、查看用户级脱敏日志。

@@ -93,10 +93,26 @@ create table public.user_outfits (
 );
 create index idx_user_outfits_client on public.user_outfits(client_id);
 
+-- app_config(id = 1, client_id) is provisioned out of band, writable only
+-- by service_role. auth.identities is managed by Auth, not by app users.
 create or replace function public.current_app_client_id()
 returns text language sql stable
-security definer set search_path = public, pg_temp
-as $$ select client_id from public.app_config where id = 1; $$;
+security definer set search_path = ''
+as $$
+  select coalesce((
+    select case when count(*) = 1 then min(c.client_id) end
+    from auth.identities i
+    join public.app_config c on c.id = 1
+    where i.user_id = auth.uid() and i.provider = 'custom:newapi'
+      and i.identity_data->>'sub' ~ '^[1-9][0-9]*$'
+      and pg_catalog.jsonb_typeof(i.identity_data->'aud') = 'array'
+      and pg_catalog.jsonb_typeof(i.identity_data->'aud'->0) = 'string'
+      and i.identity_data->'aud'->>0 = c.client_id
+      and c.client_id <> ''
+      and (select count(*) from auth.identities linked
+           where linked.user_id = auth.uid() and linked.provider = 'custom:newapi') = 1
+  ), '');
+$$;
 revoke execute on function public.current_app_client_id() from public, anon;
 grant execute on function public.current_app_client_id() to authenticated, service_role;
 
@@ -108,8 +124,13 @@ create policy "user_outfits own rows" on public.user_outfits for all
 
 - `enable row level security` on **every** table in `public`, including config
   and lookup tables.
-- Policies compare `client_id` to `current_app_client_id()` so several apps can
-  share one project without rewriting policies.
+- Policies compare `client_id` to `current_app_client_id()` and reject an empty
+  result. This example is for one configured App per project. For shared projects,
+  use a service-role-only identity-to-App mapping bound to the verified provider
+  issuer/subject/audience, not a request-selected config row or mutable metadata.
+- `app_config` and identity mappings must not be writable by `anon` or
+  `authenticated`. Missing, malformed, mismatched, or ambiguous provider identities
+  fail closed; never fall back to `user_metadata.aud` / `sub` or a global admin role.
 - The helper is `security definer` with a fixed `search_path`; execute is revoked
   from `public`/`anon`.
 - Never derive `client_id` from request input; take it from server state.
@@ -163,7 +184,9 @@ create policy "app_media_read" on storage.objects
 for select to authenticated
 using (
   bucket_id = 'app-media'
+  and public.current_app_client_id() <> ''
   and (storage.foldername(name))[1] = public.current_app_client_id()
+  and (storage.foldername(name))[2] = auth.uid()::text
 );
 
 create policy "app_media_write" on storage.objects
@@ -180,7 +203,10 @@ Rules:
 - Path convention: `{client_id}/{user_id}/{uuid}.{ext}`. Store `bucket` and
   `path` in Postgres; never store signed URLs (they expire) or the bytes.
 - Keep buckets private unless the asset is genuinely public. Read private
-  objects through short-lived `createSignedUrl` links generated on the server.
+  objects through short-lived `createSignedUrl` links generated with the authenticated
+  user's RLS client. If service_role is necessary, verify both App and owner before
+  signing; never accept an arbitrary browser-supplied path. Shared catalog assets
+  need a separate explicitly scoped policy, not a tenant-wide private-user read.
 - RLS on `storage.objects` is the authorization point; a private bucket alone is
   not access control.
 - Validate MIME type and size **server-side** before upload (an accepted file

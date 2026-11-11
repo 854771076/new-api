@@ -45,25 +45,42 @@ matches new-api's `common/gin.go`.
 ```typescript
 // app/api/outfits/route.ts
 import { NextResponse } from 'next/server';
-import { createAdminSupabase } from '@/lib/supabase/admin';
+import { createServerSupabase } from '@/lib/supabase/server';
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10));
-  const pageSize = Math.min(100, Math.max(1, parseInt(url.searchParams.get('page_size') ?? '20', 10)));
-  const sort = url.searchParams.get('sort') ?? 'created_at';
+  const pageInput = Number(url.searchParams.get('page') ?? '1');
+  const sizeInput = Number(url.searchParams.get('page_size') ?? '20');
+  const page = Number.isSafeInteger(pageInput) && pageInput > 0 ? pageInput : 1;
+  const pageSize = Number.isSafeInteger(sizeInput) && sizeInput > 0 ? Math.min(100, sizeInput) : 20;
+  if (!Number.isSafeInteger(page * pageSize)) {
+    return NextResponse.json({ success: false, message: 'Bad request' }, { status: 400 });
+  }
+  const requestedSort = url.searchParams.get('sort') ?? 'created_at';
+  const sort = ['created_at', 'name_zh'].includes(requestedSort) ? requestedSort : 'created_at';
   const order = url.searchParams.get('order') === 'asc' ? 'asc' : 'desc';
   const category = url.searchParams.get('category');
 
-  const supabase = createAdminSupabase();
-  let q = supabase.from('outfits').select('*', { count: 'exact' })
+  // Cookie session + anon/publishable key: all reads still enforce RLS.
+  const supabase = await createServerSupabase();
+  const { data: auth, error: authError } = await supabase.auth.getUser();
+  if (authError || !auth.user) {
+    return NextResponse.json({ success: false, message: 'Unauthorized' }, { status: 401 });
+  }
+  // Protected provider identity + server config; see supabase.md §3.
+  const { data: clientId, error: scopeError } = await supabase.rpc('current_app_client_id');
+  if (scopeError || typeof clientId !== 'string' || !clientId) {
+    return NextResponse.json({ success: false, message: 'Forbidden' }, { status: 403 });
+  }
+  let q = supabase.from('outfits').select('id, name_zh, category, created_at', { count: 'exact' })
+    .eq('client_id', clientId)
     .eq('is_active', true)
     .order(sort, { ascending: order === 'asc' })
     .range((page - 1) * pageSize, page * pageSize - 1);
   if (category) q = q.eq('category', category);
 
   const { data, count, error } = await q;
-  if (error) return NextResponse.json({ success: false, message: error.message }, { status: 500 });
+  if (error) return NextResponse.json({ success: false, message: 'Internal error' }, { status: 500 });
 
   return NextResponse.json({
     success: true,
@@ -78,6 +95,10 @@ export async function GET(request: Request) {
   });
 }
 ```
+
+This is an authenticated App catalog, not an anonymous service-role endpoint.
+RLS must enforce the same App binding; user-private tables additionally require
+`user_id = auth.uid()` (and an explicit owner filter when appropriate).
 
 ### 前端分页控件（DaisyUI）
 
@@ -157,7 +178,7 @@ export const fail = (
 ### 前端错误处理约定
 
 - **401**：清除 session + redirect `/login`（不是弹窗）
-- **403**：toast "额度不足，请先充值" + 打开 App 充值（`POST /oauth/topup/checkout`）；只有平台额度不足才跳 newapi `/topup`。App 级接口的 403 还可能是 `access_denied` 或 `app_task_unsupported`，见 §3，不要一律当成额度不足
+- **403**：toast "额度不足，请先充值" + 打开 App 充值（`POST /oauth/topup/checkout`）；只有平台额度不足才跳 newapi `/topup`。App 级接口的 403 还可能是 `access_denied`，见 §3，不要一律当成额度不足
 - **429**：toast + 按钮重试（带倒计时）
 - **500**：toast "服务暂时不可用，请稍后重试" + 日志上报
 - 所有非 2xx 都要有用户可见反馈（toast / alert banner），不能静默吞掉
@@ -217,7 +238,6 @@ Next.js 信封约定，直接对接时按本节处理。
 | 404 | `not_found` | 套餐/商品不存在 |
 | 500 | `server_error` | 读取目录或创建支付单时服务端失败 |
 | 502 | `checkout_failed` | App 充值的支付网关或上游依赖暂时不可用 |
-| 403 | `app_task_unsupported` | 用 App token 调异步任务接口（体为 `{"code","message","data"}`，不是 OAuth 错误格式） |
 
 | 接口 | Scope | 说明 |
 |------|-------|------|

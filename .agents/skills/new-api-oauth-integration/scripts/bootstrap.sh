@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/bootstrap.sh — auto-configure new-api OAuth + Supabase external app
 # POSIX counterpart of bootstrap.ps1. Depends on: newapi-cli (already logged in),
-# supabase CLI, bun, curl, and jq or python3.
+# supabase CLI, bun, curl, openssl, and jq or python3.
 # Usage: from project root: bash scripts/bootstrap.sh --project-name "AI Outfit"
 # Flow: probe newapi-cli login -> probe existing OAuth app (reuse) ->
 #       supabase link -> write .env.local -> db push -> custom:newapi provider
@@ -12,14 +12,6 @@ step() { printf '\n>> %s\n' "$1"; }
 ok() { printf '   OK  %s\n' "$1"; }
 warn() { printf '   WARN %s\n' "$1"; }
 err() { printf '   ERR  %s\n' "$1"; }
-
-# indent_output prefixes multi-line CLI output with the same 3 spaces ps1 uses.
-indent_output() {
-  [ -n "$1" ] || return 0
-  while IFS= read -r line; do
-    printf '   %s\n' "$line"
-  done <<< "$1"
-}
 
 # json_field <json> <jq filter> <python expression>
 # Prints the queried value (empty when absent). jq is preferred; python3 is the
@@ -92,7 +84,7 @@ cd "$script_dir/.." || exit 1
 
 # --- 1. Toolchain ---
 step '检查工具链'
-for cmd in newapi-cli supabase bun; do
+for cmd in newapi-cli supabase bun openssl; do
   if ! cmd_path="$(command -v "$cmd")"; then
     err "未找到 $cmd；先运行 bash scripts/check-env.sh --install，或手动安装后重试"
     exit 1
@@ -102,19 +94,21 @@ done
 
 # --- 2. newapi-cli auth status ---
 step 'newapi-cli auth status'
-if ! auth_status_json="$(newapi-cli auth status)"; then
+if ! auth_status_json="$(newapi-cli auth status 2>/dev/null)"; then
   err '未登录：请先运行 newapi-cli auth login'
   exit 1
 fi
-indent_output "$auth_status_json"
+if [ "$(json_field "$auth_status_json" '.expired // false' '"true" if d.get("expired") else "false"')" = 'true' ]; then
+  err 'newapi-cli session expired'; exit 1
+fi
 
 # --- 3. Get self user + OAuth apps ---
 step '获取 new-api 用户与 OAuth 应用'
-if ! self_json="$(newapi-cli api GET /api/user/self)"; then
+if ! self_json="$(newapi-cli api GET /api/user/self 2>/dev/null)"; then
   err '读取 /api/user/self 失败'
   exit 1
 fi
-if ! apps_json="$(newapi-cli api GET /api/oauth-apps)"; then
+if ! apps_json="$(newapi-cli api GET /api/oauth-apps 2>/dev/null)"; then
   err '读取 /api/oauth-apps 失败'
   exit 1
 fi
@@ -122,93 +116,161 @@ fi
 self_username="$(json_field "$self_json" '.username // ""' 'd.get("username") or ""')"
 self_id="$(json_field "$self_json" '.id // ""' 'd.get("id", "")')"
 self_role="$(json_field "$self_json" '.role // ""' 'd.get("role", "")')"
-if [ -z "$self_id" ]; then
+if [[ ! "$self_id" =~ ^[1-9][0-9]*$ ]]; then
   err '无法解析当前用户 id'
   exit 1
 fi
-ok "用户：$self_username（id=$self_id, role=$self_role）"
+ok "User id=$self_id"
 
 # --- 4. Pick the OAuth app (reuse) ---
-selected_client_id="$client_id_override"
-supabase_project_ref=''
-if [ -z "$selected_client_id" ]; then
-  app_summary="$(json_field "$apps_json" \
-    '[.[]? | select(.public_client == true and ((.supabase_project_ref // "") != ""))] | if length == 0 then empty else (.[0] | "\(.client_id // "")\t\(.supabase_project_ref // "")\t\(.name // "")") end' \
-    'next(("\t".join([a.get("client_id") or "", a.get("supabase_project_ref") or "", a.get("name") or ""]) for a in d if a.get("public_client") is True and (a.get("supabase_project_ref") or "")), "")')"
-  if [ -z "$app_summary" ]; then
-    warn '未找到 public_client=true 且配置了 supabase_project_ref 的 OAuth 应用；请先在 new-api 后台创建'
-    exit 1
+export NEWAPI_APP_CLIENT_ID="$client_id_override"
+candidates="$(json_field "$apps_json" \
+  '[.[] | select(if env.NEWAPI_APP_CLIENT_ID != "" then .client_id == env.NEWAPI_APP_CLIENT_ID else .status == 1 and .public_client == true and (.supabase_project_ref // "") != "" end)]' \
+  'json.dumps([a for a in d if (a.get("client_id") == os.environ.get("NEWAPI_APP_CLIENT_ID") if os.environ.get("NEWAPI_APP_CLIENT_ID") else a.get("status") == 1 and a.get("public_client") is True and a.get("supabase_project_ref"))])')"
+unset NEWAPI_APP_CLIENT_ID
+if [ "$(json_field "$candidates" 'length' 'len(d)')" != '1' ]; then
+  err 'Select exactly one current OAuth app using --client-id'; exit 1
+fi
+app_valid="$(json_field "$candidates" \
+  '.[0] | .status == 1 and .public_client == true and (["openid","profile","email","api:read","api:write"] - .scopes | length == 0)' \
+  '"true" if d[0].get("status") == 1 and d[0].get("public_client") is True and set(["openid","profile","email","api:read","api:write"]).issubset(d[0].get("scopes") or []) else "false"')"
+selected_client_id="$(json_field "$candidates" '.[0].client_id' 'd[0].get("client_id") or ""')"
+supabase_project_ref="$(json_field "$candidates" '.[0].supabase_project_ref' 'd[0].get("supabase_project_ref") or ""')"
+if [ "$app_valid" != 'true' ] || [[ ! "$selected_client_id" =~ ^[A-Za-z0-9_-]+$ ]] || [[ ! "$supabase_project_ref" =~ ^[a-z0-9]{20}$ ]]; then
+  err 'Selected app must be active, public, have required scopes and a valid project ref'; exit 1
+fi
+server_url="$(json_field "$auth_status_json" '.server // ""' 'd.get("server") or ""')"
+if [[ ! "$server_url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[-A-Za-z0-9._~/]*)?$ ]]; then
+  err 'Gateway must be an HTTPS URL without credentials, query, or fragment'; exit 1
+fi
+
+# Read dotenv as data, never source credentials as shell code.
+env_value() {
+  local name="$1" line value='' count=0 pattern="^[[:space:]]*(export[[:space:]]+)?$1([[:space:]]|=|$)"
+  if [ -f .env.local ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      if [[ "$line" =~ $pattern ]]; then
+        if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?${name}[[:space:]]*=(.*)$ ]]; then
+          err "Malformed $name declaration (value suppressed)" >&2; return 1
+        fi
+        value="${BASH_REMATCH[2]}"
+        count=$((count + 1))
+      fi
+    done < .env.local
   fi
-  IFS=$'\t' read -r selected_client_id supabase_project_ref app_name <<< "$app_summary"
-  ok "复用 OAuth 应用：$app_name -> client_id=$selected_client_id"
-  ok "绑定 Supabase 项目：$supabase_project_ref"
+  if [ "$count" -gt 1 ]; then err "Duplicate $name declaration (values suppressed)" >&2; return 1; fi
+  if [ "$count" -eq 1 ]; then printf '%s' "$value"; else return 3; fi
+}
+for name in NEXT_PUBLIC_SUPABASE_URL SUPABASE_URL NEXT_PUBLIC_GATEWAY_CLIENT_ID GATEWAY_CLIENT_ID NEXT_PUBLIC_GATEWAY_BASE_URL GATEWAY_BASE_URL GATEWAY_PUBLIC_URL; do
+  case "$name" in
+    *SUPABASE_URL) expected="https://$supabase_project_ref.supabase.co" ;;
+    *CLIENT_ID) expected="$selected_client_id" ;;
+    *) expected="$server_url" ;;
+  esac
+  if previous="$(env_value "$name")"; then
+    [ "$previous" = "$expected" ] || { err "Existing $name binding differs; use another working copy"; exit 1; }
+  else
+    [ "$?" -eq 3 ] || exit 1
+  fi
+  if previous="$(printenv "$name")"; then
+    [ "$previous" = "$expected" ] || { err "Environment $name binding differs; aborting"; exit 1; }
+  fi
+done
+if [ -f supabase/.temp/project-ref ]; then
+  prior_ref="$(<supabase/.temp/project-ref)"
+  [ "${prior_ref%$'\r'}" = "$supabase_project_ref" ] || { err 'Working copy belongs to another Supabase project'; exit 1; }
+fi
+key_present=false
+vault_key=''
+if vault_key="$(env_value GATEWAY_TOKEN_ENCRYPTION_KEY)"; then key_present=true;
+else [ "$?" -eq 3 ] || exit 1; fi
+if process_key="$(printenv GATEWAY_TOKEN_ENCRYPTION_KEY)"; then
+  if [ "$key_present" = true ] && [ "$vault_key" != "$process_key" ]; then
+    err 'Encryption key contexts differ (values suppressed)'; exit 1
+  fi
+  vault_key="$process_key"
+  key_present=true
+fi
+if [ "$key_present" = true ]; then
+  key_length="$(printf '%s' "$vault_key" | openssl base64 -d -A 2>/dev/null | wc -c)"
+  canonical_key="$(printf '%s' "$vault_key" | openssl base64 -d -A 2>/dev/null | openssl base64 -A)"
+  if [ "$key_length" -ne 32 ] || [ "$canonical_key" != "$vault_key" ]; then
+    err 'Existing encryption key is malformed (value suppressed)'; exit 1
+  fi
+  for name in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_GATEWAY_CLIENT_ID GATEWAY_PUBLIC_URL; do
+    if ! env_value "$name" >/dev/null && ! printenv "$name" >/dev/null; then
+      err 'Existing encryption key has no complete deployment binding'; exit 1
+    fi
+  done
 else
-  export NEWAPI_APP_CLIENT_ID="$selected_client_id"
-  supabase_project_ref="$(json_field "$apps_json" \
-    '.[]? | select(.client_id == env.NEWAPI_APP_CLIENT_ID) | .supabase_project_ref // ""' \
-    'next((a.get("supabase_project_ref") or "" for a in d if a.get("client_id") == os.environ.get("NEWAPI_APP_CLIENT_ID")), "")')"
-  unset NEWAPI_APP_CLIENT_ID
-  if [ -z "$supabase_project_ref" ]; then
-    err "client_id=$selected_client_id 未绑定 supabase_project_ref；请在 new-api 后台补充后重试"
-    exit 1
-  fi
-  ok "使用指定 OAuth 应用：client_id=$selected_client_id"
-  ok "绑定 Supabase 项目：$supabase_project_ref"
+  vault_key="$(openssl rand -base64 32 2>/dev/null)"
 fi
 
 # --- 5. Supabase link ---
 step "supabase link --project-ref $supabase_project_ref"
-if ! supabase link --project-ref "$supabase_project_ref"; then
+if ! supabase link --project-ref "$supabase_project_ref" >/dev/null 2>&1; then
   err 'supabase link 失败'
   exit 1
 fi
 
 # --- 6. Supabase API keys ---
 step '获取 Supabase API keys'
-if ! keys_text="$(supabase projects api-keys 2>&1)"; then
-  indent_output "$keys_text"
+if ! keys_text="$(supabase projects api-keys "--remote=$supabase_project_ref" --reveal 2>/dev/null)"; then
   err '获取 Supabase API keys 失败；请先运行 supabase login'
   exit 1
 fi
 
-# The CLI prints a "NAME | KEY" table; take the second column of each row.
-anon_key="$(printf '%s\n' "$keys_text" | awk -F'|' '$1 ~ /^[[:space:]]*anon[[:space:]]*$/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }')"
-service_role_key="$(printf '%s\n' "$keys_text" | awk -F'|' '$1 ~ /^[[:space:]]*service_role[[:space:]]*$/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit }')"
+anon_key=''
+service_role_key=''
+while IFS= read -r line; do
+  if [[ "$line" =~ ^[[:space:]]*\|?[[:space:]]*(anon|service_role)[[:space:]]*\|[[:space:]]*(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)[[:space:]]*\|?[[:space:]]*$ ]]; then
+    case "${BASH_REMATCH[1]}" in
+      anon) anon_key="${BASH_REMATCH[2]}" ;;
+      service_role) service_role_key="${BASH_REMATCH[2]}" ;;
+    esac
+  fi
+done <<< "$keys_text"
 if [ -z "$anon_key" ] || [ -z "$service_role_key" ]; then
   err '未能解析 anon / service_role key；请确认已 supabase login 且项目已 link'
   exit 1
 fi
 
-server_url="$(json_field "$auth_status_json" '.server // ""' 'd.get("server") or ""')"
-if [ -z "$server_url" ]; then
-  err '无法确定 new-api 服务地址（newapi-cli auth status 缺少 server）'
-  exit 1
-fi
-
-ok "网关：$server_url"
-ok "Anon key（长度=${#anon_key}）"
-ok "Service_role key（长度=${#service_role_key}）"
+ok 'Supabase keys resolved (values suppressed)'
 
 # --- 7. Write .env.local ---
 step '写入 .env.local'
 umask 077
+app_origin='http://localhost:3000'
+if previous="$(env_value APP_ORIGIN)"; then app_origin="$previous";
+else [ "$?" -eq 3 ] || exit 1; fi
+env_tmp="$(mktemp .env.local.XXXXXX)"
+trap 'rm -f "$env_tmp"' EXIT
 {
-  printf '# auto-generated by scripts/bootstrap.sh\n'
+  if [ -f .env.local ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      if [[ ! "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(NEXT_PUBLIC_SUPABASE_URL|NEXT_PUBLIC_SUPABASE_ANON_KEY|SUPABASE_SECRET_KEY|GATEWAY_TOKEN_ENCRYPTION_KEY|NEXT_PUBLIC_GATEWAY_BASE_URL|GATEWAY_PUBLIC_URL|NEXT_PUBLIC_GATEWAY_CLIENT_ID|APP_ORIGIN|INITIAL_ADMIN_SUB)[[:space:]]*= ]]; then
+        printf '%s\n' "$line"
+      fi
+    done < .env.local
+  else printf '# auto-generated by scripts/bootstrap.sh\n'; fi
   printf 'NEXT_PUBLIC_SUPABASE_URL=https://%s.supabase.co\n' "$supabase_project_ref"
   printf 'NEXT_PUBLIC_SUPABASE_ANON_KEY=%s\n' "$anon_key"
   printf 'SUPABASE_SECRET_KEY=%s\n' "$service_role_key"
+  printf 'GATEWAY_TOKEN_ENCRYPTION_KEY=%s\n' "$vault_key"
   printf 'NEXT_PUBLIC_GATEWAY_BASE_URL=%s\n' "$server_url"
   printf 'GATEWAY_PUBLIC_URL=%s\n' "$server_url"
   printf 'NEXT_PUBLIC_GATEWAY_CLIENT_ID=%s\n' "$selected_client_id"
-  printf 'APP_ORIGIN=http://localhost:3000\n'
+  printf 'APP_ORIGIN=%s\n' "$app_origin"
   printf 'INITIAL_ADMIN_SUB=%s\n' "$self_id"
-} > .env.local
+} > "$env_tmp"
+mv "$env_tmp" .env.local
 chmod 600 .env.local
 ok '.env.local 已写入（权限 600）'
 
 # --- 8. db push ---
-step 'supabase db push --remote --yes'
-if ! supabase db push --remote --yes; then
+step 'supabase db push'
+if ! supabase db push "--remote=$supabase_project_ref" --yes >/dev/null 2>&1; then
   err 'supabase db push 失败'
   exit 1
 fi
@@ -222,22 +284,27 @@ if providers_json="$(curl -fsS --max-time 15 \
   -H "apikey: $service_role_key" \
   -H "Authorization: Bearer $service_role_key" \
   "$custom_providers_url" 2>/dev/null)"; then
-  provider_info="$(json_field "$providers_json" \
-    '[.providers[]? | select(.identifier == "custom:newapi")] | if length == 0 then empty else (.[0] | "\(.issuer // "")\t\(.pkce_enabled // false)\t\(.email_optional // false)") end' \
-    'next(("\t".join([p.get("issuer") or "", "true" if p.get("pkce_enabled") else "false", "true" if p.get("email_optional") else "false"]) for p in (d.get("providers") or []) if p.get("identifier") == "custom:newapi"), "")')"
-
-  if [ -n "$provider_info" ]; then
-    IFS=$'\t' read -r provider_issuer provider_pkce provider_email_optional <<< "$provider_info"
-    ok "custom:newapi 已存在（issuer=$provider_issuer, pkce=$provider_pkce）"
-    if [ "$provider_issuer" != "$server_url" ] || [ "$provider_pkce" != 'true' ] || [ "$provider_email_optional" != 'true' ]; then
+  provider_matches="$(json_field "$providers_json" '[.providers[] | select(.identifier == "custom:newapi")]' 'json.dumps([p for p in d["providers"] if p.get("identifier") == "custom:newapi"])')"
+  provider_count="$(json_field "$provider_matches" 'length' 'len(d)')"
+  case "$provider_count" in 0|1) ;; *) err 'Invalid or ambiguous provider list'; exit 1 ;; esac
+  provider_info=''
+  if [ "$provider_count" = 1 ]; then
+    provider_info='present'
+    provider_issuer="$(json_field "$provider_matches" '.[0].issuer' 'd[0].get("issuer") or ""')"
+    provider_client="$(json_field "$provider_matches" '.[0].client_id' 'd[0].get("client_id") or ""')"
+    provider_valid="$(json_field "$provider_matches" \
+      '.[0] | .pkce_enabled == true and .email_optional == true and (["openid","profile","email","api:read","api:write"] - .scopes | length == 0)' \
+      '"true" if d[0].get("pkce_enabled") is True and d[0].get("email_optional") is True and set(["openid","profile","email","api:read","api:write"]).issubset(d[0].get("scopes") or []) else "false"')"
+    ok 'custom:newapi exists'
+    if [ "$provider_issuer" != "$server_url" ] || [ "$provider_client" != "$selected_client_id" ] || [ "$provider_valid" != true ]; then
       warn 'provider 配置与网关不一致，删除后重建'
       if curl -fsS --max-time 15 -X DELETE \
         -H "apikey: $service_role_key" \
         -H "Authorization: Bearer $service_role_key" \
-        "$custom_providers_url/custom:newapi" -o /dev/null; then
+        "$custom_providers_url/custom:newapi" -o /dev/null 2>/dev/null; then
         provider_info=''
       else
-        err 'provider 删除失败'
+        err 'provider 删除失败'; exit 1
       fi
     fi
   fi
@@ -249,63 +316,74 @@ if providers_json="$(curl -fsS --max-time 15 \
       -H "apikey: $service_role_key" \
       -H "Authorization: Bearer $service_role_key" \
       -H 'Content-Type: application/json' \
-      -d "$provider_body" -o /dev/null "$custom_providers_url"; then
+      -d "$provider_body" -o /dev/null "$custom_providers_url" 2>/dev/null; then
       ok 'provider 已创建'
     else
-      err 'provider 创建失败'
+      err 'provider 创建失败'; exit 1
     fi
   fi
 else
-  err 'provider 检查/创建失败：无法读取 provider 列表（确认 service_role key 与项目 ref）'
+  err 'provider 检查/创建失败：无法读取 provider 列表（确认 service_role key 与项目 ref）'; exit 1
 fi
 
 # --- 10. Authorize endpoint smoke test ---
 step 'authorize 端点冒烟测试'
 authorize_url="https://$supabase_project_ref.supabase.co/auth/v1/authorize?provider=custom:newapi&redirect_to=http://localhost:3000/auth/callback"
 authorize_status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-  -H "apikey: $service_role_key" \
-  -H "Authorization: Bearer $service_role_key" \
+  -H "apikey: $anon_key" \
   "$authorize_url" 2>/dev/null || true)"
 case "$authorize_status" in
-  302|303|307) ok "authorize -> $authorize_status" ;;
-  *) warn "authorize 返回 ${authorize_status:-无响应}（期望 302/303/307）" ;;
+  302|303|307|308) ok "authorize -> $authorize_status" ;;
+  *) err 'Authorize test failed (details suppressed)'; exit 1 ;;
 esac
 
 # --- 11. Admin bootstrap ---
-# new-api OAuth sub is an integer user id (stored in auth.users.raw_user_meta_data.sub).
-# app_admins.user_id must be auth.users.id (UUID). Query to map them.
-step "管理员初始化：解析 auth.users 中 sub=$self_id 的 UUID"
-uuid_query="SELECT id::text FROM auth.users WHERE raw_user_meta_data->>'sub' = '$self_id' AND raw_app_meta_data->>'provider' = 'custom:newapi' LIMIT 1;"
-uuid_result="$(supabase db query --remote --yes "$uuid_query" 2>&1 || true)"
-indent_output "$uuid_result"
-
-admin_uuid="$(printf '%s\n' "$uuid_result" | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | head -n 1 || true)"
-if [ -n "$admin_uuid" ]; then
-  ok "auth.users UUID：$admin_uuid"
-  admin_insert="$(supabase db query --remote --yes "INSERT INTO public.app_admins (user_id, role, created_at) VALUES ('$admin_uuid'::uuid, 'owner', now()) ON CONFLICT (user_id) DO NOTHING RETURNING id, role;" 2>&1 || true)"
-  indent_output "$admin_insert"
-
-  trap 'rm -f .env.local.tmp' EXIT
-  {
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        INITIAL_ADMIN_SUB=*) printf 'INITIAL_ADMIN_SUB=%s\n' "$admin_uuid" ;;
-        *) printf '%s\n' "$line" ;;
-      esac
-    done < .env.local
-  } > .env.local.tmp
-  mv .env.local.tmp .env.local
-  chmod 600 .env.local
-  ok '.env.local 的 INITIAL_ADMIN_SUB 已更新为 UUID'
-else
-  warn "未找到 sub=$self_id 的 auth.users 记录；管理员需先用 custom:newapi 登录一次"
-  warn "然后手动执行：supabase db query --remote \"INSERT INTO public.app_admins (user_id, role, created_at) VALUES ('<uuid>'::uuid, 'owner', now());\""
+step 'Admin bootstrap: resolve trusted provider identity'
+identity_filter="FROM auth.identities AS i
+JOIN auth.users AS u ON u.id = i.user_id
+WHERE i.provider = 'custom:newapi'
+  AND i.identity_data->>'sub' = '$self_id'
+  AND pg_catalog.jsonb_typeof(i.identity_data->'aud') = 'array'
+  AND pg_catalog.jsonb_typeof(i.identity_data->'aud'->0) = 'string'
+  AND i.identity_data->'aud'->>0 = '$selected_client_id'
+  AND (SELECT count(*) FROM auth.identities AS linked
+       WHERE linked.user_id = u.id AND linked.provider = 'custom:newapi') = 1"
+uuid_query="SELECT u.id::text $identity_filter;"
+if ! uuid_result="$(supabase db query "--remote=$supabase_project_ref" --read-only "$uuid_query" 2>/dev/null)"; then
+  err 'Identity query failed (output suppressed)'; exit 1
 fi
+uuid_pattern='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+uuid_count=0
+admin_uuid=''
+while [[ "$uuid_result" =~ $uuid_pattern ]]; do
+  admin_uuid="${BASH_REMATCH[0]}"
+  uuid_count=$((uuid_count + 1))
+  uuid_result="${uuid_result#*"$admin_uuid"}"
+done
+if [ "$uuid_count" -ne 1 ]; then
+  err 'Expected exactly one trusted identity; log in first or resolve ambiguity'; exit 1
+fi
+admin_insert="DO \$bootstrap\$
+DECLARE resolved_user uuid;
+BEGIN
+  SELECT u.id INTO STRICT resolved_user $identity_filter;
+  IF resolved_user <> '$admin_uuid'::uuid THEN
+    RAISE EXCEPTION 'Bootstrap identity changed';
+  END IF;
+  INSERT INTO public.app_admins (client_id, user_id, role, created_at)
+  VALUES ('$selected_client_id', resolved_user, 'owner', now())
+  ON CONFLICT (client_id, user_id) DO NOTHING;
+END;
+\$bootstrap\$;"
+if ! supabase db query "--remote=$supabase_project_ref" --yes "$admin_insert" >/dev/null 2>&1; then
+  err 'Owner grant failed (output suppressed)'; exit 1
+fi
+ok 'App-scoped owner bootstrap applied'
 
 # --- 12. Asset seed (optional) ---
 if [ -n "$pack_root" ]; then
   step "资产导入：bun run scripts/seed-assets.ts --pack-root $pack_root --client-id $selected_client_id"
-  if ! bun run scripts/seed-assets.ts --pack-root "$pack_root" --client-id "$selected_client_id"; then
+  if ! bun run scripts/seed-assets.ts --pack-root "$pack_root" --client-id "$selected_client_id" >/dev/null 2>&1; then
     err '资产导入失败'
     exit 1
   fi

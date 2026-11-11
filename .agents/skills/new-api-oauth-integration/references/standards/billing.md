@@ -5,9 +5,10 @@ surfaces exist:
 
 - `/api/*` — the dashboard user system (platform wallet, platform plans, PATs).
   It rejects OAuth access tokens; use a dashboard session or a PAT.
-- `/oauth/*` — App-scoped identity, quota, plans, products, top-up, and logs.
-  It accepts the OAuth access token directly and never touches another App's
-  data.
+- `/oauth/*` — identity, App quota, plans, products, and top-up accept the OAuth
+  access token. Catalog/payment calls are App-scoped. `/oauth/logs` is the
+  exception: it returns the token owner's user-wide redacted logs without an
+  App filter; do not label it as this App's usage history.
 
 An OAuth App has its own catalog (`app_id`) and its own quota pool
 (`app_quota`). Platform `quota` keeps its original meaning and is not charged
@@ -281,9 +282,12 @@ Rules specific to the App pool:
   also requires the channel configuration and, for `stripe`, the plan's
   `stripe_price_id`; `epay` uses the first configured epay method. Missing
   configuration returns `400 checkout_failed`.
-- An App access token cannot submit async tasks: HTTP `403`
-  `{"code":"app_task_unsupported","message":"Async tasks are not supported for app access tokens"}`.
-  This is a capability limit regardless of quota.
+- An App access token can submit async tasks and Midjourney calls. Pre-consume,
+  completion-delta settlement, and refunds all use `app_quota`, and the App
+  wallet `used_quota` is maintained alongside the platform statistics. Tasks are
+  isolated by `app_id`: the token can only read, remix, or cancel tasks its App
+  created, and Midjourney fetch/action endpoints resolve tasks within that same
+  App.
 
 ### Subscriptions
 
@@ -388,7 +392,7 @@ Choose the access mode that matches the identity flow:
 |------|-------------------------|-----|
 | Dashboard session (embedded dashboard or BFF login) | Yes | Browser session cookie on the gateway origin, or a same-site BFF |
 | PAT (`profile:read`, `wallet:read`, `billing:read`, `usage:read`) | Yes, for that user | User creates it in the new-api dashboard |
-| OAuth access token only (Supabase direct mode) | App pool and App catalog: yes; platform wallet and order history: no | `/oauth/*` for `app_quota`, plans, products, top-up, logs; `/api/*` still rejects OAuth tokens |
+| OAuth access token only (Supabase direct mode) | App pool/catalog and platform wallet totals: yes; order/subscription history: no | `/oauth/userinfo` includes platform `quota` and App `app_quota`; `/oauth/*` handles App purchases and user-wide redacted logs; `/api/*` rejects OAuth tokens |
 
 Rules:
 
@@ -436,4 +440,10 @@ Rules:
 
 - 用 OAuth access token 调 `/oauth/logs`（scope `api:read`），走 Route Handler 代理（前端不拿 token）。
 - 返回已脱敏的白名单字段；不需要也不应该在外部 app 显示 prompt 原文或上游 API key。
-- Profile 页面用 DaisyUI `<table>` 渲染，客户端分页 + 空状态。
+- Profile 页面用 DaisyUI `<table>` 渲染，服务端分页（`page`/`page_size`）+ 空状态。
+- `/oauth/logs` 当前返回用户全量日志，未按 App 筛选。成功响应是裸
+  `{total,page,page_size,items}`；item 白名单仅为 `id,created_at,username,token_name,
+  model_name,quota,prompt_tokens,completion_tokens,use_time,channel_name,group,request_id`。
+  不返回 `type,is_stream,channel_id,upstream_request_id,content,other,ip,user_id,token_id`。
+  默认 page=1/page_size=20，page 最大 10000，page_size 上限 100；不支持 `order`。
+  不能靠客户端筛选把此接口变成租户隔离；如需 App 专属日志，需要新的服务端契约。
