@@ -39,7 +39,7 @@
 | `plugins/tasks/xfyun-asr/plugin.js` | 643 行 | ASR 任务插件：签名、上传、轮询、结果解析、计费事实回传 |
 | `relay/channel/task/jsplugin/adaptor.go` | 1929 行 | 宿主侧任务插件适配器（协议编解码、结算、错误映射） |
 | `scripts/tools/xfyun-asr-e2e/asr-client.mjs` | 438 行 | 端侧联调脚本，同步/异步双模式 |
-| `handbook/asr/async-task.md` | 514 行 | 业务侧接口文档（配置、提交、查询、轮询、计费、错误码、排查） |
+| `handbook/asr/async-task.md` | 501 行 | 业务侧接口文档（提交、查询、轮询、计费、错误处理；服务端配置与排障放在附录） |
 | `.agents/skills/task-plugin-dev/` | 448 行 | 任务插件开发 skill，沉淀方法论供后续插件复用 |
 
 ### 2.3 交付方式

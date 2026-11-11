@@ -1,6 +1,8 @@
 # ASR 错误码参考
 
-> 本页列出 ASR 接口（`Qwen3-ASR-1.7B`、`xfyun-asr`）所有可能的错误码及其含义与处理建议。
+> 本页列出 ASR 接口（同步的 `Qwen3-ASR-1.7B`、`xfyun-asr`，以及异步任务端点上的 ASR 调用名）所有可能的错误码及其含义与处理建议。
+>
+> **业务端用法**：做重试决策时看 HTTP 状态码与 `message` 即可，不必按码分支；本页是完整码表，供需要精确判别的客户端与排障使用。
 
 ---
 
@@ -70,16 +72,19 @@
 | 502 | `bad_gateway` | `api_error` | 网关错误 | 网关异常，稍后重试 |
 | 502 | `upstream_error` | `api_error` | 上游服务错误 | ASR 引擎异常，稍后重试 |
 
-### 2.5 `503 model_not_found` 的两种情形
+### 2.5 `503 model_not_found` 的三种情形
 
-异步任务端点的 `503` 有两种成因，处置完全不同。**`message` 是区分依据**：
+异步任务端点的 `503` 有三种成因，处置完全不同。**`message` 是区分依据**：
 
 | `message` | 成因 | 处置 |
 |-----------|------|------|
 | `No available channel for model X under group Y` | 网关完全没找到承载 `X` 的渠道 | 建渠道 / 启用渠道 / 调整分组 |
 | `No available channel for model X under group Y: the model is claimed by a task plugin, which has no enabled channel serving it` | 模型名**是对的**（已被任务插件认领），但插件没有可用渠道 | 核对渠道状态、渠道分组、渠道「模型」列与提交值逐字一致 |
+| `model "X" is not served by any task plugin on the audio transcription endpoint` | 提交的是**同步接口的模型**，任务插件不提供它 | 换用任务插件的渠道暴露名；这不是配置问题，改客户端即可 |
 
-第二种常见于「模型名对了但服务端没配完」，详见 [ASR 异步任务接口文档](async-task) 的服务端配置指引。**改客户端代码对这两种都无用。**
+第二种常见于「模型名对了但服务端没配完」，详见 [ASR 异步任务接口文档](async-task) 的服务端配置指引。**前两种改客户端代码都无用。**
+
+> 这三种的**响应结构也不同**：第三种是扁平的 `{code, message, data}`，前两种把错误码包在 `error` 里。客户端解析器要兼容两种。
 
 ---
 
@@ -100,6 +105,50 @@
 **只读顶层的解析器会把第二种结构的错误码与描述都读成空**，看起来像「503 但什么信息都没有」。先判断有没有 `error` 字段，再决定从哪一层取。
 
 异步端点的错误码全集见 [ASR 异步任务接口文档](async-task) 的错误码章节。
+
+### 3.1 异步端点**不产出**第二节的语义码
+
+第二节那张表是**同步接口**的语义码表。异步任务端点不产出 `empty_audio_file` / `invalid_audio_format` / `audio_duration_exceeded` 这类语义码，原因在网关的插件运行时：
+
+| 请求侧问题 | 异步端点实际返回 |
+|-----------|----------------|
+| 缺少 `file` 字段 / 音频文件为空 | HTTP 400，`code` 为**空字符串**或 `plugin_request_invalid`，`message` 里带具体原因 |
+| `roleType` / `roleNum` 不是非负整数 | 同上，`message` 说明是哪个参数 |
+| 模型没有可用渠道 | HTTP 503，`model_not_found` |
+
+机制：网关把插件解码器抛出的错误统一包装，**插件无法自定义客户端可见的错误码**。因此异步端点的错误码是「网关自有的一小组通用码 + 上游业务码」，不是第二节那张语义码表。
+
+> 客户端在异步端点上做重试决策时，不要依赖 `empty_audio_file` 这类码：要么看 HTTP 状态码，要么看 `message` 的内容。
+
+### 3.2 异步端点的错误码表
+
+| 阶段 | HTTP 状态码 | code | 说明 |
+|------|------------|------|------|
+| 提交 | 400 | （空）/ `plugin_request_invalid` | 请求被插件解码器拒绝（缺字段、参数非法、插件自身校验不过） |
+| 提交 | 400 | `model_price_error` | 模型没有配置可用的计费表达式 |
+| 提交 | 400 | `plugin_usage_invalid` | 插件提交的用量事实不合法 |
+| 提交 | 400 | `invalid_request` | 请求格式不合法 |
+| 提交 | 401 / 403 | `invalid_api_key` / `model_access_denied` | 认证与模型权限 |
+| 提交 | 415 | （空） | `unsupported request body for this operation`：用了非 multipart 的表单体（如 `application/x-www-form-urlencoded`） |
+| 提交 | 429 | `rate_limit_exceeded` | 调用频率超限 |
+| 提交 | 502 | `fail_to_fetch_task` | 上游提交失败，可重试 |
+| 提交 | 503 | `model_not_found` | 没有可用渠道承载该模型 |
+| 查询 | 400 | `task_not_exist` / `task_plugin_system_disabled` / `task_plugin_disabled` / `invalid_api_platform` | 任务不可取回 |
+| 查询 | 501 | `not_implemented` | 当前平台不支持音频任务渲染 |
+| 任务结果 | 200 | `status: "failed"` + `error.code` | 转写失败，`error.code` 是**上游业务码**（如 `100001`），`error.message` 带上游描述 |
+
+**实测报文**（`POST /v1/audio/transcriptions/tasks`）：
+
+| 触发条件 | HTTP | code | message |
+|---------|------|------|---------|
+| 不是 multipart 上传（`application/json`） | 400 | （空） | `audio transcription requires a multipart upload with a "file" field` |
+| 用了 `application/x-www-form-urlencoded` | 415 | （空） | `unsupported request body for this operation` |
+| 缺 `file` 字段 | 400 | （空） | `audio file field "file" is required` |
+| `roleType` 不是非负整数 | 400 | （空） | `roleType must be a non-negative integer` |
+| 提交同步接口的模型（如 `xfyun-asr`） | 503 | `model_not_found` | `model "xfyun-asr" is not served by any task plugin on the audio transcription endpoint`（结构是扁平的 `{code, message, data}`） |
+| 提交插件声明名（如 `ifasr-llm-v1`） | 503 | `model_not_found` | `No available channel for model ifasr-llm-v1 under group default: the model is claimed by a task plugin, which has no enabled channel serving it`（结构是 `{error:{code, message, type}}`） |
+
+> 最后两行的**响应结构不同**：一个是扁平的 `{code, message, data}`，另一个把错误码包在 `error` 里。解析器要兼容两种。
 
 ---
 

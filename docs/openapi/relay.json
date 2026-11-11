@@ -52,6 +52,9 @@
       "name": "OpenAI音频(Audio)"
     },
     {
+      "name": "OpenAI音频(Async)"
+    },
+    {
       "name": "重排序(Rerank)"
     },
     {
@@ -1670,6 +1673,253 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AudioTranscriptionResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/transcriptions/tasks": {
+      "post": {
+        "summary": "提交音频转写任务",
+        "deprecated": false,
+        "description": "OpenAI 兼容的异步音频转写任务提交接口。\n\n只接受 multipart 文件上传。提交成功即表示任务已被接受，返回任务号；转写结果通过查询接口获取。\n",
+        "operationId": "createTranscriptionTask",
+        "tags": [
+          "OpenAI音频(Async)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "音频文件。内容原样转发，不做转码或重编码",
+                    "example": ""
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "模型标识，填服务端提供的 ASR 调用名",
+                    "example": "xfyun-ifasr-llm-v1"
+                  },
+                  "roleType": {
+                    "type": "string",
+                    "description": "说话人分离开关（非负整数）。不传则不分离说话人，转写文本里只有时间戳",
+                    "example": "1"
+                  },
+                  "roleNum": {
+                    "type": "string",
+                    "description": "说话人个数（非负整数），0 表示由服务端自动判断",
+                    "example": "0"
+                  }
+                },
+                "required": [
+                  "file",
+                  "model"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "任务已受理",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscriptionTaskResponse"
+                },
+                "example": {
+                  "id": "task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ",
+                  "object": "audio.transcription",
+                  "status": "queued",
+                  "progress": 0,
+                  "model": "xfyun-ifasr-llm-v1",
+                  "created_at": 1793025143
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "请求被拒绝：缺少 file、参数非法、或模型没有可用的计费表达式",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "401": {
+            "description": "API Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "403": {
+            "description": "无权访问该模型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "415": {
+            "description": "请求体不是 multipart 表单",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "429": {
+            "description": "调用频率超限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "502": {
+            "description": "服务端提交失败，可重试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "503": {
+            "description": "没有可用渠道承载该模型",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/audio/transcriptions/tasks/{task_id}": {
+      "get": {
+        "summary": "查询音频转写任务",
+        "deprecated": false,
+        "description": "OpenAI 兼容的异步音频转写任务查询接口。\n\n任务成功后返回转写文本、音频时长与分段列表。文本每段一行，行首是时间戳标签 `[说话人N 起始-结束]`。任务失败时 status 为 failed，error.message 是可直接展示的失败原因。\n",
+        "operationId": "getTranscriptionTask",
+        "tags": [
+          "OpenAI音频(Async)"
+        ],
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "任务号，提交接口返回的 id",
+            "required": true,
+            "example": "task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "任务状态与转写结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AudioTranscriptionTaskResponse"
+                },
+                "example": {
+                  "id": "task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ",
+                  "object": "audio.transcription",
+                  "status": "succeeded",
+                  "progress": 100,
+                  "model": "xfyun-ifasr-llm-v1",
+                  "created_at": 1793025143,
+                  "completed_at": 1793025149,
+                  "text": "[说话人1 00:00:00.420-00:00:29.930] 那今天我们看到模型的本质，其实在很多时候是今天把我们人类的知识能够有效地聚集起来……",
+                  "duration": 29.952,
+                  "segments": [
+                    {
+                      "id": 0,
+                      "start": 0.42,
+                      "end": 29.93,
+                      "text": "那今天我们看到模型的本质……",
+                      "speaker": "1"
+                    }
+                  ],
+                  "language": ""
+                }
+              }
+            },
+            "headers": {}
+          },
+          "400": {
+            "description": "任务不存在、不属于当前令牌，或结果不可取回",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "401": {
+            "description": "API Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "501": {
+            "description": "当前平台不支持音频任务渲染",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             },
@@ -3840,6 +4090,148 @@
             "type": "string"
           }
         }
+      },
+      "AudioTranscriptionSegment": {
+        "type": "object",
+        "description": "转写分段",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "分段序号",
+            "example": 0
+          },
+          "start": {
+            "type": "number",
+            "description": "分段起点（秒）",
+            "example": 0.42
+          },
+          "end": {
+            "type": "number",
+            "description": "分段终点（秒）",
+            "example": 29.93
+          },
+          "text": {
+            "type": "string",
+            "description": "该分段的转写文本"
+          },
+          "speaker": {
+            "type": "string",
+            "description": "服务端返回的说话人标识；未开启说话人分离时为空字符串",
+            "example": "1"
+          }
+        },
+        "required": [
+          "id",
+          "start",
+          "end",
+          "text"
+        ]
+      },
+      "AudioTranscriptionTaskError": {
+        "type": "object",
+        "description": "任务失败原因",
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "服务端或上游的错误码，客户端不必按码分支",
+            "example": "100001"
+          },
+          "message": {
+            "type": "string",
+            "description": "失败描述",
+            "example": "iFLYTEK transcription failed: upload failed (failType: 1)"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "AudioTranscriptionTaskResponse": {
+        "type": "object",
+        "description": "异步转写任务。提交与查询返回同一套字段：查询成功后多出 text / duration / segments / language，并补上 completed_at。",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "任务号，公开标识，查询接口使用它",
+            "example": "task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ"
+          },
+          "object": {
+            "type": "string",
+            "description": "固定值：audio.transcription",
+            "example": "audio.transcription"
+          },
+          "status": {
+            "type": "string",
+            "description": "任务状态",
+            "enum": [
+              "queued",
+              "in_progress",
+              "succeeded",
+              "failed",
+              "unknown"
+            ],
+            "example": "succeeded"
+          },
+          "progress": {
+            "type": "integer",
+            "description": "完成百分比（0-100）",
+            "example": 100
+          },
+          "model": {
+            "type": "string",
+            "description": "模型标识",
+            "example": "xfyun-ifasr-llm-v1"
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "任务创建时间戳（Unix 秒）",
+            "example": 1793025143
+          },
+          "completed_at": {
+            "type": "integer",
+            "description": "任务完成时间戳（Unix 秒），任务未完成时不返回",
+            "example": 1793025149
+          },
+          "text": {
+            "type": "string",
+            "description": "转写文本（任务成功后返回）。每段一行，行首是时间戳标签 `[说话人N 起始-结束]`（HH:MM:SS.mmm）；未开启说话人分离时标签里只有时间戳",
+            "example": "[说话人1 00:00:00.420-00:00:29.930] 那今天我们看到模型的本质……"
+          },
+          "duration": {
+            "type": "number",
+            "description": "音频时长（秒）",
+            "example": 29.952
+          },
+          "segments": {
+            "type": "array",
+            "description": "分段列表",
+            "items": {
+              "$ref": "#/components/schemas/AudioTranscriptionSegment"
+            }
+          },
+          "language": {
+            "type": "string",
+            "description": "语种标识，未返回时为空字符串",
+            "example": ""
+          },
+          "error": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AudioTranscriptionTaskError"
+              }
+            ],
+            "description": "任务失败原因，status 为 failed 时返回"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "status",
+          "progress",
+          "model",
+          "created_at"
+        ]
       },
       "SpeechRequest": {
         "type": "object",
