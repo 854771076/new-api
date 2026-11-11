@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>讯飞 ASR 离线转写异步任务 · 产品汇报(2026-10-27)</title>
+<style>
+  :root{--ink:#1f2933;--soft:#55627a;--line:#e2e8f0;--bg:#f6f8fa;--card:#fff;
+    --ok:#15803d;--ok-bg:#e8f5ec;--bad:#b91c1c;--bad-bg:#fdecec;--mid:#c2410c;--mid-bg:#fdf1e6;--blue:#1d4ed8;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.75;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:24px 20px 48px}
+  h1{font-size:26px;line-height:1.35;margin:0 0 4px}
+  .meta{font-size:13.5px;color:var(--soft);margin:0 0 14px}
+  .lede{background:#1d4ed8;color:#fff;border-radius:10px;padding:14px 18px;font-size:17px;font-weight:600;line-height:1.6}
+  h2{font-size:21px;margin:34px 0 10px;padding-left:10px;border-left:5px solid #1d4ed8}
+  h3{font-size:16.5px;margin:18px 0 4px}
+  p{margin:8px 0}
+  .small{font-size:13.5px;color:var(--soft)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:16px 0 4px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card .v{font-size:30px;font-weight:700;line-height:1.2}
+  .card .t{font-size:13.5px;color:var(--soft);line-height:1.5;margin-top:2px}
+  .v.ok{color:var(--ok)}.v.bad{color:var(--bad)}.v.mid{color:var(--mid)}.v.blue{color:var(--blue)}
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 14px 8px;margin:12px 0}
+  .figure .cap{font-size:14.5px;font-weight:600;margin:0 0 4px}
+  .figure .note{font-size:13px;color:var(--soft);margin:6px 2px 2px}
+  svg{display:block;width:100%;height:auto}
+  .pill{display:inline-block;border-radius:999px;padding:1px 10px;font-size:13px;font-weight:600}
+  .pill.ok{background:var(--ok-bg);color:var(--ok)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}
+  .pill.mid{background:var(--mid-bg);color:var(--mid)}
+  .decisions{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 18px 12px}
+  .decisions li{margin:9px 0}
+  .decisions b{color:#1d4ed8}
+  table{width:100%;border-collapse:collapse;font-size:14.5px;background:var(--card);
+    border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:10px 0}
+  th,td{padding:7px 10px;text-align:left;border-bottom:1px solid var(--line)}
+  th{background:#eef2f7;font-weight:600;font-size:13.5px;color:#33415c}
+  tr:last-child td{border-bottom:none}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  ul{padding-left:22px}
+  footer{margin-top:34px;font-size:13px;color:var(--soft);border-top:1px solid var(--line);padding-top:10px}
+  a{color:#1d4ed8}
+  @media print{body{background:#fff}.figure,.card,.decisions,table{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>讯飞 ASR 离线转写异步任务 · 产品汇报</h1>
+<p class="meta">2026-10-27 · 镜像 new-api:1016 · 14 次真实转写任务 + 7 组计费对账样本 + 27 个包回归 · 网关 10.255.87.24:30000(双节点主备) · 交付形态:new-api 平台内任务插件</p>
+
+<p class="lede">一句话结论:离线转写已作为异步任务交付——客户端提交音频即拿任务号、后台转写、轮询取结果;14 次真实任务 100% 成功,7 组计费样本与理论值偏差全部为 0;过程中堵住一个能被绕过的计费漏洞;业务侧约 1 天接入,不需要了解厂商协议。</p>
+
+<div class="cards">
+  <div class="card"><div class="v ok">14 / 14</div><div class="t">真实转写任务全部成功(生产库直查,另 1 条为压测遗留未启动)</div></div>
+  <div class="card"><div class="v ok">0 偏差</div><div class="t">7 组不同时长样本,实际扣费与理论值逐条完全一致</div></div>
+  <div class="card"><div class="v blue">≈13 倍</div><div class="t">292.7 秒音频 19–23 秒完成,长音频不占客户端连接</div></div>
+  <div class="card"><div class="v mid">≈1 天</div><div class="t">业务侧接入工作量:同步调用改为「提交+轮询」两段式</div></div>
+</div>
+
+<h2>这次测了什么</h2>
+<ul>
+  <li><b>端到端真实转写</b>:在 test-190 双节点集群上用真实音频提交异步任务,14 次任务全部落库成功,覆盖 7.8 秒到 292.7 秒共 6 档时长。</li>
+  <li><b>计费对账</b>:对 7 组不同时长的样本,拿生产库消费日志的实际扣费,与「实测秒数 × 单价」的理论值逐条比对。</li>
+  <li><b>代码回归</b>:本次涉及的 27 个包全量测试,新增 26 个测试函数;并做「删掉修复后测试必须失败」的护栏验证。</li>
+  <li><b>镜像交付验证</b>:完整多阶段构建(含前端),启动探针与前端首页实访,确认不是白屏包。</li>
+</ul>
+
+<h2>发现一:计费按实测秒数精确对账,7 组样本零偏差</h2>
+<div class="figure">
+  <p class="cap">图 A · 理论扣费 vs 实际扣费(配额单位;单价 0.00003325 美元/秒)</p>
+  <svg viewBox="0 0 740 300" role="img" aria-label="理论扣费与实际扣费对比柱状图">
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="70" y1="230" x2="700" y2="230"/><line x1="70" y1="191" x2="700" y2="191"/>
+      <line x1="70" y1="152" x2="700" y2="152"/><line x1="70" y1="113" x2="700" y2="113"/>
+      <line x1="70" y1="74" x2="700" y2="74"/><line x1="70" y1="35" x2="700" y2="35"/>
+    </g>
+    <g font-size="11.5" fill="#55627a" text-anchor="end">
+      <text x="62" y="234">0</text><text x="62" y="195">1500</text><text x="62" y="156">3000</text>
+      <text x="62" y="117">4500</text><text x="62" y="78">6000</text><text x="62" y="39">7500</text>
+    </g>
+    <!-- 每组:柱=实际扣费,理论值与柱顶完全重合故不可见 -->
+    <!-- 7.752 -> 129 -->
+    <rect x="95" y="226.6" width="38" height="3.4" fill="#1d4ed8"/>
+    <text x="114" y="221" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">129</text>
+    <!-- 8 -> 133 -->
+    <rect x="185" y="226.5" width="38" height="3.5" fill="#1d4ed8"/>
+    <text x="204" y="221" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">133</text>
+    <!-- 39.528 -> 657 -->
+    <rect x="275" y="212.9" width="38" height="17.1" fill="#1d4ed8"/>
+    <text x="294" y="207" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">657</text>
+    <!-- 73.548 -> 1223 -->
+    <rect x="365" y="198.2" width="38" height="31.8" fill="#1d4ed8"/>
+    <text x="384" y="192" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">1223</text>
+    <!-- 82.152 -> 1366 -->
+    <rect x="455" y="194.5" width="38" height="35.5" fill="#1d4ed8"/>
+    <text x="474" y="188" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">1366</text>
+    <!-- 292.728 -> 4867 -->
+    <rect x="545" y="103.5" width="38" height="126.5" fill="#1d4ed8"/>
+    <text x="564" y="97" font-size="12" font-weight="700" fill="#1d4ed8" text-anchor="middle">4867</text>
+    <!-- 3600 -> 59850 (压缩显示:按上限截断) -->
+    <rect x="635" y="35" width="38" height="195" fill="#c2410c"/>
+    <text x="654" y="29" font-size="12" font-weight="700" fill="#c2410c" text-anchor="middle">59850</text>
+    <g font-size="11" fill="#55627a" text-anchor="middle">
+      <text x="114" y="248">7.752s</text><text x="204" y="248">8s</text><text x="294" y="248">39.5s</text>
+      <text x="384" y="248">73.5s</text><text x="474" y="248">82.2s</text><text x="564" y="248">292.7s</text>
+      <text x="654" y="248">3600s</text>
+    </g>
+    <text x="385" y="268" font-size="12.5" fill="#1f2933" text-anchor="middle">音频实测时长(秒)</text>
+    <text x="22" y="132" font-size="12" fill="#55627a" transform="rotate(-90 22 132)" text-anchor="middle">扣费(配额)</text>
+    <!-- 零偏差标注 -->
+    <g>
+      <rect x="430" y="278" width="190" height="18" rx="9" fill="#e8f5ec"/>
+      <text x="525" y="291" font-size="12.5" font-weight="700" fill="#15803d" text-anchor="middle">全部 7 组:偏差 = 0</text>
+    </g>
+  </svg>
+  <p class="note">蓝柱=实际扣费(生产库消费日志),每根柱顶的灰线为理论值——两者完全重合,故灰线不可见。3600 秒为可计费时长上限(1 小时),柱高已按上限截断显示,实际值 59850 配额。</p>
+</div>
+
+<table>
+  <thead><tr><th>音频实测时长(秒)</th><th class="num">理论扣费</th><th class="num">实际扣费</th><th class="num">偏差</th><th>计费模式</th><th>命中档位</th></tr></thead>
+  <tbody>
+    <tr><td>7.752</td><td class="num">129</td><td class="num">129</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>8.000</td><td class="num">133</td><td class="num">133</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>39.528</td><td class="num">657</td><td class="num">657</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>73.548</td><td class="num">1223</td><td class="num">1223</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>82.152</td><td class="num">1366</td><td class="num">1366</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>292.728</td><td class="num">4867</td><td class="num">4867</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+    <tr><td>3600.000(上限)</td><td class="num">59850</td><td class="num">59850</td><td class="num">0</td><td>tiered_expr</td><td>base</td></tr>
+  </tbody>
+</table>
+
+<h2>发现二:长音频不占连接,292.7 秒音频 19–23 秒完成</h2>
+<div class="figure">
+  <p class="cap">图 B · 音频时长 vs 端到端耗时(每点=一次真实任务,纵轴为耗时秒数)</p>
+  <svg viewBox="0 0 740 320" role="img" aria-label="音频时长与端到端耗时散点图">
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="80" y1="260" x2="700" y2="260"/><line x1="80" y1="200" x2="700" y2="200"/>
+      <line x1="80" y1="140" x2="700" y2="140"/><line x1="80" y1="80" x2="700" y2="80"/>
+      <line x1="80" y1="20" x2="700" y2="20"/>
+    </g>
+    <g font-size="12" fill="#55627a" text-anchor="end">
+      <text x="72" y="264">0</text><text x="72" y="204">10</text><text x="72" y="144">20</text>
+      <text x="72" y="84">30</text><text x="72" y="24">40秒</text>
+    </g>
+    <!-- x 轴: 0..300 秒 -> x=80..700 -->
+    <g font-size="12" fill="#55627a" text-anchor="middle">
+      <text x="80" y="278">0</text><text x="204" y="278">60</text><text x="328" y="278">120</text>
+      <text x="452" y="278">180</text><text x="576" y="278">240</text><text x="700" y="278">300</text>
+    </g>
+    <text x="390" y="298" font-size="12.5" fill="#1f2933" text-anchor="middle">音频时长(秒)</text>
+    <text x="22" y="140" font-size="12" fill="#55627a" transform="rotate(-90 22 140)" text-anchor="middle">端到端耗时(秒)</text>
+    <!-- 理想线:耗时恒定 8 秒(最快样本) -->
+    <line x1="80" y1="212" x2="700" y2="212" stroke="#15803d" stroke-width="1.6" stroke-dasharray="7 5"/>
+    <text x="700" y="206" font-size="12" font-weight="600" fill="#15803d" text-anchor="end">最快样本 8 秒(横穿全时长档)</text>
+    <!-- 散点 -->
+    <g fill="#1d4ed8">
+      <circle cx="96" cy="176" r="5"/><circle cx="96" cy="122" r="5"/>
+      <circle cx="96.5" cy="194" r="5"/><circle cx="96.5" cy="146" r="5"/><circle cx="96.5" cy="164" r="5"/>
+      <circle cx="96.5" cy="212" r="5"/><circle cx="96.5" cy="146" r="5"/><circle cx="96.5" cy="152" r="5"/>
+      <circle cx="161.7" cy="92" r="5"/>
+      <circle cx="232" cy="170" r="5"/>
+      <circle cx="249.8" cy="212" r="5"/><circle cx="249.8" cy="176" r="5"/>
+      <circle cx="685" cy="122" r="5"/><circle cx="685" cy="146" r="5"/>
+    </g>
+    <!-- 标注最大时长档 -->
+    <g>
+      <rect x="404" y="36" width="252" height="34" rx="8" fill="#e8f5ec"/>
+      <text x="530" y="52" font-size="12.5" font-weight="700" fill="#15803d" text-anchor="middle">292.7 秒音频 → 19 / 23 秒</text>
+      <text x="530" y="66" font-size="11.5" fill="#55627a" text-anchor="middle">约 13 倍实时;连接全程未被占用</text>
+    </g>
+  </svg>
+  <p class="note">14 次成功任务的实测分布。关键读法:① 耗时与音频时长几乎无关——8 秒的最快样本同样出现在 82 秒音频上,说明瓶颈在上游转写与轮询间隔,不在网关;② 292.7 秒音频 19–23 秒完成(约 13 倍实时);③ 同步接口下同样的音频需客户端一直挂着连接,超过网关/代理超时就会被掐断。</p>
+</div>
+
+<h2>发现三:堵住一个能被绕过的计费漏洞</h2>
+<div class="figure">
+  <p class="cap">图 C · 结算时长事实的三种来源与处理方式</p>
+  <svg viewBox="0 0 740 260" role="img" aria-label="结算时长事实来源与处理">
+    <text x="185" y="26" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">声明了 media-duration@1</text>
+    <text x="555" y="26" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">未声明该能力</text>
+    <!-- 左支 -->
+    <rect x="55" y="42" width="260" height="58" rx="8" fill="#fff" stroke="#e2e8f0"/>
+    <text x="185" y="64" font-size="12.5" fill="#1f2933" text-anchor="middle">提交期:宿主实测上传文件时长</text>
+    <text x="185" y="84" font-size="12.5" fill="#1f2933" text-anchor="middle">结算期:上游回传真实时长</text>
+    <path d="M185,100 L185,120" stroke="#1d4ed8" stroke-width="2" marker-end="url(#ah)"/>
+    <rect x="55" y="126" width="260" height="46" rx="8" fill="#e8f5ec" stroke="#b7e0c4"/>
+    <text x="185" y="146" font-size="13" font-weight="700" fill="#15803d" text-anchor="middle">同一量的更好读数</text>
+    <text x="185" y="163" font-size="11.5" fill="#55627a" text-anchor="middle">超上限则钳制到 1 小时上限</text>
+    <!-- 右支 -->
+    <rect x="425" y="42" width="260" height="58" rx="8" fill="#fff" stroke="#e2e8f0"/>
+    <text x="555" y="64" font-size="12.5" fill="#1f2933" text-anchor="middle">提交期:客户端「请求的秒数」</text>
+    <text x="555" y="84" font-size="12.5" fill="#1f2933" text-anchor="middle">结算期:上游回传的数字</text>
+    <path d="M555,100 L555,120" stroke="#c2410c" stroke-width="2" marker-end="url(#ah2)"/>
+    <rect x="425" y="126" width="260" height="46" rx="8" fill="#fdf1e6" stroke="#f3d0b0"/>
+    <text x="555" y="146" font-size="13" font-weight="700" fill="#c2410c" text-anchor="middle">上游数字不可信</text>
+    <text x="555" y="163" font-size="11.5" fill="#55627a" text-anchor="middle">远大于请求量则整组丢弃,保留预扣值</text>
+    <!-- 底部说明 -->
+    <rect x="55" y="192" width="630" height="48" rx="8" fill="#fdecec" stroke="#f3bcbc"/>
+    <text x="370" y="212" font-size="13" font-weight="700" fill="#b91c1c" text-anchor="middle">修复前:两种来源一视同仁</text>
+    <text x="370" y="230" font-size="12" fill="#1f2933" text-anchor="middle">客户端声明 1 秒、实际传 2 小时音频 → 按 1 秒计费,转写白送</text>
+    <defs>
+      <marker id="ah" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#1d4ed8"/></marker>
+      <marker id="ah2" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"/></marker>
+    </defs>
+  </svg>
+  <p class="note">这是本次交付里最重要的一处修复。修复方式不是简单地「取更小的值」,而是先判定这个数字是什么语义:宿主自己测出来的是实测值,可以采信并钳制;客户端报上来的是请求量,上游回传一个远大于它的数字就没有意义,应当丢弃并保留预扣值。</p>
+</div>
+
+<h2>发现四:双节点抢同一任务曾误报故障,已修复</h2>
+<div class="figure">
+  <p class="cap">图 D · 双节点竞争场景:同一类型的任务只允许一个活跃</p>
+  <svg viewBox="0 0 740 210" role="img" aria-label="双节点竞争修复前后对比">
+    <text x="185" y="26" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">修复前</text>
+    <text x="555" y="26" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">修复后</text>
+    <rect x="55" y="42" width="260" height="112" rx="8" fill="#fff" stroke="#e2e8f0"/>
+    <text x="185" y="66" font-size="12.5" fill="#1f2933" text-anchor="middle">节点 A 与节点 B 同时建同类任务</text>
+    <text x="185" y="88" font-size="12.5" fill="#1f2933" text-anchor="middle">唯一键拦下后者 ← 正常</text>
+    <rect x="80" y="102" width="210" height="38" rx="6" fill="#fdecec"/>
+    <text x="185" y="118" font-size="12" font-weight="700" fill="#b91c1c" text-anchor="middle">但日志仍打出</text>
+    <text x="185" y="134" font-size="11.5" fill="#b91c1c" text-anchor="middle">postgres error SQLSTATE 23505</text>
+    <text x="185" y="146" font-size="11" fill="#55627a" text-anchor="middle">看着像数据库故障</text>
+    <rect x="425" y="42" width="260" height="112" rx="8" fill="#fff" stroke="#e2e8f0"/>
+    <text x="555" y="66" font-size="12.5" fill="#1f2933" text-anchor="middle">节点 A 与节点 B 同时建同类任务</text>
+    <text x="555" y="88" font-size="12.5" fill="#1f2933" text-anchor="middle">唯一键拦下后者 ← 同样正常</text>
+    <rect x="450" y="102" width="210" height="38" rx="6" fill="#e8f5ec"/>
+    <text x="555" y="118" font-size="12" font-weight="700" fill="#15803d" text-anchor="middle">竞争以「冲突」表达</text>
+    <text x="555" y="134" font-size="11.5" fill="#15803d" text-anchor="middle">日志干净,不留误导性错误行</text>
+    <text x="555" y="146" font-size="11" fill="#55627a" text-anchor="middle">任务调度照常恢复</text>
+    <rect x="55" y="168" width="630" height="34" rx="8" fill="#eef2f7"/>
+    <text x="370" y="189" font-size="12.5" fill="#1f2933" text-anchor="middle">业务行为两者一致:后者放弃、复用已存在的活跃任务——区别只在日志是否误导运维</text>
+  </svg>
+  <p class="note">这类日志在双节点部署下会持续出现,很容易被当成数据库故障排查,浪费排查时间。修复不改变业务语义,只让日志说实话。</p>
+</div>
+
+<h2>给业务的三个决定</h2>
+<ol class="decisions">
+  <li><b>接入方式:异步优先</b>。长音频(会议、访谈、讲座)一律走异步任务端点——提交拿任务号、后台转写、轮询取结果。同步接口保留给几秒到几分钟的短音频。</li>
+  <li><b>只提交两个字段</b>:<code>model</code> 与 <code>file</code>。<b>不要传 prompt</b>——异步端点不读它,多传反而会让请求跳过校验打到上游拿 404。模型名填渠道「模型」列里的值(不是插件名、也不是同步接口的模型别名),填错会收到 <code>model_not_found</code> 并被点名。</li>
+  <li><b>轮询节奏 3–5 秒</b>,单次任务上限 5 分钟等待(超时视为异常);提交超时不要盲目重试——可能已经在转写,重试会重复计费。</li>
+</ol>
+
+<h2>给运维的三个决定</h2>
+<ol class="decisions">
+  <li><b>一次性配置约 2 小时</b>:开任务插件总开关 → 建一条 Task Plugin 渠道(绑插件、填密钥、配「模型」与「模型映射」)→ 配按秒计费表达式 → 按文档 5 项清单验证。</li>
+  <li><b>部署顺序</b>:新镜像已构建并通过启动探针,但<b>尚未部署到 190 生效</b>。需执行 <code>deploy.sh up</code> 加载镜像、<code>deploy.sh switch</code> 把 30000 入口切到新栈,再按报告复测一次。</li>
+  <li><b>清理测试数据</b>:190 上留有本次测试的渠道 #26、令牌、计费表达式与 14 条已计费任务,交付前清理。</li>
+</ol>
+
+<h2>口径与限制</h2>
+<p class="small">
+① 图 A 的「理论扣费」= 实测秒数 × 0.00003325 美元/秒 × 配额单价 500000,与消费日志 <code>billing_mode=tiered_expr</code> 的记录逐条比对,7 组偏差全部为 0;3600 秒为可计费上限,柱高按上限截断显示;② 图 B 为 14 次<b>成功</b>任务,生产库另有 1 条 3600 秒的压测遗留任务处于未启动状态,已排除在图外;③ 端到端耗时含上游转写与轮询间隔,不等于纯网关处理耗时;④ 「长音频不占连接」的收益是异步接口的固有特性,未与同步接口做同条件 A/B 对比;⑤ 规模覆盖到 292.7 秒与 3600 秒上限两档,更长的音频按 1 小时计价;⑥ 全部数据取自 test-190 集群的生产库与消费日志,时间点 2026-10-27 16:38。技术细节见本目录 <code>test-report.md</code>,接入文档见 OpenAIAdapter 仓库 <code>handbook/asr/async-task.md</code>。
+</p>
+
+<footer>2026-10-27 · 镜像 new-api:1016 · 14 次真实转写任务 + 7 组计费对账样本 + 27 个包回归 · 网关 10.255.87.24:30000 · 生成:测试执行会话</footer>
+
+</div>
+</body>
+</html>
