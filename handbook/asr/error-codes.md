@@ -106,9 +106,9 @@
 
 异步端点的错误码全集见 [ASR 异步任务接口文档](async-task) 的错误码章节。
 
-### 3.1 异步端点**不产出**第二节的语义码
+### 3.1 异步端点**的请求阶段**不产出第二节的语义码
 
-第二节那张表是**同步接口**的语义码表。异步任务端点不产出 `empty_audio_file` / `invalid_audio_format` / `audio_duration_exceeded` 这类语义码，原因在网关的插件运行时：
+第二节那张表是**同步接口**的语义码表。异步任务端点在**请求阶段**不产出 `empty_audio_file` / `invalid_audio_format` / `audio_duration_exceeded` 这类语义码，原因在网关的插件运行时：
 
 | 请求侧问题 | 异步端点实际返回 |
 |-----------|----------------|
@@ -116,9 +116,11 @@
 | `roleType` / `roleNum` 不是非负整数 | 同上，`message` 说明是哪个参数 |
 | 模型没有可用渠道 | HTTP 503，`model_not_found` |
 
-机制：网关把插件解码器抛出的错误统一包装，**插件无法自定义客户端可见的错误码**。因此异步端点的错误码是「网关自有的一小组通用码 + 上游业务码」，不是第二节那张语义码表。
+机制：网关把插件解码器抛出的错误统一包装，**插件在请求阶段无法自定义客户端可见的错误码**。因此请求阶段的错误码是「网关自有的一小组通用码」，不是第二节那张语义码表。
 
 > 客户端在异步端点上做重试决策时，不要依赖 `empty_audio_file` 这类码：要么看 HTTP 状态码，要么看 `message` 的内容。
+>
+> **任务失败阶段不一样**：任务落到 `failed` 后，`error.code` 由插件给出，是可分支的语义码，见 3.2。
 
 ### 3.2 异步端点的错误码表
 
@@ -135,7 +137,20 @@
 | 提交 | 503 | `model_not_found` | 没有可用渠道承载该模型 |
 | 查询 | 400 | `task_not_exist` / `task_plugin_system_disabled` / `task_plugin_disabled` / `invalid_api_platform` | 任务不可取回 |
 | 查询 | 501 | `not_implemented` | 当前平台不支持音频任务渲染 |
-| 任务结果 | 200 | `status: "failed"` + `error.code` | 转写失败，`error.code` 是**上游业务码**（如 `100001`），`error.message` 带上游描述 |
+| 任务结果 | 200 | `status: "failed"` + `error.code` | 转写失败，`error.code` 是**语义码**（下表），`error.message` 带上游原始码或失败类型 |
+
+**任务失败的语义码**：
+
+| error.code | 含义 | 客户端应对 |
+|-----------|------|-----------|
+| `invalid_request` | 音频或参数本身有问题（时长超限、静音文件、格式不支持等） | 换素材或改参数后重提 |
+| `access_denied` | 账号缺少该能力 | 找管理员开通 |
+| `channel:invalid_key` | 凭据或签名有误 | 找管理员核对密钥 |
+| `rate_limit_exceeded` | 上游频率限制 | 退避后重试 |
+| `do_request_failed` | 上游故障 | 可重试 |
+| `task_not_exist` | 结果不会再出现（上游订单已不存在） | 重新提交 |
+
+> 上游原始业务码（如 `100004`）与订单失败类型（`failType: 4`）不出现在 `error.code` 里，它们保留在 `error.message` 中。
 
 **实测报文**（`POST /v1/audio/transcriptions/tasks`）：
 

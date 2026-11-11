@@ -773,8 +773,63 @@ func TestXfyunASRPluginEndToEnd(t *testing.T) {
 	require.NoError(t, common.Unmarshal(failureJSON, &failureObject))
 	assert.Equal(t, "failed", failureObject["status"])
 	failureError := failureObject["error"].(map[string]any)
-	assert.Equal(t, "100001", failureError["code"])
-	assert.Contains(t, failureError["message"], "100001")
+	assert.Equal(t, "task_not_exist", failureError["code"],
+		"上游「订单不存在」要落成语义码，调用方才能按「结果会不会再出现」分支")
+	assert.Contains(t, failureError["message"], "100001",
+		"上游原始业务码必须留在失败原因里，精确定位时要看 message")
+}
+
+// 失败码语义化：异步端点无法用 HTTP 状态码区分失败原因，error.code 必须是调用方
+// 能直接分支的语义码；上游原始业务码与 failType 留在 message 里。
+func TestXfyunASRPluginReportsSemanticFailureCodes(t *testing.T) {
+	plugin, _ := newXfyunTestPlugin(t)
+
+	renderFailure := func(t *testing.T, body string) map[string]any {
+		t.Helper()
+		rendered := xfyunRenderHook(t, plugin, map[string]any{
+			"task_id": xfyunTestPublicTask,
+			"status":  "FAILURE",
+			"data":    xfyunJSONMap(t, mustUnmarshalJSON(t, []byte(body))),
+		})
+		require.Equal(t, "failed", rendered["status"])
+		return rendered["error"].(map[string]any)
+	}
+
+	// 上游业务码：订单不存在、签名失败、权限不足、限流、查询异常分别落成语义码。
+	for code, expected := range map[string]string{
+		"100001": "task_not_exist",      // 订单不存在或状态异常
+		"100009": "channel:invalid_key", // 签名校验不通过
+		"100007": "access_denied",       // 权限错误
+		"100012": "rate_limit_exceeded", // 请求超过频率限制
+		"100004": "do_request_failed",   // 查询订单错误
+		"999999": "do_request_failed",   // 未知异常
+		"100030": "invalid_request",     // 未知的文件格式
+	} {
+		body := xfyunJSONString(t, map[string]any{
+			"code": code, "descInfo": "upstream failure", "content": map[string]any{},
+		})
+		failure := renderFailure(t, body)
+		assert.Equal(t, expected, failure["code"], "upstream code %s", code)
+		assert.Contains(t, failure["message"], code, "上游原始业务码必须留在失败原因里")
+	}
+
+	// 订单失败类型：此时上游业务码仍是 000000，只有 failType 说明原因。
+	for failType, expected := range map[int]string{
+		4: "invalid_request",   // 音频时长超限
+		6: "invalid_request",   // 静音文件
+		8: "access_denied",     // 账号无翻译权限
+		2: "do_request_failed", // 音频转码失败
+	} {
+		body := xfyunJSONString(t, map[string]any{
+			"code": "000000", "descInfo": "success",
+			"content": map[string]any{"orderInfo": map[string]any{
+				"orderId": xfyunTestOrderID, "status": -1, "failType": failType,
+			}},
+		})
+		failure := renderFailure(t, body)
+		assert.Equal(t, expected, failure["code"], "failType %d", failType)
+		assert.Contains(t, failure["message"], "failType", "失败类型必须留在失败原因里")
+	}
 }
 
 // 时间戳标签与说话人编号：转写文本按分段渲染成带标签的行，segments 带回说话人标识。

@@ -20,6 +20,10 @@
 // - 结算时长只认上游回传的真实时长（realDuration）。上游未回传时插件不产出时长
 //   事实，由宿主保留提交期的预扣值——宿主对测不出长度的格式给的是可计费上限，
 //   不是实测长度。
+// - 任务失败时给出语义化错误码（invalid_request / access_denied /
+//   channel:invalid_key / rate_limit_exceeded / task_not_exist / do_request_failed），
+//   分类口径与 Go 侧 relay/channel/xunfei 的分类表一致；上游原始业务码与 failType
+//   保留在失败原因里。
 
 const SUCCESS_CODE = "000000";
 const ORDER_NOT_FINISHED_CODE = "100013";
@@ -55,7 +59,7 @@ export const meta = {
     en: "Audio file transcription via iFLYTEK",
     zh: "通过讯飞转写音频文件",
   },
-  version: "1.1.0",
+  version: "1.2.0",
   author: { name: "QuantumNous" },
   baseUrl: "https://office-api-ist-dx.iflyaisol.com",
   models: ["ifasr-llm-v1"],
@@ -404,6 +408,103 @@ function failureReason(info, descInfo) {
   return message;
 }
 
+// 上游业务码到失败分类的映射，取值与 Go 侧 relay/channel/xunfei 的
+// asrCodeCategories 一致。同一个上游条件在同步端点与异步任务端点必须落到同一类，
+// 否则两个接口的调用方要维护两套判断。
+const UPSTREAM_CODE_CATEGORIES = {
+  "000001": "client", // 参数错误或不完整
+  "000002": "credential", // accessKeyId 不存在
+  "1000000": "client", // 不支持的操作
+  "100001": "orderNotFound", // 订单不存在或状态异常
+  "100002": "orderConflict", // 订单音频未上传
+  "100003": "client", // 参数错误
+  "100004": "upstream", // 查询订单错误
+  "100005": "orderNotFound", // 查询音频为空
+  "100006": "upstream", // 上传音频异常
+  "100007": "permission", // 权限错误
+  "100008": "credential", // 签名异常：请求时间超过限制
+  "100009": "credential", // 签名校验不通过
+  "100012": "rateLimited", // 请求超过频率限制
+  "100013": "orderConflict", // 订单未完成
+  "100015": "client", // 热词必须是中文
+  "100016": "client", // 热词超出长度限制
+  "100017": "client", // 热词超出数量限制
+  "100018": "client", // 热词分隔符不能连续出现
+  "100019": "client", // 热词验证失败
+  "100020": "client", // 语言验证失败
+  "100021": "upstream", // 热词上传失败
+  "100022": "client", // 热词不断重复
+  "100023": "upstream", // 热词保存失败
+  "100024": "client", // 热词为空
+  "100025": "client", // 热词 ID 未知
+  "100026": "client", // 时间格式必须为 yy-MM-dd
+  "100027": "client", // patch ID 未知
+  "100028": "client", // patch 验证失败
+  "100029": "client", // 文件已存在
+  "100030": "client", // 未知的文件格式
+  "100031": "client", // 多候选 ID 未知
+  "100032": "client", // 多候选验证失败
+  "100033": "client", // 无效的角色分离个数
+  "100034": "credential", // 更改 AccessKeySecret 失败
+  "100037": "orderNotFound", // 非法的订单号
+  "100038": "client", // 删除订单验证失败
+  "100039": "orderNotFound", // 订单为空
+  "100040": "orderConflict", // 订单个数超出限制
+  "100041": "upstream", // 切换通道失败
+  "100042": "client", // 外链地址无效
+  "100043": "client", // 通道类型验证失败
+  "100044": "client", // 通道类型不存在
+  "999999": "upstream", // 未知异常
+};
+
+// 订单失败类型到失败分类的映射，取值与 Go 侧 asrFailTypeCategories 一致。
+const FAIL_TYPE_CATEGORIES = {
+  1: "upstream", // 音频上传失败
+  2: "upstream", // 音频转码失败
+  3: "upstream", // 音频识别失败
+  4: "client", // 音频时长超限
+  5: "client", // 音频校验失败：时长与实际不符
+  6: "client", // 静音文件
+  7: "upstream", // 翻译失败
+  8: "permission", // 账号无翻译权限
+  9: "upstream", // 转写质检失败
+  10: "client", // 转写质检未匹配出关键词
+  11: "permission", // 未开启质检或翻译能力
+  12: "upstream", // 音频语种分析失败
+  99: "upstream", // 其他
+};
+
+// 失败分类到客户端可见语义码的映射。语义码取网关既有的错误码字面量，调用方
+// 因此不必为讯飞单独维护一套码表：按语义码就能判断该换素材、该找管理员，还是可以重试。
+const CATEGORY_ERROR_CODES = {
+  client: "invalid_request",
+  credential: "channel:invalid_key",
+  permission: "access_denied",
+  orderNotFound: "task_not_exist",
+  orderConflict: "do_request_failed",
+  rateLimited: "rate_limit_exceeded",
+  upstream: "do_request_failed",
+};
+
+// semanticErrorCode 由上游业务码与订单失败类型推出客户端可见的语义码。
+//
+// 异步端点无法用 HTTP 状态码区分失败原因（任务失败同样返回 200），语义码是调用方
+// 唯一的结构化判据：invalid_request 表示素材或参数有问题、access_denied 与
+// channel:invalid_key 表示要找管理员、rate_limit_exceeded 与 do_request_failed
+// 表示上游侧可以重试、task_not_exist 表示结果不会再出现。
+//
+// 判据顺序与 Go 侧一致：先看订单失败类型，再看业务码；两者都没有时是「未知失败」。
+// 上游原始码始终保留在失败原因里，需要精确定位时看 message。
+function semanticErrorCode(code, failType) {
+  const failCategory = FAIL_TYPE_CATEGORIES[failType];
+  if (failCategory) return CATEGORY_ERROR_CODES[failCategory];
+  if (code !== "" && code !== SUCCESS_CODE) {
+    const category = UPSTREAM_CODE_CATEGORIES[code] || "upstream";
+    return CATEGORY_ERROR_CODES[category];
+  }
+  return "task_failed";
+}
+
 // 结算用的时长事实可能以两种形态到达：原始查询响应（content.orderInfo）或落库摘要
 // （realDurationMs）。统一取毫秒值，取不到返回 null。
 //
@@ -733,13 +834,28 @@ function renderTranscription(_ctx, task) {
   if (status !== "SUCCESS" && status !== "FAILURE") return {};
   const parsed = parseStoredResult(task && task.data);
   if (status === "FAILURE") {
-    const code = parsed.code !== "" && parsed.code !== SUCCESS_CODE ? parsed.code : "task_failed";
     const info = orderInfoOf(task && task.data);
+    // 失败码给调用方可分支的语义码，上游原始码留在 message 里。订单失败类型优先：
+    // 订单失败时上游业务码仍是 000000，只有 failType 能说明是音频超限还是静音文件。
+    const failType = info ? integerValue(info.failType) : { ok: false, value: 0 };
+    const code = semanticErrorCode(parsed.code, failType.ok ? failType.value : 0);
+    // 失败原因必须带得上下游码或失败类型，调用方才能定位到具体原因。宿主写入的
+    // fail_reason 已经是这个形态；缺失时按同样的措辞补出来，而不是笼统地说失败。
+    let message = trimmed(task && task.fail_reason);
+    if (message === "") {
+      if (parsed.code !== "" && parsed.code !== SUCCESS_CODE) {
+        message = "iFLYTEK error " + parsed.code + (parsed.descInfo === "" ? "" : ": " + parsed.descInfo);
+      } else if (info) {
+        message = failureReason(info, parsed.descInfo);
+      } else {
+        message = "transcription failed";
+      }
+    }
     return {
       status: "failed",
       error: {
         code: code,
-        message: trimmed(task && task.fail_reason) || (info ? failureReason(info, parsed.descInfo) : "transcription failed"),
+        message: message,
       },
     };
   }

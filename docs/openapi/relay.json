@@ -4133,13 +4133,13 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "服务端或上游的错误码，客户端不必按码分支",
-            "example": "100001"
+            "description": "语义码，调用方按它分支：invalid_request（素材或参数有问题）、access_denied（账号缺能力）、channel:invalid_key（凭据或签名有误）、rate_limit_exceeded（上游限流）、do_request_failed（上游故障）、task_not_exist（结果不会再出现）",
+            "example": "invalid_request"
           },
           "message": {
             "type": "string",
-            "description": "失败描述",
-            "example": "iFLYTEK transcription failed: upload failed (failType: 1)"
+            "description": "失败描述，可直接展示给用户；上游原始业务码或订单失败类型也保留在这里",
+            "example": "iFLYTEK transcription failed: audio duration exceeds the limit (failType: 4)"
           }
         },
         "required": [

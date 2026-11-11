@@ -205,13 +205,26 @@ curl http://10.255.87.24:30000/v1/audio/transcriptions/tasks/task_MIJdP5U3BCZ3GV
 {
   "status": "failed",
   "error": {
-    "code": "100001",
-    "message": "iFLYTEK transcription failed: upload failed (failType: 1)"
+    "code": "invalid_request",
+    "message": "iFLYTEK transcription failed: audio duration exceeds the limit (failType: 4)"
   }
 }
 ```
 
-`error.message` 是可直接展示给用户看的失败原因，`error.code` 是服务端或上游的错误码。
+`error.code` 是**语义码**，`error.message` 是可直接展示给用户看的失败原因。
+
+语义码是调用方唯一的结构化判据——任务失败同样返回 `200`，没法用 HTTP 状态码区分原因。取值与网关其它接口的错误码同一套：
+
+| error.code | 含义 | 客户端应对 |
+|-----------|------|-----------|
+| `invalid_request` | 音频或参数本身有问题（时长超限、静音文件、格式不支持等） | 换素材或改参数后重提 |
+| `access_denied` | 账号缺少该能力（未开通角色分离、翻译、质检等） | 找管理员开通 |
+| `channel:invalid_key` | 服务端配置的讯飞凭据或签名有误 | 找管理员核对密钥 |
+| `rate_limit_exceeded` | 上游频率限制 | 退避后重试 |
+| `do_request_failed` | 上游故障 | 可重试 |
+| `task_not_exist` | 结果不会再出现（上游订单已不存在） | 重新提交 |
+
+> **上游原始码在 `message` 里**：`iFLYTEK error 100004: ...`（业务码）或 `... (failType: 4)`（订单失败类型）。需要精确到上游取值时看 `message`；要做分支决策用 `error.code`。
 
 ---
 
@@ -338,7 +351,7 @@ done
 
 > **注意**：提交阶段与查询阶段的错误响应结构不同。提交阶段是 `{"error":{"code":"...","message":"...","type":"..."}}`，查询阶段是 `{"code":"...","message":"...","data":null}`。客户端做错误处理时两种结构都要兼容。
 
-> 任务失败时接口仍然返回 `200`，失败信息在 `status: "failed"` 的 `error` 里：`error.message` 是可直接展示的原因，`error.code` 是服务端或上游的错误码（可能是上游业务码，客户端不需要区分）。
+> 任务失败时接口仍然返回 `200`，失败信息在 `status: "failed"` 的 `error` 里：`error.code` 是语义码（见 4.4），`error.message` 是可直接展示的原因，上游原始码也在 `error.message` 里。
 
 ---
 
@@ -490,9 +503,11 @@ key 的格式是 `<插件 key>::<模型名>`，模型名要与渠道「模型」
 
 > 上游业务码不直接作为 HTTP 错误码返回：它们出现在任务失败结果的 `error.code` 里。
 
-### B.3 异步端点不产出同步接口的语义码
+### B.3 异步端点**的请求阶段**不产出同步接口的语义码
 
-同步接口的 `empty_audio_file` / `invalid_audio_format` / `audio_duration_exceeded` 这类语义码，异步端点不产出：网关把插件解码器抛出的错误统一包装成 `plugin_request_invalid`，或直接中止并留下空 `code`。**插件无法自定义客户端可见的错误码。**
+同步接口的 `empty_audio_file` / `invalid_audio_format` / `audio_duration_exceeded` 这类语义码，异步端点在请求阶段不产出：网关把插件解码器抛出的错误统一包装成 `plugin_request_invalid`，或直接中止并留下空 `code`。**插件在请求阶段无法自定义客户端可见的错误码。**
+
+任务失败阶段不受这条限制：`error.code` 由插件给出，是 4.4 里的语义码。
 
 | 请求侧问题 | 异步端点实际返回 |
 |-----------|----------------|
