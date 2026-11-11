@@ -1,0 +1,15 @@
+- [x] `OAuthApp` 模型新增 `WaffoPancakeReturnURL` 字段，`oauth_apps` 表新增 `waffo_pancake_return_url` 列（SQLite/MySQL/PostgreSQL 均可迁移）
+- [x] OAuth app 创建/更新接口接受并持久化 `waffo_pancake_return_url`
+- [x] OAuth app 详情接口读回 `waffo_pancake_return_url`
+- [x] `WaffoPancakeCreateSessionParams` 支持 `SuccessURL`，并正确设置 SDK `sdkParams.SuccessURL`
+- [x] `resolveWaffoPancakeReturnURL` 逻辑正确：app 值优先、空白回退全局
+- [x] 商品购买 checkout 按 `product.AppId` 传入 app 返回地址
+- [x] 套餐订阅 checkout 按 `plan.AppId` 传入 app 返回地址
+- [x] 钱包充值（appId>0）传入 app 返回地址，appId=0 用全局值
+- [x] 未配置 app 返回地址时行为与现状一致（回退全局，向后兼容）
+- [x] 前端 OAuth app 表单新增返回地址输入并提交
+- [x] 前端 i18n 七个语言文件补齐新增 key
+- [x] 后端单测覆盖 app 优先 / 全局回退 / 字段空白 / SuccessURL 设置
+- [x] 前端测试覆盖表单渲染与提交
+- [x] `go build ./...`、`bun check -b`、`bun run lint`、`bun run build` 通过
+- [x] 数据库三库迁移验证通过

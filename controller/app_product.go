@@ -342,6 +342,7 @@ func CreateAppProductWaffoPancakeCheckout(ctx context.Context, user *model.User,
 		BuyerEmail:              getWaffoPancakeBuyerEmail(user),
 		ExpiresInSeconds:        &expiresInSeconds,
 		OrderMerchantExternalID: order.TradeNo,
+		SuccessURL:              service.ResolveWaffoPancakeReturnURL(product.AppId),
 	})
 	if err != nil {
 		logger.LogError(ctx, common.LogText(

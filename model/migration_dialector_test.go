@@ -57,6 +57,58 @@ type migrationDecimalV3 struct {
 	Price float64 `gorm:"type:decimal(12,6);not null;default:1.25"`
 }
 
+func TestOAuthAppReturnURLColumnMigration(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var dsn string
+			switch dialect {
+			case "sqlite":
+				dsn = "local"
+				previousPath := common.SQLitePath
+				common.SQLitePath = filepath.Join(t.TempDir(), "oauth_app_return_url.db")
+				t.Cleanup(func() { common.SQLitePath = previousPath })
+			case "mysql":
+				dsn = os.Getenv("TEST_MYSQL_DSN")
+			case "postgres":
+				dsn = os.Getenv("TEST_POSTGRES_DSN")
+			}
+			if dsn == "" {
+				t.Skip("test database DSN is not configured")
+			}
+			t.Setenv("MIGRATION_TEST_DSN", dsn)
+			db, _, err := chooseDB("MIGRATION_TEST_DSN", false)
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = sqlDB.Close() })
+
+			require.NoError(t, db.AutoMigrate(&OAuthApp{}))
+			t.Cleanup(func() { _ = db.Migrator().DropTable(&OAuthApp{}) })
+
+			require.True(t, db.Migrator().HasColumn(&OAuthApp{}, "waffo_pancake_return_url"))
+			columns, err := db.Migrator().ColumnTypes(&OAuthApp{})
+			require.NoError(t, err)
+			for _, col := range columns {
+				if col.Name() == "waffo_pancake_return_url" {
+					assert.Equal(t, "text", strings.ToLower(col.DatabaseTypeName()))
+				}
+			}
+
+			require.NoError(t, db.Create(&OAuthApp{
+				Id:                    9001,
+				Name:                  "return-url-migration",
+				ClientID:              "nac_return_url_migration",
+				ClientSecretHash:      "test",
+				Status:                OAuthAppStatusEnabled,
+				WaffoPancakeReturnURL: "https://app.example/success",
+			}).Error)
+			var saved OAuthApp
+			require.NoError(t, db.First(&saved, 9001).Error)
+			assert.Equal(t, "https://app.example/success", saved.WaffoPancakeReturnURL)
+		})
+	}
+}
+
 func TestMigrationSchemaStability(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {

@@ -25,6 +25,7 @@ async function editPublicApp(
     scopes: ['openid'],
     status: 1,
     public_client: true,
+    waffo_pancake_return_url: '',
     created_by: 1,
     created_at: 0,
     updated_at: 0,

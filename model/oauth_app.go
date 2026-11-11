@@ -72,6 +72,11 @@ type OAuthApp struct {
 	// only; PKCE remains mandatory. False keeps the confidential-client
 	// behavior, so existing rows are unchanged after migration.
 	PublicClient bool `json:"public_client" gorm:"column:public_client"`
+
+	// WaffoPancakeReturnURL is an optional per-app override for the Waffo
+	// Pancake checkout success redirect. Empty means fall back to the global
+	// setting.WaffoPancakeReturnURL.
+	WaffoPancakeReturnURL string `json:"-" gorm:"type:text;column:waffo_pancake_return_url"`
 }
 
 func (OAuthApp) TableName() string {

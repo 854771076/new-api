@@ -36,6 +36,7 @@ type OAuthAppResponse struct {
 	CreatedAt              int64    `json:"created_at"`
 	UpdatedAt              int64    `json:"updated_at"`
 	SupabaseProjectRef     string   `json:"supabase_project_ref,omitempty"`
+	WaffoPancakeReturnURL  string   `json:"waffo_pancake_return_url,omitempty"`
 }
 
 func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
@@ -53,6 +54,7 @@ func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
 		CreatedAt:              app.CreatedAt,
 		UpdatedAt:              app.UpdatedAt,
 		SupabaseProjectRef:     app.SupabaseProjectRef,
+		WaffoPancakeReturnURL:  app.WaffoPancakeReturnURL,
 	}
 }
 
@@ -66,6 +68,7 @@ type CreateOAuthAppRequest struct {
 	SupabaseProjectRef     string   `json:"supabase_project_ref"`
 	AIModelWhitelist       []string `json:"ai_model_whitelist"`
 	PublicClient           bool     `json:"public_client"`
+	WaffoPancakeReturnURL  string   `json:"waffo_pancake_return_url"`
 }
 
 // CreateOAuthApp creates a new OAuth application. The client secret is
@@ -80,6 +83,7 @@ func CreateOAuthApp(c *gin.Context) {
 	req.Name = strings.TrimSpace(req.Name)
 	req.LogoURL = strings.TrimSpace(req.LogoURL)
 	req.SupabaseProjectRef = strings.TrimSpace(req.SupabaseProjectRef)
+	req.WaffoPancakeReturnURL = strings.TrimSpace(req.WaffoPancakeReturnURL)
 	if req.Name == "" {
 		common.ApiErrorT(c, "App name is required")
 		return
@@ -120,14 +124,15 @@ func CreateOAuthApp(c *gin.Context) {
 	}
 
 	app := &model.OAuthApp{
-		Name:               req.Name,
-		LogoURL:            req.LogoURL,
-		ClientID:           clientID,
-		ClientSecretHash:   secretHash,
-		Status:             model.OAuthAppStatusEnabled,
-		CreatedBy:          c.GetInt("id"),
-		SupabaseProjectRef: req.SupabaseProjectRef,
-		PublicClient:       req.PublicClient,
+		Name:                  req.Name,
+		LogoURL:               req.LogoURL,
+		ClientID:              clientID,
+		ClientSecretHash:      secretHash,
+		Status:                model.OAuthAppStatusEnabled,
+		CreatedBy:             c.GetInt("id"),
+		SupabaseProjectRef:    req.SupabaseProjectRef,
+		PublicClient:          req.PublicClient,
+		WaffoPancakeReturnURL: req.WaffoPancakeReturnURL,
 	}
 	if err := app.SetRedirectURIs(req.RedirectURIs); err != nil {
 		common.ApiError(c, err)
@@ -203,6 +208,7 @@ type UpdateOAuthAppRequest struct {
 	SupabaseProjectRef     *string  `json:"supabase_project_ref"`
 	AIModelWhitelist       []string `json:"ai_model_whitelist"`
 	PublicClient           *bool    `json:"public_client"`
+	WaffoPancakeReturnURL  *string  `json:"waffo_pancake_return_url"`
 }
 
 // UpdateOAuthApp updates mutable fields of an OAuth app.
@@ -272,6 +278,13 @@ func UpdateOAuthApp(c *gin.Context) {
 		}
 		if app.SupabaseProjectRef != ref {
 			app.SupabaseProjectRef = ref
+			changed = true
+		}
+	}
+	if req.WaffoPancakeReturnURL != nil {
+		ref := strings.TrimSpace(*req.WaffoPancakeReturnURL)
+		if app.WaffoPancakeReturnURL != ref {
+			app.WaffoPancakeReturnURL = ref
 			changed = true
 		}
 	}
