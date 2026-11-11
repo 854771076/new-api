@@ -27,7 +27,12 @@ export interface FetchRequest {url: string; method?: "GET" | "HEAD"; headers?: R
 /** headers holds the first value of each header under its canonical name; body is parsed JSON when the response parses, otherwise text, and "" for HEAD; with responseType "bytes" it is an ArrayBuffer of the response bytes. */
 export interface FetchResponse {status: number; headers: Record<string, string>; body: JSONValue | string | ArrayBuffer}
 declare global {const utils: HostUtils;}
-/** durationSeconds is the host-priced duration of the uploaded file; present for plugins that declare media-duration@1. */
+/**
+ * durationSeconds is the host-priced duration of the uploaded file in seconds,
+ * present on every file reference when the plugin declares media-duration@1.
+ * The value is capped at the host duration ceiling and is also the ceiling for
+ * files the host cannot measure, so it is not proof of the real length.
+ */
 export type FileReference = Readonly<{ref: string; field: string; filename: string; mimeType: string; size: number; durationSeconds?: number}>;
 export type FilePlaceholder = Readonly<{__fileRef: string; encoding: "base64" | "dataUrl"; mimeType?: string; maxBytes?: number}>;
 export type DecodedBody =

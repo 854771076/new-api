@@ -30,7 +30,7 @@
  *   --poll-interval  异步模式轮询间隔（毫秒），默认 3000
  *   --timeout  异步模式等待终态的超时（秒），默认 300
  *
- * 退出码: 0 通过 / 1 失败 / 2 跳过（缺凭据或参数不合法）
+ * 退出码: 0 通过 / 1 断言失败 / 2 参数或环境不合法 / 3 跳过（未提供令牌）
  */
 
 import fs from 'node:fs'
@@ -43,6 +43,11 @@ const DEFAULT_FORMAT = 'json'
 const DEFAULT_MODE = 'sync'
 const DEFAULT_POLL_INTERVAL_MS = 3000
 const DEFAULT_TIMEOUT_SECONDS = 300
+// 退出码：0 通过 / 1 断言失败 / 2 参数或环境不合法 / 3 跳过（未提供令牌）。
+// 跳过与参数错误分开，CI 才能把「没配凭据」和「参数写错」区分开。
+const EXIT_FAIL = 1
+const EXIT_USAGE = 2
+const EXIT_SKIP = 3
 
 const MIME_BY_EXT = {
   '.wav': 'audio/wav',
@@ -277,9 +282,10 @@ async function main() {
   const mode = args.mode || DEFAULT_MODE
 
   if (!token) {
-    // 没有凭据就不跑：这是「跳过」，不是「失败」，退出码与断言失败区分开。
+    // 没有凭据就不跑：这是「跳过」，不是「失败」，也不是「参数错误」。
+    // 单独的退出码让 CI 不会把拼错的参数当成跳过而放过。
     console.log('- 跳过：未提供令牌（--token 或环境变量 ASR_TOKEN）')
-    process.exit(2)
+    process.exit(EXIT_SKIP)
   }
   if (!['sync', 'async'].includes(mode)) {
     console.error(`✗ 不支持的 --mode: ${mode}`)
@@ -295,6 +301,16 @@ async function main() {
   }
 
   if (mode === 'async') {
+    // 异步端点只接受 multipart 上传，且总是返回 JSON 语义的转写对象。
+    // 其它组合在这里直接拒绝，避免「脚本跑通了但其实没覆盖到目标路径」。
+    if (source !== 'multipart') {
+      console.error(`✗ 异步模式只支持 --source multipart，收到: ${source}`)
+      process.exit(2)
+    }
+    if (format !== 'json') {
+      console.error(`✗ 异步模式只支持 --format json，收到: ${format}`)
+      process.exit(2)
+    }
     let audio
     try {
       audio = readAudio(args.audio)
