@@ -1,0 +1,90 @@
+[
+  {
+    "input": "gpt-4o=3,claude-sonnet=2",
+    "mustReject": false,
+    "segments": [
+      { "raw": "gpt-4o=3", "class": "accept", "model": "gpt-4o", "limit": 3, "reason": "" },
+      { "raw": "claude-sonnet=2", "class": "accept", "model": "claude-sonnet", "limit": 2, "reason": "" }
+    ]
+  },
+  {
+    "input": "gpt-4o=3,",
+    "mustReject": false,
+    "segments": [
+      { "raw": "gpt-4o=3", "class": "accept", "model": "gpt-4o", "limit": 3, "reason": "" },
+      { "raw": "", "class": "empty", "model": "", "limit": 0, "reason": "" }
+    ]
+  },
+  {
+    "input": " gpt-4o = 3 ",
+    "mustReject": false,
+    "segments": [
+      { "raw": "gpt-4o = 3", "class": "accept", "model": "gpt-4o", "limit": 3, "reason": "" }
+    ]
+  },
+  {
+    "input": "",
+    "mustReject": false,
+    "segments": [
+      { "raw": "", "class": "empty", "model": "", "limit": 0, "reason": "" }
+    ]
+  },
+  {
+    "input": "gpt-4o",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o", "class": "defect", "model": "", "limit": 0, "reason": "missing_separator" }
+    ]
+  },
+  {
+    "input": "gpt-4o=",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o=", "class": "defect", "model": "", "limit": 0, "reason": "missing_separator" }
+    ]
+  },
+  {
+    "input": "=3",
+    "mustReject": true,
+    "segments": [
+      { "raw": "=3", "class": "defect", "model": "", "limit": 0, "reason": "missing_separator" }
+    ]
+  },
+  {
+    "input": "gpt-4o=x",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o=x", "class": "defect", "model": "", "limit": 0, "reason": "invalid_limit" }
+    ]
+  },
+  {
+    "input": "gpt-4o=0",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o=0", "class": "defect", "model": "", "limit": 0, "reason": "non_positive_limit" }
+    ]
+  },
+  {
+    "input": "gpt-4o=-1",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o=-1", "class": "defect", "model": "", "limit": 0, "reason": "non_positive_limit" }
+    ]
+  },
+  {
+    "input": "gpt-4o=3,bad",
+    "mustReject": true,
+    "segments": [
+      { "raw": "gpt-4o=3", "class": "accept", "model": "gpt-4o", "limit": 3, "reason": "" },
+      { "raw": "bad", "class": "defect", "model": "", "limit": 0, "reason": "missing_separator" }
+    ]
+  },
+  {
+    "input": "gpt-4o=3,gpt-4o=5",
+    "mustReject": false,
+    "segments": [
+      { "raw": "gpt-4o=3", "class": "accept", "model": "gpt-4o", "limit": 3, "reason": "" },
+      { "raw": "gpt-4o=5", "class": "accept", "model": "gpt-4o", "limit": 5, "reason": "" }
+    ]
+  }
+]

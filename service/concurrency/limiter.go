@@ -1,9 +1,10 @@
-// Package concurrency implements per-user / per-API-key in-flight concurrency
-// limits for new-api-monster. The package is deliberately split into:
+// Package concurrency implements per-user / per-API-key / per-channel in-flight
+// concurrency limits for new-api-monster. The package is deliberately split into:
 //
 //   - ScopeKey + MemoryLimiter (this file): pure Go, no external dependencies.
 //     Drives unit tests and the dev-mode fallback when Redis is offline.
-//   - RedisLimiter (limiter_redis.go): production path using INCR/DECR.
+//   - RedisLimiter (limiter_redis.go): production path backed by Redis ZSET
+//     leases — one member per granted slot, released atomically by Lua.
 //   - token_limits.go: CSV decoder for the Token.ConcurrencyLimitByModel column.
 //
 // Wire-up happens in middleware/concurrency.go (request gate) and
@@ -15,21 +16,34 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-// ScopeKind enumerates the two subject axes the gateway can throttle on.
+// ScopeKind enumerates the subject axes the gateway can throttle on.
 type ScopeKind uint8
 
 const (
-	ScopeKindKey  ScopeKind = 1
-	ScopeKindUser ScopeKind = 2
+	ScopeKindKey     ScopeKind = 1
+	ScopeKindUser    ScopeKind = 2
+	ScopeKindChannel ScopeKind = 3
 )
 
-// ScopeKey identifies a throttle bucket. Wire format: "<key|user>:<id>:<model|*>"
-// where "*" denotes the global (any-model) bucket for that subject.
+// ScopeKey identifies a throttle bucket. Wire format:
+//
+//	"<key|user>:<id>:<model|*>"   three segments, "*" = the subject's global bucket
+//	"channel:<id>"                two segments (BCD D-2): the channel axis has no
+//	                              per-model bucket, so Model() naturally reads "*"
 type ScopeKey string
+
+// ChannelScope builds the channel-axis scope. It is the ONLY constructor of the
+// two-segment "channel:<id>" wire format (BCD D-2): that format is part of the
+// ZSET key namespace and the snapshot row contract, so it must not be assembled
+// ad hoc at call sites.
+func ChannelScope(channelID int) ScopeKey {
+	return ScopeKey("channel:" + strconv.Itoa(channelID))
+}
 
 // ErrConcurrencyExceeded is the sentinel error returned by Acquire when the
 // scope's current in-flight count already equals its limit. Callers must use
@@ -37,15 +51,20 @@ type ScopeKey string
 // transports may wrap the error with transport-specific context.
 var ErrConcurrencyExceeded = errors.New("concurrency limit exceeded")
 
-// Kind returns which axis the scope addresses.
+// Kind returns which axis the scope addresses. The channel axis has to be
+// checked explicitly: without it a "channel:<id>" scope silently falls through
+// to the key axis (BCD D-2).
 func (s ScopeKey) Kind() ScopeKind {
 	if strings.HasPrefix(string(s), "user:") {
 		return ScopeKindUser
 	}
+	if strings.HasPrefix(string(s), "channel:") {
+		return ScopeKindChannel
+	}
 	return ScopeKindKey
 }
 
-// SubjectID returns the user or token id encoded in the scope.
+// SubjectID returns the user, token, or channel id encoded in the scope.
 func (s ScopeKey) SubjectID() int {
 	parts := strings.SplitN(string(s), ":", 3)
 	if len(parts) < 2 {
@@ -85,27 +104,65 @@ type ScopeSnapshot struct {
 	LastUpdated int64    `json:"lastUpdatedAt"`
 }
 
+// ScopeLimit pairs a scope bucket with the per-request cap that governs it.
+// Caps are computed by the caller on every request (ARCHITECTURE Decision A)
+// and never stored in the limiter.
+type ScopeLimit struct {
+	Scope ScopeKey
+	Limit int
+}
+
+// DegradedStatus is the observability view of the backend's fail-open
+// degradation state (D-14 / RED-05): what the admin snapshot envelope
+// serializes as degraded:{active,lastDegradedAt,consecutiveFailures}.
+//
+//   - Active: the backend is currently failing open (degraded window open).
+//   - LastDegradedAt: unix milliseconds of the most recent degradation entry;
+//     0 means never degraded. It is deliberately RETAINED after recovery so
+//     operators keep a "last degraded at" forensic trail (D-14).
+//   - ConsecutiveFailures: how many backend failures in a row since the last
+//     recovery evidence; reset to 0 on recovery.
+//
+// It is a read-only observation — it never drives the breaker, the lease
+// paths, or the fallback counters.
+type DegradedStatus struct {
+	Active              bool  `json:"active"`
+	LastDegradedAt      int64 `json:"lastDegradedAt"`
+	ConsecutiveFailures int   `json:"consecutiveFailures"`
+}
+
 // Limiter is the interface every backing store must satisfy.
 type Limiter interface {
-	// Acquire increments the in-flight count for scope. If limit is 0 or
-	// unset, Acquire always succeeds. On success the returned release func
-	// must be called exactly once when the request finishes; double-release
-	// is a no-op, missed release leaks a slot.
-	Acquire(ctx context.Context, scope ScopeKey) (release func(), err error)
-	// SetLimit adjusts the cap for scope. limit <= 0 means unlimited.
-	SetLimit(ctx context.Context, scope ScopeKey, limit int) error
+	// Acquire increments the in-flight count for scope when the caller's
+	// per-request limit allows it. limit <= 0 means unlimited: Acquire always
+	// succeeds but still counts the holder so snapshots keep observing
+	// in-flight requests. On success the returned release func must be called
+	// exactly once when the request finishes; double-release is a no-op,
+	// missed release leaks a slot.
+	Acquire(ctx context.Context, scope ScopeKey, limit int) (release func(), err error)
+	// AcquireBatch acquires every (scope, limit) pair as one all-or-nothing
+	// unit: either all buckets gain a slot and the returned release func
+	// frees them together, or the call fails with ErrConcurrencyExceeded and
+	// no bucket is touched — no partial grant, no rollback window (D-05).
+	// A bucket with limit <= 0 still counts without enforcing, matching
+	// Acquire (D-18).
+	AcquireBatch(ctx context.Context, scopes []ScopeLimit) (release func(), err error)
 	// Snapshot returns the current state of every known scope, ordered by
 	// ScopeKey for stable rendering.
 	Snapshot(ctx context.Context) ([]ScopeSnapshot, error)
+	// DegradedStatus returns the backend's degradation observation state
+	// (D-14 / RED-05) for the admin snapshot envelope. It is a read-only
+	// accessor: it never mutates breaker, lease, or fallback state.
+	DegradedStatus() DegradedStatus
 }
 
 // MemoryLimiter is a goroutine-safe in-process Limiter used as the test double
 // and the dev-mode fallback when Redis is unavailable. It is intentionally
-// small: a sync.RWMutex, two maps. When Redis is online, callers should swap in
-// RedisLimiter (see limiter_redis.go).
+// small: a sync.RWMutex, two maps. Limits are never stored: callers compute
+// them per request and pass them to Acquire (ARCHITECTURE Decision A). When
+// Redis is online, callers should swap in RedisLimiter (see limiter_redis.go).
 type MemoryLimiter struct {
 	mu      sync.RWMutex
-	limits  map[string]int
 	holders map[string]int
 	updated map[string]int64
 }
@@ -113,51 +170,47 @@ type MemoryLimiter struct {
 // NewMemoryLimiter returns a fresh, empty MemoryLimiter.
 func NewMemoryLimiter() *MemoryLimiter {
 	return &MemoryLimiter{
-		limits:  map[string]int{},
 		holders: map[string]int{},
 		updated: map[string]int64{},
 	}
 }
 
-// SetLimit records limit for future pulls. limit <= 0 means unlimited and the
-// scope is treated as effectively absent from the limiter.
-func (m *MemoryLimiter) SetLimit(_ context.Context, scope ScopeKey, limit int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if limit <= 0 {
-		delete(m.limits, scope.String())
-		return nil
-	}
-	m.limits[scope.String()] = limit
-	return nil
+// Acquire checks the in-flight count for this subject against the caller's
+// per-request limit and either reserves a slot (returning a release func) or
+// returns ErrConcurrencyExceeded. limit <= 0 always succeeds but still counts
+// the holder so Snapshot keeps observing unlimited subjects — an intentional
+// deviation from the milestone ARCHITECTURE.md "skip zero-limit" wording;
+// skipping is the RedisLimiter's key-cost concern, not the gate's.
+// Acquire is the single-bucket form of AcquireBatch: the limit<=0
+// counting contract and the ErrConcurrencyExceeded refusal are identical
+// for one-element batches.
+func (m *MemoryLimiter) Acquire(ctx context.Context, scope ScopeKey, limit int) (func(), error) {
+	return m.AcquireBatch(ctx, []ScopeLimit{{Scope: scope, Limit: limit}})
 }
 
-// Acquire checks the in-flight count for this subject and either reserves a slot
-// (returning a release func) or returns ErrConcurrencyExceeded.
-func (m *MemoryLimiter) Acquire(_ context.Context, scope ScopeKey) (func(), error) {
+// AcquireBatch grants every bucket of scopes in one all-or-nothing step under
+// a single lock: every capped bucket is judged before any hold is written, so
+// a refusal returns ErrConcurrencyExceeded with zero partial holds, and
+// limit<=0 buckets are counted without enforcing (D-18). The returned release
+// frees every bucket of the batch together and is idempotent.
+func (m *MemoryLimiter) AcquireBatch(_ context.Context, scopes []ScopeLimit) (func(), error) {
 	m.mu.Lock()
-	key := scope.String()
-	limit, hasLimit := m.limits[key]
-	if !hasLimit || limit <= 0 {
+	// Judge the whole batch first — all-or-nothing, no rollback window.
+	for _, sl := range scopes {
+		if sl.Limit > 0 && m.holders[sl.Scope.String()] >= sl.Limit {
+			m.mu.Unlock()
+			return nil, ErrConcurrencyExceeded
+		}
+	}
+	keys := make([]string, 0, len(scopes))
+	for _, sl := range scopes {
+		key := sl.Scope.String()
 		m.holders[key]++
 		m.updated[key] = nowUnix()
-		m.mu.Unlock()
-		return m.releaseFunc(key), nil
+		keys = append(keys, key)
 	}
-	if m.holders[key] >= limit {
-		m.mu.Unlock()
-		return nil, ErrConcurrencyExceeded
-	}
-	m.holders[key]++
-	m.updated[key] = nowUnix()
 	m.mu.Unlock()
-	return m.releaseFunc(key), nil
-}
 
-// releaseFunc returns a closure that decrements the in-flight count for key.
-// It is idempotent: a second call is a no-op so the contract "call exactly
-// once" is forgiving on misuse. Real bugs should not rely on this.
-func (m *MemoryLimiter) releaseFunc(key string) func() {
 	var done bool
 	return func() {
 		if done {
@@ -165,37 +218,41 @@ func (m *MemoryLimiter) releaseFunc(key string) func() {
 		}
 		done = true
 		m.mu.Lock()
-		if m.holders[key] > 0 {
-			m.holders[key]--
+		for _, key := range keys {
+			if m.holders[key] > 0 {
+				m.holders[key]--
+			}
+			if m.holders[key] == 0 {
+				delete(m.holders, key)
+			}
+			m.updated[key] = nowUnix()
 		}
-		if m.holders[key] == 0 {
-			delete(m.holders, key)
-		}
-		m.updated[key] = nowUnix()
 		m.mu.Unlock()
-	}
+	}, nil
 }
 
 // Snapshot returns current state for every known scope in deterministic order
-// (by ScopeKey string).
+// (by ScopeKey string). Only in-flight (holder) rows are emitted and Limit is
+// always 0: the configured caps live in the token/user configuration data and
+// are back-filled at the controller layer (D-02), keeping the limiter decoupled
+// from configuration push.
 func (m *MemoryLimiter) Snapshot(_ context.Context) ([]ScopeSnapshot, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	scopes := make([]ScopeSnapshot, 0, len(m.limits)+len(m.holders))
-	seen := map[string]struct{}{}
-	for k, lim := range m.limits {
-		cur := m.holders[k]
-		scopes = append(scopes, scopeRow(ScopeKey(k), cur, lim, m.updated[k]))
-		seen[k] = struct{}{}
-	}
+	scopes := make([]ScopeSnapshot, 0, len(m.holders))
 	for k, cur := range m.holders {
-		if _, ok := seen[k]; ok {
-			continue
-		}
 		scopes = append(scopes, scopeRow(ScopeKey(k), cur, 0, m.updated[k]))
 	}
 	sort.Slice(scopes, func(i, j int) bool { return scopes[i].Scope < scopes[j].Scope })
 	return scopes, nil
+}
+
+// DegradedStatus always reports the zero-value healthy status: the
+// MemoryLimiter IS the single-node mode (RED-04) — without Redis there is no
+// degraded backend to observe, so the admin snapshot never shows a degraded
+// badge no matter how many slots are held.
+func (m *MemoryLimiter) DegradedStatus() DegradedStatus {
+	return DegradedStatus{}
 }
 
 // nowUnix is overridable for tests; see limiter_clock_test.go for the seam.
@@ -212,8 +269,11 @@ func scopeRow(s ScopeKey, current, limit int, updated int64) ScopeSnapshot {
 		util = float64(current) / float64(limit)
 	}
 	kind := "key"
-	if s.Kind() == ScopeKindUser {
+	switch s.Kind() {
+	case ScopeKindUser:
 		kind = "user"
+	case ScopeKindChannel:
+		kind = "channel"
 	}
 	return ScopeSnapshot{
 		Scope:       s,

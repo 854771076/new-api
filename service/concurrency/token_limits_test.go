@@ -1,11 +1,106 @@
 package concurrency
 
 import (
+	"fmt"
+	"os"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// tokenLimitParseCase mirrors one row of the shared Go/TS fixture at
+// testdata/token_limit_parse_cases.json. Task 02-13-02's TypeScript mirror
+// consumes the same file, so the two implementations cannot drift without
+// breaking one of the two suites (double-sided lock, TUI-02 BCD conclusion).
+type tokenLimitParseCase struct {
+	Input      string                       `json:"input"`
+	MustReject bool                         `json:"mustReject"`
+	Segments   []tokenLimitParseCaseSegment `json:"segments"`
+}
+
+// tokenLimitParseCaseSegment is one classified CSV segment: raw (the entry
+// after outer TrimSpace), class (accept/empty/defect), model/limit (accept
+// only) and reason (defect only).
+type tokenLimitParseCaseSegment struct {
+	Raw    string `json:"raw"`
+	Class  string `json:"class"`
+	Model  string `json:"model"`
+	Limit  int    `json:"limit"`
+	Reason string `json:"reason"`
+}
+
+// loadTokenLimitParseCases reads the shared fixture. A missing fixture is a
+// hard failure (never a skip): the file is the cross-stack semantic contract.
+func loadTokenLimitParseCases(t *testing.T) []tokenLimitParseCase {
+	t.Helper()
+
+	data, err := os.ReadFile("testdata/token_limit_parse_cases.json")
+	require.NoError(t, err, "shared Go/TS fixture testdata/token_limit_parse_cases.json must exist")
+	var cases []tokenLimitParseCase
+	require.NoError(t, common.Unmarshal(data, &cases))
+	require.NotEmpty(t, cases)
+	return cases
+}
+
+// TestParseEntriesFixtureClassification locks ParseEntries segment-by-segment
+// classification (raw/class/model/limit/reason) against the shared fixture.
+func TestParseEntriesFixtureClassification(t *testing.T) {
+	for i, tc := range loadTokenLimitParseCases(t) {
+		t.Run(fmt.Sprintf("case_%02d_%s", i, tc.Input), func(t *testing.T) {
+			entries := ParseEntries(tc.Input)
+			require.Len(t, entries, len(tc.Segments))
+			for j, want := range tc.Segments {
+				got := entries[j]
+				assert.Equal(t, want.Raw, got.Raw, "segment %d raw", j)
+				assert.Equal(t, want.Class, got.Class, "segment %d class (raw=%q)", j, want.Raw)
+				assert.Equal(t, want.Model, got.Model, "segment %d model (raw=%q)", j, want.Raw)
+				assert.Equal(t, want.Limit, got.Limit, "segment %d limit (raw=%q)", j, want.Raw)
+				assert.Equal(t, want.Reason, got.Reason, "segment %d reason (raw=%q)", j, want.Raw)
+			}
+		})
+	}
+}
+
+// TestValidateConcurrencyLimitsFixturePolicy locks the write-boundary policy:
+// mustReject iff at least one defect segment exists, and a rejecting error
+// names the first defect's raw entry plus its reason code. Non-negative global
+// caps (0 = unlimited) are always accepted.
+func TestValidateConcurrencyLimitsFixturePolicy(t *testing.T) {
+	for i, tc := range loadTokenLimitParseCases(t) {
+		t.Run(fmt.Sprintf("case_%02d_%s", i, tc.Input), func(t *testing.T) {
+			err := ValidateConcurrencyLimits(0, tc.Input)
+			if !tc.MustReject {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			var firstDefect *tokenLimitParseCaseSegment
+			for j := range tc.Segments {
+				if tc.Segments[j].Class == "defect" {
+					firstDefect = &tc.Segments[j]
+					break
+				}
+			}
+			require.NotNil(t, firstDefect, "mustReject case must contain a defect segment")
+			assert.Contains(t, err.Error(), firstDefect.Raw, "error must name the offending entry")
+			assert.Contains(t, err.Error(), firstDefect.Reason, "error must name the reason code")
+		})
+	}
+
+	t.Run("negative global limit is rejected", func(t *testing.T) {
+		err := ValidateConcurrencyLimits(-1, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "concurrency_limit")
+		assert.Contains(t, err.Error(), "-1")
+	})
+
+	t.Run("zero and positive global limits are accepted", func(t *testing.T) {
+		require.NoError(t, ValidateConcurrencyLimits(0, ""))
+		require.NoError(t, ValidateConcurrencyLimits(5, ""))
+	})
+}
 
 // TestTokenConcurrencyAccessor_DefaultZeroIsUnlimited: brand-new token has zero limits = unlimited.
 func TestTokenConcurrencyAccessor_DefaultZeroIsUnlimited(t *testing.T) {
