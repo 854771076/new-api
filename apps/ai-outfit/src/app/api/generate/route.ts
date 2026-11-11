@@ -14,6 +14,7 @@ import { buildQuote } from '@/lib/tryon/quote';
 import { runTryon, type TryonOrder } from '@/lib/tryon/orchestrate';
 import { PIPELINE_VERSION } from '@/lib/tryon/prompts';
 import { resolveTryonModel } from '@/lib/tryon/models';
+import { resolveQuotePrices } from '@/lib/tryon/pricing';
 import type { OutfitGeneration } from '@/lib/types';
 import type { WearCandidate } from '@/lib/tryon/wear';
 import { z } from 'zod';
@@ -95,10 +96,7 @@ export async function POST(req: NextRequest) {
   if (!bodySchema.shape.size.unwrap().safeParse(size).success) {
     return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
   }
-  const quote = buildQuote(candidates, {
-    parsePrice: visionModelRes.priceQuota,
-    tryonPrice: imageModelRes.priceQuota,
-  });
+  const quote = buildQuote(candidates, await resolveQuotePrices(imageModelRes.model, visionModelRes.model));
 
   // 3. 一次性创建任务（部分唯一索引兜底并发重复提交）。
   const { data: pendingRow, error: insertErr } = await admin

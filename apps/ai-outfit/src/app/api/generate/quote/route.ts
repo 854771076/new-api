@@ -9,6 +9,7 @@ import { getGatewayAccessToken } from '@/lib/gateway-session';
 import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
 import { buildQuote } from '@/lib/tryon/quote';
 import { resolveTryonModel } from '@/lib/tryon/models';
+import { resolveQuotePrices } from '@/lib/tryon/pricing';
 import { QUOTA_PER_CREDIT } from '@/lib/constants';
 import type { WearCandidate } from '@/lib/tryon/wear';
 import { z } from 'zod';
@@ -55,10 +56,8 @@ export async function POST(req: NextRequest) {
       resolveTryonModel(supabase, 'image'),
       resolveTryonModel(supabase, 'vision'),
     ]);
-    const quote = buildQuote(activeOutfits as WearCandidate[], {
-      parsePrice: visionModelRes.priceQuota,
-      tryonPrice: imageModelRes.priceQuota,
-    });
+    const prices = await resolveQuotePrices(imageModelRes.model, visionModelRes.model);
+    const quote = buildQuote(activeOutfits as WearCandidate[], prices);
     return gatewaySuccess({
       quote,
       credits: quote.total_quota / QUOTA_PER_CREDIT,

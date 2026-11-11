@@ -55,8 +55,11 @@ mock.module('@/lib/gateway-session', () => ({ getGatewayAccessToken: async () =>
 mock.module('@/lib/tryon/models', () => ({
   resolveTryonModel: mock(async (_db, usage) =>
     (usage === 'image'
-      ? { model: 'img-model', defaultSize: '1024x1536', priceQuota: 15000 }
-      : { model: 'vision-model', defaultSize: null, priceQuota: 3000 })),
+      ? { model: 'img-model', defaultSize: '1024x1536' }
+      : { model: 'vision-model', defaultSize: null })),
+}));
+mock.module('@/lib/tryon/pricing', () => ({
+  resolveQuotePrices: mock(async () => ({ parsePrice: 3000, tryonPrice: 15000 })),
 }));
 mock.module('@/lib/tryon/orchestrate', () => ({
   runTryon: mock(async (_db, order) => {

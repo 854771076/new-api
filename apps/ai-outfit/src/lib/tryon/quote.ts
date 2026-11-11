@@ -1,5 +1,5 @@
 // lib/tryon/quote.ts — 提交前报价：本次未解析个人服装的解析费 + 一次换装制作费。
-// 单价来自 ai_models.price_quota（换装费 = 生图模型单价，解析费 = 视觉模型单价 × 未解析件数）；
+// 单价由网关 /oauth/pricing 折算（换装费 = 生图模型单张额度，解析费 = 视觉模型单件估算额度 × 未解析件数）；
 // 网关 relay 仍按模型实际用量对 App 钱包计费，这里只是提交前展示与记账字段。
 import 'server-only';
 import type { GenerationQuote } from '@/lib/types';

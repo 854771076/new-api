@@ -247,6 +247,61 @@ export async function fetchGatewayLogs(
   throw new GatewayError(502, `${UNSUPPORTED_MESSAGE}（消费日志）`, 'UNSUPPORTED');
 }
 
+// ===== OAuth 定价接口（GET /oauth/pricing） =====
+
+export interface GatewayPricingEntry {
+  model_name: string;
+  /** 倍率（每 1M token），倍率计费模式使用。 */
+  model_ratio: number;
+  /** 单次价格（单位 = quota_per_unit），按次价格模式使用。 */
+  model_price: number;
+  /** 0 = 倍率计费，1 = 按次价格计费。 */
+  quota_type: number;
+  completion_ratio: number;
+  image_ratio?: number | null;
+  enable_groups?: string[];
+  [key: string]: unknown;
+}
+
+export interface GatewayPricing {
+  data: GatewayPricingEntry[];
+  group_ratio: Record<string, number>;
+  usable_group: Record<string, string>;
+  quota_per_unit: number;
+}
+
+const gatewayPricingEntrySchema = z.object({
+  model_name: z.string().min(1),
+  model_ratio: z.number().nonnegative().optional().default(0),
+  model_price: z.number().nonnegative().optional().default(0),
+  quota_type: z.number().int().min(0).max(1).optional().default(0),
+  completion_ratio: z.number().nonnegative().optional().default(0),
+  image_ratio: z.number().nonnegative().nullable().optional(),
+  enable_groups: z.array(z.string()).optional(),
+}).passthrough();
+
+/**
+ * GET /oauth/pricing — 读取网关模型定价（倍率/单价 + 分组倍率 + 每单位额度）。
+ * 供 ai-outfit 提交前报价使用；实际扣费仍由网关 relay 按真实用量结算。
+ */
+export async function fetchGatewayPricing(opts?: FetchGatewayOptions): Promise<GatewayPricing> {
+  const res = await requestWithAuth('GET', '/oauth/pricing', { accessToken: opts?.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = z.object({
+    data: z.array(gatewayPricingEntrySchema),
+    group_ratio: z.record(z.string(), z.number()).optional().default({}),
+    usable_group: z.record(z.string(), z.string()).optional().default({}),
+    quota_per_unit: z.number().positive(),
+  }).safeParse(await readJson(res));
+  if (!parsed.success) throw new GatewayError(502, 'Invalid gateway pricing response.', 'UPSTREAM_INVALID_RESPONSE');
+  return {
+    data: parsed.data.data,
+    group_ratio: parsed.data.group_ratio,
+    usable_group: parsed.data.usable_group,
+    quota_per_unit: parsed.data.quota_per_unit,
+  };
+}
+
 // ===== AI Relay（保留原有函数 + 重构复用 requestWithAuth） =====
 
 export interface GatewayModel {

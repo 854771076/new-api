@@ -53,6 +53,9 @@ func registerOAuthProviderRoutes(router *gin.Engine) {
 	// Logs list requires a valid access token with the api:read scope.
 	router.GET("/oauth/logs", rateLimit, controller.OAuthLogsList)
 
+	// Pricing requires a valid access token with the api:read scope.
+	router.GET("/oauth/pricing", rateLimit, controller.OAuthPricing)
+
 	// OIDC discovery and JWKS.
 	router.GET("/.well-known/openid-configuration", controller.OAuthDiscovery)
 	router.GET("/oauth/jwks", controller.OAuthJWKS)
