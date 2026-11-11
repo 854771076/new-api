@@ -1,7 +1,7 @@
 // POST /api/generate — 换装生成核心。
 // 校验 → 校验模型 → 读取人物/服装/姿势 → 签参考图 URL → 渲染 prompt → 落 pending → 调网关 → 下载 → 上传 Storage → 写记录 → 返回结果。
 import 'server-only';
-import { NextResponse, type NextRequest } from 'next/server';
+import { type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { getSignedUrl } from '@/lib/media-urls';
@@ -9,16 +9,21 @@ import { config } from '@/lib/config';
 import { generateImage, GatewayError } from '@/lib/gateway';
 import { DEFAULT_NEGATIVE_PROMPT, DEFAULT_OUTFIT_TEMPLATE, renderPrompt } from '@/lib/prompt';
 import type { OutfitGeneration } from '@/lib/types';
+import { getGatewayAccessToken } from '@/lib/gateway-session';
+import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
+import { readGeneratedImage } from '@/lib/generated-image';
 import { z } from 'zod';
+
+export const maxDuration = 300;
 
 const bodySchema = z.object({
   character_id: z.string().uuid(),
-  outfit_ids: z.array(z.string().uuid()).min(1),
+  outfit_ids: z.array(z.string().uuid()).min(1).max(6).refine(ids => new Set(ids).size === ids.length),
   pose_id: z.string().uuid(),
-  model: z.string().min(1).default('gpt-image-1'),
-  size: z.string().optional(),
+  model: z.string().min(1).max(200),
+  size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).optional(),
   prompt_extra: z.string().max(500).optional(),
-});
+}).strict();
 
 const SIGNED_URL_EXPIRES_IN = 3600;
 
@@ -36,28 +41,16 @@ interface PromptTemplateRow {
 }
 
 export async function POST(req: NextRequest) {
+  try { requireGatewayOrigin(req); } catch (error) { return gatewayFailure(error); }
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ success: false, error: { message: '未登录', code: 'UNAUTHENTICATED' } }, { status: 401 });
-
-  // 网关 OAuth access_token 存在 Supabase session 的 provider_token 里；
-  // 服务端没有浏览器 sessionStorage，必须显式取出后透传给网关。
-  const { data: { session } } = await supabase.auth.getSession();
-  const gatewayToken = session?.provider_token;
-  if (!gatewayToken) {
-    return NextResponse.json(
-      { success: false, error: { message: '网关授权令牌缺失，请重新登录', code: 'GATEWAY_TOKEN_MISSING' } },
-      { status: 401 },
-    );
-  }
+  if (!user) return gatewayFailure(new GatewayError(401, '请重新登录后生成', 'AUTH_SESSION_EXPIRED'));
+  try { await getGatewayAccessToken(); } catch (error) { return gatewayFailure(error); }
 
   let body: z.infer<typeof bodySchema>;
   try { body = bodySchema.parse(await req.json()); }
-  catch (e) {
-    return NextResponse.json(
-      { success: false, error: { message: e instanceof Error ? e.message : '请求格式错误', code: 'INVALID_BODY' } },
-      { status: 400 },
-    );
+  catch {
+    return gatewayFailure(new GatewayError(400, '请选择有效素材，服装最多 6 套，提示词最多 500 字', 'INVALID_BODY'));
   }
 
   const currentClientId = config.gatewayClientId;
@@ -67,34 +60,36 @@ export async function POST(req: NextRequest) {
     .from('ai_models')
     .select('model_id, client_id, default_size')
     .eq('model_id', body.model)
+    .eq('usage', 'outfit')
     .eq('is_active', true)
     .in('client_id', [currentClientId, '']);
 
   const modelRows = (modelData ?? []) as AiModelRow[];
   const modelRow = modelRows.find((m) => m.client_id === currentClientId) ?? modelRows[0];
   if (!modelRow) {
-    return NextResponse.json(
-      { success: false, error: { message: '所选模型不可用', code: 'MODEL_NOT_AVAILABLE' } },
-      { status: 400 },
-    );
+    return gatewayFailure(new GatewayError(400, '所选模型不可用', 'MODEL_NOT_AVAILABLE'));
   }
+
+  const effectiveSize = bodySchema.shape.size.unwrap().safeParse(body.size ?? modelRow.default_size ?? '1024x1024');
+  if (!effectiveSize.success) return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
 
   // 1. 读取素材（service_role 能绕过 RLS；但这里 RLS 已限制 client_id 匹配）
   const { data: character } = await supabase
     .from('characters').select('id, name, image_path, bucket')
-    .eq('id', body.character_id).eq('user_id', user.id).maybeSingle();
+    .eq('id', body.character_id).eq('user_id', user.id).eq('client_id', currentClientId).maybeSingle();
 
   const { data: outfits } = await supabase
     .from('outfits').select('id, name_zh, name_en, description_zh, category, bucket, thumb_path, preview_path')
-    .in('id', body.outfit_ids).eq('is_active', true);
+    .in('id', body.outfit_ids).eq('client_id', currentClientId).eq('is_active', true);
 
   const { data: pose } = await supabase
     .from('poses').select('id, name_zh, system, category, angle, bucket, thumb_path, preview_path')
-    .eq('id', body.pose_id).eq('is_active', true).maybeSingle();
+    .eq('id', body.pose_id).eq('client_id', currentClientId).eq('is_active', true).maybeSingle();
 
-  if (!character) return NextResponse.json({ success: false, error: { message: '人物不存在或无权限', code: 'CHARACTER_NOT_FOUND' } }, { status: 404 });
-  if (!outfits || outfits.length === 0) return NextResponse.json({ success: false, error: { message: '请选择至少一套服装', code: 'OUTFIT_EMPTY' } }, { status: 400 });
-  if (!pose) return NextResponse.json({ success: false, error: { message: '姿势不存在', code: 'POSE_NOT_FOUND' } }, { status: 404 });
+  if (!character) return gatewayFailure(new GatewayError(404, '人物不存在或无权限', 'CHARACTER_NOT_FOUND'));
+  if (!outfits || outfits.length !== body.outfit_ids.length) return gatewayFailure(new GatewayError(400, '所选服装已失效，请重新选择', 'OUTFIT_NOT_AVAILABLE'));
+  if (!pose) return gatewayFailure(new GatewayError(404, '姿势不存在', 'POSE_NOT_FOUND'));
+  outfits.sort((a, b) => body.outfit_ids.indexOf(a.id) - body.outfit_ids.indexOf(b.id));
 
   // 2. 签参考图 URL（bucket 取自各行：人物 media-user，服装/姿势 media-official）
   const [characterImage, poseImage] = await Promise.all([
@@ -114,11 +109,8 @@ export async function POST(req: NextRequest) {
     if (o.url) usableOutfits.push({ name_zh: o.name_zh, category: o.category, url: o.url });
   }
 
-  if (!characterImage || !poseImage || usableOutfits.length === 0) {
-    return NextResponse.json(
-      { success: false, error: { message: '人物、服装或姿势缺少可用的参考图', code: 'MATERIAL_IMAGE_MISSING' } },
-      { status: 400 },
-    );
+  if (!characterImage || !poseImage || usableOutfits.length !== outfits.length) {
+    return gatewayFailure(new GatewayError(400, '所选素材缺少参考图，请更换素材', 'MATERIAL_IMAGE_MISSING'));
   }
 
   // 3. 读取提示词模板并渲染
@@ -147,7 +139,8 @@ export async function POST(req: NextRequest) {
   const negativePrompt = templateRow?.negative_prompt?.trim() ? templateRow.negative_prompt : DEFAULT_NEGATIVE_PROMPT;
 
   // 4. 先落一条 pending 记录（client_id 是 NOT NULL 且 RLS 依赖它，必须显式写入）
-  const { data: pendingRow, error: insertErr } = await supabase
+  const admin = createAdminSupabase();
+  const { data: pendingRow, error: insertErr } = await admin
     .from('outfit_generations').insert({
       client_id: currentClientId,
       user_id: user.id,
@@ -160,52 +153,33 @@ export async function POST(req: NextRequest) {
     }).select('id').single();
 
   if (insertErr || !pendingRow) {
-    return NextResponse.json({ success: false, error: { message: `无法创建生成记录：${insertErr?.message ?? 'unknown'}`, code: 'DB_ERROR' } }, { status: 500 });
+    return gatewayFailure(new GatewayError(500, '无法创建生成记录，请稍后重试', 'UPSTREAM_DATABASE_ERROR'));
   }
   const recordId = pendingRow.id;
 
   try {
-    // 5. 调网关：参考图按 人物 → 服装 → 姿势 顺序，同时冗余传单图字段
+    // Reference order binds the first image to identity and the last to pose.
     const referenceImages = [characterImage, ...usableOutfits.map((o) => o.url), poseImage];
     const result = await generateImage({
       model: modelRow.model_id,
       prompt,
-      size: body.size ?? modelRow.default_size ?? undefined,
+      size: effectiveSize.data,
       n: 1,
       negative_prompt: negativePrompt,
       reference_images: referenceImages,
-      character_image: characterImage,
-      outfit_image: usableOutfits[0].url,
-      pose_image: poseImage,
-      accessToken: gatewayToken,
     });
     const image = result.images[0];
     if (!image) throw new Error('网关返回空 images 数组');
 
-    // 6. 下载 → 上传 Storage
-    let resultBucket: string | null = null;
-    let resultPath: string | null = null;
-
-    const admin = createAdminSupabase();
-    const { data: client } = await admin.auth.getUser(user.id);
-    const clientId = (client.user?.app_metadata as { client_id?: string } | undefined)?.client_id ?? '';
-
-    if (image.url) {
-      const fetched = await fetch(image.url);
-      if (!fetched.ok) throw new Error(`下载网关结果失败：${fetched.status}`);
-      const buf = Buffer.from(await fetched.arrayBuffer());
-      const ext = image.url.match(/\.(png|jpg|jpeg|webp)(\?|$)/i)?.[1] ?? 'png';
-      const path = `${clientId}/${user.id}/${recordId}.${ext}`;
-      const { error: upErr } = await admin.storage
-        .from('media-user')
-        .upload(path, buf, { contentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`, upsert: true });
-      if (upErr) throw new Error(`上传 Storage 失败：${upErr.message}`);
-      resultBucket = 'media-user';
-      resultPath = path;
-    }
+    const bytes = await readGeneratedImage(image);
+    const resultBucket = 'media-user';
+    const resultPath = `${currentClientId}/${user.id}/${recordId}.png`;
+    const { error: uploadError } = await createAdminSupabase().storage.from(resultBucket)
+      .upload(resultPath, bytes, { contentType: 'image/png', upsert: false });
+    if (uploadError) throw new GatewayError(503, '图片保存失败，请稍后重试', 'UPSTREAM_STORAGE_ERROR');
 
     // 7. 更新记录
-    const { error: upStatErr } = await supabase
+    const { error: upStatErr } = await admin
       .from('outfit_generations')
       .update({
         status: 'succeeded',
@@ -214,22 +188,14 @@ export async function POST(req: NextRequest) {
         gateway_request_id: result.request_id,
         gateway_usage: result.usage ?? null,
       } satisfies Partial<OutfitGeneration>)
-      .eq('id', recordId);
+      .eq('id', recordId).eq('user_id', user.id).eq('client_id', currentClientId);
 
     if (upStatErr) throw new Error(`更新记录失败：${upStatErr.message}`);
 
-    return NextResponse.json({ success: true, data: { id: recordId, result_path: resultPath, result_bucket: resultBucket } });
-  } catch (e) {
-    // 8. 失败回写
-    const msg = e instanceof GatewayError ? `网关错误 (${e.status})：${e.message}` : e instanceof Error ? e.message : String(e);
-    await supabase
-      .from('outfit_generations')
-      .update({ status: 'failed', error: msg } satisfies Partial<OutfitGeneration>)
-      .eq('id', recordId);
-    const status = e instanceof GatewayError ? Math.max(400, e.status) : 500;
-    return NextResponse.json(
-      { success: false, error: { message: msg, code: 'GENERATE_FAILED' } },
-      { status },
-    );
+    return gatewaySuccess({ id: recordId, result_path: resultPath, result_bucket: resultBucket });
+  } catch (error) {
+    const safe = error instanceof GatewayError ? error : new GatewayError(502, '生成或图片保存失败，请稍后重试', 'UPSTREAM_GENERATE_FAILED');
+    await admin.from('outfit_generations').update({ status: 'failed', error: safe.message }).eq('id', recordId).eq('user_id', user.id).eq('client_id', currentClientId);
+    return gatewayFailure(safe);
   }
 }

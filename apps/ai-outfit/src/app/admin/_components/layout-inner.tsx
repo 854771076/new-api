@@ -11,7 +11,6 @@ import {
   IdcardOutlined,
   HistoryOutlined,
   CrownOutlined,
-  SettingOutlined,
   BlockOutlined,
   FileTextOutlined,
 } from '@ant-design/icons';
@@ -27,7 +26,6 @@ const MENU_ITEMS = [
   { key: '/admin/generations', icon: <HistoryOutlined />, label: '生成记录' },
   { key: '/admin/models', icon: <BlockOutlined />, label: '模型设置' },
   { key: '/admin/prompts', icon: <FileTextOutlined />, label: '提示词模板' },
-  { key: '/admin/plans', icon: <SettingOutlined />, label: '套餐管理' },
 ];
 
 export default function AdminLayoutInner({ children, role }: { children: ReactNode; role: string }) {
@@ -41,7 +39,7 @@ export default function AdminLayoutInner({ children, role }: { children: ReactNo
         <div className="flex items-center gap-4">
           {role === 'owner' && <CrownOutlined />}
           <span className="text-xs opacity-70">权限：{role}</span>
-          <Link href="/" className="text-xs opacity-70 hover:opacity-100">← 返回应用</Link>
+          <Link href="/studio" className="text-xs opacity-70 hover:opacity-100">← 返回应用</Link>
         </div>
       </Header>
       <Layout>
@@ -50,7 +48,7 @@ export default function AdminLayoutInner({ children, role }: { children: ReactNo
             theme="dark"
             mode="inline"
             selectedKeys={[pathname]}
-            items={MENU_ITEMS}
+            items={MENU_ITEMS.map((item) => ({ ...item, label: <Link href={item.key}>{item.label}</Link> }))}
           />
         </Sider>
         <Layout className="bg-slate-50">

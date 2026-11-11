@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Input, Tag, Button, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { adminRequest, adminMutation } from '../_components/admin-request';
 
 interface Row {
   id: string;
@@ -19,17 +20,17 @@ export default function AdminPosesPage() {
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [keyword, setKeyword] = useState('');
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/admin/poses?page=${page}&limit=30`);
-      const json = (await res.json()) as { data: Row[]; total: number };
+      const json = await adminRequest<{ data: Row[]; total: number }>(`/api/admin/poses?page=${page}&limit=30&keyword=${encodeURIComponent(keyword)}`);
       setRows(json.data ?? []);
       setTotal(json.total ?? 0);
     } catch { message.error('加载失败'); }
     finally { setLoading(false); }
-  }, [page]);
+  }, [page, keyword]);
 
   useEffect(() => {
     // 延迟到下一个任务执行，避免在 effect 同步阶段触发 setState
@@ -38,14 +39,9 @@ export default function AdminPosesPage() {
   }, [fetchData]);
 
   const handleToggleActive = async (r: Row) => {
-    const res = await fetch(`/api/admin/poses?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_active: !r.is_active }),
-    });
-    if (res.ok) {
+    if (await adminMutation(`/api/admin/poses?id=${r.id}`, 'PATCH', { is_active: !r.is_active })) {
       message.success(r.is_active ? '已下架' : '已上架');
-      fetchData();
+      void fetchData();
     }
   };
 
@@ -69,7 +65,7 @@ export default function AdminPosesPage() {
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold">姿势管理</h1>
         <Space>
-          <Input.Search placeholder="搜索姿势" style={{ width: 240 }} onSearch={() => fetchData()} />
+          <Input.Search placeholder="搜索姿势" style={{ width: 240 }} onSearch={(value) => { setKeyword(value); setPage(1); }} />
         </Space>
       </div>
       <Table

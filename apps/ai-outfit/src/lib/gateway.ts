@@ -1,59 +1,54 @@
-// lib/gateway.ts — new-api Gateway 客户端封装（AI relay + OAuth 管理 API）。
+import 'server-only';
+import { z } from 'zod';
 import { config } from '@/lib/config';
-import { getGatewayAccessToken, refreshGatewayToken } from '@/lib/gatewayAuth';
+import { getGatewayAccessToken } from '@/lib/gateway-session';
+import { readGeneratedImage } from '@/lib/generated-image';
+import { GatewayError, readGatewayError } from '@/lib/gateway-errors';
+import { gatewayCheckoutSchema, gatewayCheckoutResultSchema, gatewayTopupSchema,
+  gatewayPlanSchema, gatewayProductSchema,
+  type GatewayCheckoutInput, type GatewayCheckoutResult, type GatewayPaymentMethod,
+  type GatewayPlan, type GatewayProduct } from '@/lib/gateway-contract';
 
-export class GatewayError extends Error {
-  status: number;
-  code?: string;
-  constructor(status: number, message: string, code?: string) {
-    super(message);
-    this.status = status;
-    this.code = code;
-  }
-}
+export { GatewayError } from '@/lib/gateway-errors';
+export type { GatewayCheckoutResult, GatewayPaymentMethod, GatewayPlan, GatewayProduct } from '@/lib/gateway-contract';
 
 function normalizeError(err: unknown): GatewayError {
   if (err instanceof GatewayError) return err;
-  return new GatewayError(401, err instanceof Error ? err.message : String(err));
+  return new GatewayError(503, 'Gateway service is temporarily unavailable.', 'UPSTREAM_GATEWAY_ERROR');
 }
 
-/**
- * 客户端用：带 Bearer token 发请求，401 时自动 refresh 一次。
- */
 async function requestWithAuth(
   method: string,
   path: string,
-  opts?: { body?: string; query?: Record<string, string | number | undefined>; accessToken?: string },
+  opts: { body?: string | FormData; query?: Record<string, string | number | undefined>; accessToken?: string; signal?: AbortSignal } = {},
 ): Promise<Response> {
-  const qs = opts?.query
-    ? '?' +
-      Object.entries(opts.query)
-        .filter(([, v]) => v !== undefined && v !== null && v !== '')
-        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-        .join('&')
-    : '';
-
-  const url = `${config.gatewayBaseUrl}${path}${qs}`;
-
-  const send = async (token: string) =>
-    fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(opts?.body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      body: opts?.body,
-    });
-
-  // 优先用传入的 token（服务器端 Route Handler），否则走 gatewayAuth（客户端）
-  const firstToken = opts?.accessToken ?? (await getGatewayAccessToken());
-  const res = await send(firstToken);
-  if (res.status !== 401) return res;
-  await res.body?.cancel().catch(() => undefined);
-  // 只 refresh 一次；服务器端如果传了 token 则跳过 refresh
-  if (opts?.accessToken) return res;
-  const refreshed = await refreshGatewayToken();
-  return send(refreshed);
+  const url = new URL(`${config.gatewayBaseUrl}${path}`);
+  for (const [key, value] of Object.entries(opts.query ?? {})) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+  // Supplied server tokens are hints only. The verified session's vault is always
+  // authoritative, never a stale provider_token left in cookies.
+  const firstToken = await getGatewayAccessToken({ expectedToken: opts.accessToken });
+  // FormData retains immutable file blobs: fetch serializes them anew on the
+  // single 401 retry. Let fetch supply the multipart boundary on each send.
+  const send = (token: string) => fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...(typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}) },
+    body: opts.body, cache: 'no-store', redirect: 'error',
+    signal: opts.signal
+      ? AbortSignal.any([opts.signal, AbortSignal.timeout(path.startsWith('/v1/') ? 120_000 : 15_000)])
+      : AbortSignal.timeout(path.startsWith('/v1/') ? 120_000 : 15_000),
+  });
+  try {
+    const response = await send(firstToken);
+    if (response.status !== 401) return response;
+    await response.body?.cancel().catch(() => undefined);
+    const refreshed = await getGatewayAccessToken({ force: true, expectedToken: firstToken });
+    return await send(refreshed); // Exactly once, including explicit-token callers.
+  } catch (error) {
+    if (error instanceof GatewayError) throw error;
+    throw new GatewayError(503, 'Gateway service is temporarily unavailable.', 'UPSTREAM_GATEWAY_TIMEOUT');
+  }
 }
 
 async function readJson(res: Response): Promise<unknown> {
@@ -70,19 +65,6 @@ async function readJson(res: Response): Promise<unknown> {
 // 统一识别为“接口不支持”，避免把 HTML 当成解析失败抛给用户。
 const UNSUPPORTED_MESSAGE = '当前网关版本未启用该接口';
 
-async function readErrorText(res: Response): Promise<string> {
-  const text = await res.text().catch(() => '');
-  if (!text) return res.statusText || `HTTP ${res.status}`;
-  try {
-    const json = JSON.parse(text) as { error_description?: unknown; message?: unknown };
-    if (typeof json.error_description === 'string' && json.error_description) return json.error_description;
-    if (typeof json.message === 'string' && json.message) return json.message;
-  } catch {
-    // 不是 JSON，走下面的兜底
-  }
-  if (text.trimStart().startsWith('<')) return `${UNSUPPORTED_MESSAGE}（HTTP ${res.status}）`;
-  return text.slice(0, 200);
-}
 
 // ===== OAuth 管理 API（access_token 可调用 /oauth/*） =====
 
@@ -96,6 +78,8 @@ export interface GatewayUserinfo {
   status?: number;
   quota?: number;
   used_quota?: number;
+  app_quota?: number;
+  app_used_quota?: number;
   request_count?: number;
   group?: string;
   [key: string]: unknown;
@@ -123,15 +107,8 @@ export interface GatewayLogsResult {
   page_size: number;
 }
 
-export interface GatewayTopupResult {
-  checkout_url?: string;
-  payment_url?: string;
-  order_id?: string;
-  [key: string]: unknown;
-}
-
 export interface FetchGatewayOptions {
-  /** 服务器端 Route Handler 可直接传入 access token，避免依赖 gatewayAuth */
+  /** Server-only hint; the current vault is authoritative. */
   accessToken?: string;
 }
 
@@ -140,14 +117,23 @@ export interface FetchGatewayOptions {
  */
 export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<GatewayUserinfo> {
   const res = await requestWithAuth('GET', '/oauth/userinfo', { accessToken: opts?.accessToken });
-  if (!res.ok) throw new GatewayError(res.status, await readErrorText(res));
+  if (!res.ok) throw await readGatewayError(res);
   const json = await readJson(res);
   if (!json || typeof json !== 'object') throw new GatewayError(502, UNSUPPORTED_MESSAGE, 'UNSUPPORTED');
   const raw = json as Record<string, unknown>;
   // new-api 的 userinfo 遵循 OIDC 命名（sub / name），前端统一收敛成 id / display_name。
   return {
-    ...raw,
-    id: typeof raw.id === 'string' ? raw.id : String(raw.sub ?? ''),
+    id: typeof raw.id === 'string' || typeof raw.id === 'number'
+      ? String(raw.id)
+      : typeof raw.sub === 'string' ? raw.sub : '',
+    username: typeof raw.username === 'string' ? raw.username : undefined,
+    email: typeof raw.email === 'string' ? raw.email : undefined,
+    quota: typeof raw.quota === 'number' ? raw.quota : undefined,
+    used_quota: typeof raw.used_quota === 'number' ? raw.used_quota : undefined,
+    app_quota: typeof raw.app_quota === 'number' ? raw.app_quota : undefined,
+    app_used_quota: typeof raw.app_used_quota === 'number' ? raw.app_used_quota : undefined,
+    request_count: typeof raw.request_count === 'number' ? raw.request_count : undefined,
+    group: typeof raw.group === 'string' ? raw.group : undefined,
     display_name:
       typeof raw.display_name === 'string'
         ? raw.display_name
@@ -157,21 +143,45 @@ export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<
   };
 }
 
-/**
- * POST /oauth/topup/checkout — 创建充值订单，返回 checkout_url。
- */
-export async function fetchGatewayTopup(
-  input: { amount: number; channel?: string },
-  opts?: FetchGatewayOptions,
-): Promise<GatewayTopupResult> {
-  const body = JSON.stringify({ amount: input.amount, ...(input.channel ? { channel: input.channel } : {}) });
-  const res = await requestWithAuth('POST', '/oauth/topup/checkout', { body, accessToken: opts?.accessToken });
-  if (!res.ok) throw new GatewayError(res.status, await readErrorText(res));
-  const json = await readJson(res);
-  if (!json || typeof json !== 'object') {
-    throw new GatewayError(502, `${UNSUPPORTED_MESSAGE}（在线充值）`, 'UNSUPPORTED');
+async function checkout(path: string, body: Record<string, unknown>, opts?: FetchGatewayOptions): Promise<GatewayCheckoutResult> {
+  const res = await requestWithAuth('POST', path, { body: JSON.stringify(body), accessToken: opts?.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = gatewayCheckoutResultSchema.safeParse(await readJson(res));
+  if (!parsed.success || (parsed.data.payment_method && parsed.data.payment_method !== body.payment_method) ||
+      (body.payment_method === 'balance' && parsed.data.status !== 'success') ||
+      (body.payment_method === 'waffo_pancake' && parsed.data.status !== 'pending')) {
+    throw new GatewayError(502, 'Invalid gateway checkout response.', 'UPSTREAM_INVALID_RESPONSE');
   }
-  return json as GatewayTopupResult;
+  return { ...parsed.data, payment_method: body.payment_method as GatewayPaymentMethod };
+}
+
+export async function fetchGatewayTopup(
+  input: { amount: number; payment_method: GatewayPaymentMethod }, opts?: FetchGatewayOptions,
+): Promise<GatewayCheckoutResult> {
+  const parsed = gatewayTopupSchema.safeParse(input);
+  if (!parsed.success) throw new GatewayError(400, 'Invalid top-up request.', 'BAD_REQUEST_INVALID_BODY');
+  return checkout('/oauth/topup/checkout', parsed.data, opts);
+}
+
+export async function fetchGatewayCatalog(opts?: FetchGatewayOptions): Promise<{ plans: GatewayPlan[]; products: GatewayProduct[] }> {
+  const [planRes, productRes] = await Promise.all([
+    requestWithAuth('GET', '/oauth/subscription/plans', opts),
+    requestWithAuth('GET', '/oauth/products', opts),
+  ]);
+  if (!planRes.ok) throw await readGatewayError(planRes);
+  if (!productRes.ok) throw await readGatewayError(productRes);
+  const plans = z.object({ plans: z.array(z.object({ plan: gatewayPlanSchema })) }).safeParse(await readJson(planRes));
+  const products = z.object({ products: z.array(gatewayProductSchema) }).safeParse(await readJson(productRes));
+  if (!plans.success || !products.success) throw new GatewayError(502, 'Invalid gateway catalog response.', 'UPSTREAM_INVALID_RESPONSE');
+  return { plans: plans.data.plans.map(value => value.plan), products: products.data.products };
+}
+
+export async function fetchGatewayCheckout(input: GatewayCheckoutInput, opts?: FetchGatewayOptions): Promise<GatewayCheckoutResult> {
+  const parsed = gatewayCheckoutSchema.safeParse(input);
+  if (!parsed.success) throw new GatewayError(400, 'Invalid checkout request.', 'BAD_REQUEST_INVALID_BODY');
+  const path = parsed.data.kind === 'plan' ? '/oauth/subscription/checkout' : '/oauth/products/checkout';
+  const idField = parsed.data.kind === 'plan' ? 'plan_id' : 'product_id';
+  return checkout(path, { [idField]: parsed.data.id, payment_method: parsed.data.payment_method }, opts);
 }
 
 /**
@@ -187,20 +197,29 @@ export async function fetchGatewayLogs(
     query: { page, page_size: pageSize },
     accessToken: opts?.accessToken,
   });
-  if (!res.ok) throw new GatewayError(res.status, await readErrorText(res));
+  if (!res.ok) throw await readGatewayError(res);
   const json = await readJson(res);
 
   // new-api 返回 { total, page, page_size, items }；早期版本可能是裸数组或 { data }。
   const toEntry = (item: unknown): GatewayLogEntry => {
     const raw = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
     const createdAt = raw.created_at;
+    const id = raw.id ?? raw.request_id;
+    const model = raw.model ?? raw.model_name;
     return {
-      ...raw,
-      id: (raw.id ?? raw.request_id) as GatewayLogEntry['id'],
+      id: typeof id === 'number' || typeof id === 'string' ? id : undefined,
+      quota: typeof raw.quota === 'number' ? raw.quota : undefined,
+      prompt_tokens: typeof raw.prompt_tokens === 'number' ? raw.prompt_tokens : undefined,
+      completion_tokens: typeof raw.completion_tokens === 'number' ? raw.completion_tokens : undefined,
+      use_time: typeof raw.use_time === 'number' ? raw.use_time : undefined,
+      is_stream: typeof raw.is_stream === 'boolean' ? raw.is_stream : undefined,
+      request_type: typeof raw.type === 'number' ? String(raw.type) : undefined,
+      group_name: typeof raw.group === 'string' ? raw.group : undefined,
+      request_id: typeof raw.request_id === 'string' ? raw.request_id : undefined,
       // 网关字段名是 model_name，前端统一用 model
-      model: (raw.model ?? raw.model_name) as string | undefined,
+      model: typeof model === 'string' ? model : undefined,
       created_at:
-        typeof createdAt === 'number'
+        typeof createdAt === 'number' && Number.isFinite(createdAt) && Math.abs(createdAt) <= 8_640_000_000_000
           ? new Date(createdAt * 1000).toISOString()
           : typeof createdAt === 'string'
             ? createdAt
@@ -228,24 +247,6 @@ export async function fetchGatewayLogs(
 
 // ===== AI Relay（保留原有函数 + 重构复用 requestWithAuth） =====
 
-async function postJsonWithAuth(
-  path: string,
-  body: string,
-  signal?: AbortSignal,
-): Promise<Response> {
-  // requestWithAuth 不支持 AbortSignal；直接内联实现以保持流式生成
-  const send = (token: string) =>
-    fetch(`${config.gatewayBaseUrl}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body,
-      signal,
-    });
-  const res = await send(await getGatewayAccessToken());
-  if (res.status !== 401) return res;
-  await res.body?.cancel().catch(() => undefined);
-  return send(await refreshGatewayToken());
-}
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -267,15 +268,13 @@ export async function streamChatCompletion(
   const body = JSON.stringify({ model, stream: true, messages });
   let res: Response;
   try {
-    res = await postJsonWithAuth('/v1/chat/completions', body, signal);
+    res = await requestWithAuth('POST', '/v1/chat/completions', { body, signal });
   } catch (e) {
     callbacks.onError?.(normalizeError(e));
     return;
   }
   if (!res.ok || !res.body) {
-    const text = await res.text().catch(() => '');
-    const message = text || (res.status === 401 ? '网关登录已失效，请重新登录' : res.statusText);
-    callbacks.onError?.(new GatewayError(res.status, message));
+    callbacks.onError?.(await readGatewayError(res));
     return;
   }
   const reader = res.body.getReader();
@@ -307,15 +306,10 @@ export async function streamChatCompletion(
 }
 
 export async function chatCompletion(model: string, messages: ChatMessage[]): Promise<string> {
-  const res = await postJsonWithAuth(
-    '/v1/chat/completions',
-    JSON.stringify({ model, stream: false, messages }),
-  );
-  if (!res.ok) {
-    const text = await res.text();
-    const message = text || (res.status === 401 ? '网关登录已失效，请重新登录' : res.statusText);
-    throw new GatewayError(res.status, message);
-  }
+  const res = await requestWithAuth('POST', '/v1/chat/completions', {
+    body: JSON.stringify({ model, stream: false, messages }),
+  });
+  if (!res.ok) throw await readGatewayError(res);
   const json = (await res.json()) as { choices: { message: { content: string } }[] };
   return json.choices[0]?.message?.content ?? '';
 }
@@ -324,62 +318,118 @@ export async function chatCompletion(model: string, messages: ChatMessage[]): Pr
 export interface ImageGenerateInput {
   model: string;
   prompt: string;
-  reference_images?: string[];     // base64 or URL for reference
-  character_image?: string;        // 人物图 base64/URL
-  outfit_image?: string;           // 服装图 base64/URL
-  pose_image?: string;             // 姿势图 base64/URL
-  size?: string;                   // 1024x1024 / 1024x1536 / 1536x1024
+  /** HTTPS signed URLs ordered as character, 1–6 clothing references, pose. */
+  reference_images: string[];
+  size?: string;
   n?: number;
   negative_prompt?: string;
-  /** 服务端 Route Handler 传 Supabase session 里的 provider_token；浏览器端可省略 */
+  /** Optional server-only hint; current encrypted vault is authoritative. */
   accessToken?: string;
 }
 
 export interface GeneratedImage {
-  url: string;
+  url?: string;
   b64_json?: string;
   revised_prompt?: string;
 }
 
+// Keep the complete normalized upload bounded, rather than retaining eight
+// 20 MiB PNGs. At most two downloads/decoders run concurrently below.
+const MAX_REFERENCE_UPLOAD_BYTES = 40 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_PROMPT_LENGTH = 32_000;
+const imageUrlSchema = z.string().max(8192).url().refine(value => {
+  // Refinements also run after a failed URL-format check; never expose a raw
+  // URL constructor exception (which can include a signed reference URL).
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && (!url.port || url.port === '443');
+  } catch {
+    return false;
+  }
+});
+const imageGenerateInputSchema = z.object({
+  model: z.string().trim().min(1).max(200),
+  prompt: z.string().trim().min(1).max(MAX_IMAGE_PROMPT_LENGTH),
+  reference_images: z.array(imageUrlSchema).min(3).max(8),
+  size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).default('auto'),
+  n: z.literal(1).default(1),
+  negative_prompt: z.string().trim().max(4000).optional(),
+  accessToken: z.string().optional(),
+}).strict();
+const imageTokenCountSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const imageUsageSchema = z.object({
+  prompt_tokens: imageTokenCountSchema.optional(),
+  completion_tokens: imageTokenCountSchema.optional(),
+  input_tokens: imageTokenCountSchema.optional(),
+  output_tokens: imageTokenCountSchema.optional(),
+  total_tokens: imageTokenCountSchema.optional(),
+  input_tokens_details: z.object({
+    text_tokens: imageTokenCountSchema.optional(),
+    image_tokens: imageTokenCountSchema.optional(),
+  }).optional(),
+}).refine(value => [value.prompt_tokens, value.completion_tokens, value.input_tokens, value.output_tokens, value.total_tokens]
+  .some(count => count !== undefined));
+const imageGenerateResponseSchema = z.object({
+  data: z.array(z.object({
+    url: imageUrlSchema.optional(),
+    b64_json: z.string().min(4).max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4)
+      // Avoid repeated capture/group quantifiers: V8 can overflow its regex
+      // stack on ordinary multi-megabyte GPT image payloads.
+      .regex(/^[A-Za-z0-9+/]+={0,2}$/).refine(value => value.length % 4 === 0).optional(),
+    revised_prompt: z.string().max(MAX_IMAGE_PROMPT_LENGTH).optional(),
+  }).refine(value => Boolean(value.url || value.b64_json))).min(1),
+  usage: imageUsageSchema.optional(),
+  request_id: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:-]+$/).optional(),
+});
+
 export interface ImageGenerateResult {
   images: GeneratedImage[];
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: z.infer<typeof imageUsageSchema>;
   request_id?: string;
 }
 
 export async function generateImage(input: ImageGenerateInput): Promise<ImageGenerateResult> {
-  const payload: Record<string, unknown> = {
-    model: input.model,
-    prompt: input.prompt,
-    stream: false,
-    n: input.n ?? 1,
-  };
-  if (input.size) payload.size = input.size;
-  if (input.negative_prompt) payload.negative_prompt = input.negative_prompt;
-
-  // reference_images 或 character_image + outfit_image + pose_image 通过 extra_body 传给支持的 provider
-  const extra: Record<string, unknown> = {};
-  if (input.reference_images?.length) extra.reference_images = input.reference_images;
-  if (input.character_image) extra.character_image = input.character_image;
-  if (input.outfit_image) extra.outfit_image = input.outfit_image;
-  if (input.pose_image) extra.pose_image = input.pose_image;
-  if (Object.keys(extra).length) payload.extra_body = extra;
-
-  const res = await requestWithAuth('POST', '/v1/images/generations', {
-    body: JSON.stringify(payload),
-    accessToken: input.accessToken,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    const message = text || (res.status === 401 ? '网关登录已失效，请重新登录' : res.statusText);
-    throw new GatewayError(res.status, message);
+  const parsedInput = imageGenerateInputSchema.safeParse(input);
+  if (!parsedInput.success) throw new GatewayError(400, 'Invalid image edit request.', 'BAD_REQUEST_INVALID_BODY');
+  const values = parsedInput.data;
+  const roles = "Reference image roles (in upload order): Use the first image for the person's identity, face, and appearance. " +
+    'Use all middle images for clothing details. Use the last image only for the body pose, not identity or clothing.';
+  const prompt = `${roles}\n\n${values.prompt}` + (values.negative_prompt
+    ? `\n\nNegative constraints: Do not include any of the following: ${values.negative_prompt}` : '');
+  if (prompt.length > MAX_IMAGE_PROMPT_LENGTH) {
+    throw new GatewayError(400, 'Image edit prompt is too long.', 'BAD_REQUEST_INVALID_BODY');
   }
-  const json = (await res.json()) as unknown as {
-    data: GeneratedImage[];
-    usage?: ImageGenerateResult['usage'];
-    request_id?: string;
-  };
-  return { images: json.data ?? [], usage: json.usage, request_id: json.request_id };
+
+  const form = new FormData();
+  form.set('model', values.model);
+  form.set('prompt', prompt);
+  form.set('size', values.size);
+  form.set('n', String(values.n));
+  let uploadBytes = 0;
+  for (let index = 0; index < values.reference_images.length; index += 2) {
+    // Wait for both decoders even on failure; no orphaned heavy work or next
+    // batch is started after a rejected download. Promise ordering is stable.
+    const batch = await Promise.allSettled(values.reference_images.slice(index, index + 2)
+      .map(url => readGeneratedImage({ url })));
+    for (const [offset, result] of batch.entries()) {
+      if (result.status === 'rejected') {
+        throw new GatewayError(502, 'Reference images could not be prepared.', 'UPSTREAM_REFERENCE_IMAGE_ERROR');
+      }
+      const png = result.value;
+      uploadBytes += png.byteLength;
+      if (!png.byteLength || png.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
+        throw new GatewayError(413, 'Reference images exceed the upload limit.', 'REFERENCE_IMAGES_TOO_LARGE');
+      }
+      form.append('image[]', new Blob([new Uint8Array(png)], { type: 'image/png' }), `reference-${index + offset + 1}.png`);
+    }
+  }
+
+  const res = await requestWithAuth('POST', '/v1/images/edits', { body: form, accessToken: values.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = imageGenerateResponseSchema.safeParse(await readJson(res));
+  if (!parsed.success) throw new GatewayError(502, 'Invalid gateway image response.', 'UPSTREAM_INVALID_RESPONSE');
+  return { images: parsed.data.data, usage: parsed.data.usage, request_id: parsed.data.request_id };
 }
 
 // ===== 4. new-api dashboard /api/user/self（需要 PAT 或 session，OAuth token 不生效） =====

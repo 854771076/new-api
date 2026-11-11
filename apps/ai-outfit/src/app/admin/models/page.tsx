@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Button, Input, Tag, Popconfirm, message, Form, Modal, InputNumber, Switch, Select } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { adminRequest, adminMutation } from '../_components/admin-request';
 
 interface Row {
   id: string;
@@ -35,13 +36,13 @@ export default function AdminModelsPage() {
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<Row | null>(null);
   const [form] = Form.useForm();
 
   const loadRows = useCallback(async () => {
     const url = `/api/admin/ai_models?page=${page}&limit=${pageSize}&keyword=${encodeURIComponent(keyword)}`;
-    const res = await fetch(url);
-    return (await res.json()) as { data: Row[]; total: number };
+    return adminRequest<{ data: Row[]; total: number }>(url);
   }, [page, pageSize, keyword]);
 
   useEffect(() => {
@@ -82,34 +83,22 @@ export default function AdminModelsPage() {
     setModalOpen(true);
   };
   const handleDelete = async (r: Row) => {
-    const res = await fetch(`/api/admin/ai_models?id=${r.id}`, { method: 'DELETE' });
-    if (res.ok) { message.success('已删除'); void reload(); }
+    if (await adminMutation(`/api/admin/ai_models?id=${r.id}`, 'DELETE')) { message.success('已删除'); void reload(); }
   };
   const handleToggleActive = async (r: Row) => {
-    const res = await fetch(`/api/admin/ai_models?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_active: !r.is_active }),
-    });
-    if (res.ok) { message.success(r.is_active ? '已停用' : '已启用'); void reload(); }
+    if (await adminMutation(`/api/admin/ai_models?id=${r.id}`, 'PATCH', { is_active: !r.is_active })) { message.success(r.is_active ? '已停用' : '已启用'); void reload(); }
   };
   const handleSetDefault = async (r: Row) => {
-    const res = await fetch(`/api/admin/ai_models?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_default: true }),
-    });
-    if (res.ok) { message.success('已设为默认'); void reload(); }
+    if (await adminMutation(`/api/admin/ai_models?id=${r.id}`, 'PATCH', { is_default: true })) { message.success('已设为默认'); void reload(); }
   };
   const handleSubmit = async () => {
-    const values = await form.validateFields();
-    if (editing) {
-      const res = await fetch(`/api/admin/ai_models?id=${editing.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已更新'); }
-    } else {
-      const res = await fetch('/api/admin/ai_models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已创建'); }
-    }
+    const values = await form.validateFields().catch(() => null);
+    if (!values || saving) return;
+    setSaving(true);
+    const saved = await adminMutation(editing ? `/api/admin/ai_models?id=${editing.id}` : '/api/admin/ai_models', editing ? 'PATCH' : 'POST', values);
+    setSaving(false);
+    if (!saved) return;
+    message.success(editing ? '已更新' : '已创建');
     setModalOpen(false);
     void reload();
   };
@@ -126,7 +115,7 @@ export default function AdminModelsPage() {
     { title: '创建时间', dataIndex: 'created_at', key: 'created_at', render: (v) => new Date(v).toLocaleString() },
     {
       title: '操作', key: 'op', render: (_, r) => (
-        <Space>
+        r.client_id === '' ? <Tag>共享默认（只读）</Tag> : <Space>
           <Button size="small" onClick={() => handleEdit(r)}>编辑</Button>
           <Button size="small" onClick={() => handleToggleActive(r)}>{r.is_active ? '停用' : '启用'}</Button>
           <Button size="small" disabled={r.is_default} onClick={() => handleSetDefault(r)}>设为默认</Button>
@@ -147,7 +136,10 @@ export default function AdminModelsPage() {
             placeholder="按模型 ID/展示名搜索"
             allowClear
             style={{ width: 260 }}
-            onSearch={(v) => { setLoading(true); setKeyword(v); setPage(1); }}
+            onSearch={(v) => {
+              if (v === keyword && page === 1) { void reload(); return; }
+              setLoading(true); setKeyword(v); setPage(1);
+            }}
           />
           <Button type="primary" onClick={handleNew}>新建模型</Button>
         </Space>
@@ -164,9 +156,11 @@ export default function AdminModelsPage() {
       <Modal
         title={editing ? '编辑模型' : '新建模型'}
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => { if (!saving) setModalOpen(false); }}
         onOk={handleSubmit}
-        destroyOnClose
+        confirmLoading={saving}
+        cancelButtonProps={{ disabled: saving }}
+        destroyOnHidden
       >
         <Form form={form} layout="vertical">
           <Form.Item label="模型 ID" name="model_id" rules={[{ required: true }]}>

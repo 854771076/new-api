@@ -1,27 +1,22 @@
-// GET /api/admin/signed-url?bucket=xxx&path=yyy — 管理员获取素材/结果图的临时签名链接。
 import 'server-only';
 import { NextResponse, type NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/admin/requireAdmin';
-import { createAdminSupabase } from '@/lib/supabase/admin';
+import { createServerSupabase } from '@/lib/supabase/server';
 
 const ALLOWED_BUCKETS = new Set(['media-official', 'media-user']);
-const EXPIRY_S = 3600;
 
 export async function GET(req: NextRequest) {
   const check = await requireAdmin(req);
   if (!check.ok) return check.response;
-
-  const sp = new URL(req.url).searchParams;
-  const bucket = sp.get('bucket');
-  const path = sp.get('path');
-  if (!bucket || !path) return NextResponse.json({ error: 'INVALID' }, { status: 400 });
-  if (!ALLOWED_BUCKETS.has(bucket)) return NextResponse.json({ error: 'INVALID_BUCKET' }, { status: 400 });
-
-  const admin = createAdminSupabase();
-  const { data, error } = await admin.storage.from(bucket).createSignedUrl(path, EXPIRY_S);
-  if (error || !data?.signedUrl) {
-    return NextResponse.json({ error: error?.message ?? 'SIGNED_URL_FAILED' }, { status: 500 });
+  const bucket = req.nextUrl.searchParams.get('bucket');
+  const path = req.nextUrl.searchParams.get('path');
+  if (!bucket || !path || path.length > 1024 || !ALLOWED_BUCKETS.has(bucket)) {
+    return NextResponse.json({ error: 'INVALID' }, { status: 400 });
   }
-
-  return NextResponse.json({ url: data.signedUrl });
+  // Storage RLS resolves exact tenant/owner rows, including legacy object paths.
+  // A service-role signer would bypass those checks for arbitrary supplied paths.
+  const supabase = await createServerSupabase();
+  const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 300);
+  if (error || !data?.signedUrl) return NextResponse.json({ error: 'NOT_FOUND' }, { status: 404 });
+  return NextResponse.json({ url: data.signedUrl }, { headers: { 'Cache-Control': 'no-store' } });
 }

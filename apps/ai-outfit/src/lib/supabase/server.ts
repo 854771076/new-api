@@ -6,6 +6,15 @@ import { config } from '@/lib/config';
 export async function createServerSupabase() {
   const cookieStore = await cookies();
   return createServerClient(config.supabaseUrl, config.supabaseAnonKey, {
+    cookieOptions: { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/' },
+    global: {
+      fetch: (input, init) => fetch(input, {
+        ...init,
+        signal: init?.signal
+          ? AbortSignal.any([init.signal, AbortSignal.timeout(8_000)])
+          : AbortSignal.timeout(8_000),
+      }),
+    },
     cookies: {
       getAll() {
         return cookieStore.getAll();

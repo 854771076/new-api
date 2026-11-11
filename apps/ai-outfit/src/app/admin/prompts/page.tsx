@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Button, Input, Tag, Popconfirm, message, Form, Modal, InputNumber, Switch, Select, Alert } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { adminRequest, adminMutation } from '../_components/admin-request';
 
 interface Row {
   id: string;
@@ -34,13 +35,13 @@ export default function AdminPromptsPage() {
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<Row | null>(null);
   const [form] = Form.useForm();
 
   const loadRows = useCallback(async () => {
     const url = `/api/admin/prompt_templates?page=${page}&limit=${pageSize}&keyword=${encodeURIComponent(keyword)}`;
-    const res = await fetch(url);
-    return (await res.json()) as { data: Row[]; total: number };
+    return adminRequest<{ data: Row[]; total: number }>(url);
   }, [page, pageSize, keyword]);
 
   useEffect(() => {
@@ -81,34 +82,22 @@ export default function AdminPromptsPage() {
     setModalOpen(true);
   };
   const handleDelete = async (r: Row) => {
-    const res = await fetch(`/api/admin/prompt_templates?id=${r.id}`, { method: 'DELETE' });
-    if (res.ok) { message.success('已删除'); void reload(); }
+    if (await adminMutation(`/api/admin/prompt_templates?id=${r.id}`, 'DELETE')) { message.success('已删除'); void reload(); }
   };
   const handleToggleActive = async (r: Row) => {
-    const res = await fetch(`/api/admin/prompt_templates?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_active: !r.is_active }),
-    });
-    if (res.ok) { message.success(r.is_active ? '已停用' : '已启用'); void reload(); }
+    if (await adminMutation(`/api/admin/prompt_templates?id=${r.id}`, 'PATCH', { is_active: !r.is_active })) { message.success(r.is_active ? '已停用' : '已启用'); void reload(); }
   };
   const handleSetDefault = async (r: Row) => {
-    const res = await fetch(`/api/admin/prompt_templates?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_default: true }),
-    });
-    if (res.ok) { message.success('已设为默认'); void reload(); }
+    if (await adminMutation(`/api/admin/prompt_templates?id=${r.id}`, 'PATCH', { is_default: true })) { message.success('已设为默认'); void reload(); }
   };
   const handleSubmit = async () => {
-    const values = await form.validateFields();
-    if (editing) {
-      const res = await fetch(`/api/admin/prompt_templates?id=${editing.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已更新'); }
-    } else {
-      const res = await fetch('/api/admin/prompt_templates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已创建'); }
-    }
+    const values = await form.validateFields().catch(() => null);
+    if (!values || saving) return;
+    setSaving(true);
+    const saved = await adminMutation(editing ? `/api/admin/prompt_templates?id=${editing.id}` : '/api/admin/prompt_templates', editing ? 'PATCH' : 'POST', values);
+    setSaving(false);
+    if (!saved) return;
+    message.success(editing ? '已更新' : '已创建');
     setModalOpen(false);
     void reload();
   };
@@ -126,7 +115,7 @@ export default function AdminPromptsPage() {
     { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', render: (v) => new Date(v).toLocaleString() },
     {
       title: '操作', key: 'op', render: (_, r) => (
-        <Space>
+        r.client_id === '' ? <Tag>共享默认（只读）</Tag> : <Space>
           <Button size="small" onClick={() => handleEdit(r)}>编辑</Button>
           <Button size="small" onClick={() => handleToggleActive(r)}>{r.is_active ? '停用' : '启用'}</Button>
           <Button size="small" disabled={r.is_default} onClick={() => handleSetDefault(r)}>设为默认</Button>
@@ -147,7 +136,10 @@ export default function AdminPromptsPage() {
             placeholder="按名称搜索"
             allowClear
             style={{ width: 260 }}
-            onSearch={(v) => { setLoading(true); setKeyword(v); setPage(1); }}
+            onSearch={(v) => {
+              if (v === keyword && page === 1) { void reload(); return; }
+              setLoading(true); setKeyword(v); setPage(1);
+            }}
           />
           <Button type="primary" onClick={handleNew}>新建模板</Button>
         </Space>
@@ -164,16 +156,18 @@ export default function AdminPromptsPage() {
       <Modal
         title={editing ? '编辑模板' : '新建模板'}
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => { if (!saving) setModalOpen(false); }}
         onOk={handleSubmit}
-        destroyOnClose
+        confirmLoading={saving}
+        cancelButtonProps={{ disabled: saving }}
+        destroyOnHidden
         width={760}
       >
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="可用占位符"
+          title="可用占位符"
           description={
             <div className="flex flex-wrap items-center gap-2">
               <span>点击按钮把占位符追加到模板末尾：</span>

@@ -14,7 +14,7 @@ export default async function LoginPage({
   const { error } = await searchParams;
 
   return (
-    <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center">
+    <div className="flex min-h-screen items-center justify-center p-4">
       <div className="w-full max-w-md">
         <LoginCard errorCode={error} />
       </div>

@@ -191,6 +191,7 @@ create policy plans_admin_all on public.price_plans for all
 
 drop policy if exists app_admins_admin_read on public.app_admins;
 drop policy if exists app_admins_admin_write on public.app_admins;
+drop policy if exists app_admins_owner_write on public.app_admins;
 create policy app_admins_admin_read on public.app_admins for select
   using (public.is_app_admin());
 create policy app_admins_owner_write on public.app_admins for all

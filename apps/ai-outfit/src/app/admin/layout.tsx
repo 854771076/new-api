@@ -13,8 +13,8 @@ export const dynamic = 'force-dynamic';
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   const check = await requireAdmin();
   if (!check.ok) {
-    // 403 或 重定向到登录；这里直接 redirect
-    redirect('/login');
+    if (check.response.status === 401) redirect('/login');
+    return <div role="alert">无权访问管理后台</div>;
   }
 
   return (

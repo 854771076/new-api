@@ -1,9 +1,8 @@
 // GET /api/media/[bucket]/[...path] — 返回 storage signed URL（≤1h）。
-// 服务端用 service_role 调用；必须有 Supabase session 且目标 bucket 已存在。
+// Storage RLS applies to every signed URL.
 import 'server-only';
 import { NextResponse, type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
-import { createAdminSupabase } from '@/lib/supabase/admin';
 
 const ALLOWED_BUCKETS = new Set(['media-official', 'media-user']);
 const EXPIRY_S = 3600;
@@ -19,16 +18,19 @@ export async function GET(
   const { bucket, path } = await ctx.params;
   if (!ALLOWED_BUCKETS.has(bucket)) return NextResponse.json({ error: 'INVALID_BUCKET' }, { status: 400 });
   const objectPath = path.join('/');
-  if (!objectPath) return NextResponse.json({ error: 'MISSING_PATH' }, { status: 400 });
+  if (!objectPath || path.some(part => !part || part === '.' || part === '..' || part.includes('\\'))) {
+    return NextResponse.json({ error: 'INVALID_PATH' }, { status: 400 });
+  }
 
-  const admin = createAdminSupabase();
-  const { data, error } = await admin.storage
+  const { data, error } = await supabase.storage
     .from(bucket)
     .createSignedUrl(objectPath, EXPIRY_S);
 
   if (error || !data?.signedUrl) {
-    return NextResponse.json({ error: error?.message ?? 'SIGNED_URL_FAILED' }, { status: 500 });
+    return NextResponse.json({ error: 'MEDIA_NOT_FOUND' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
   }
 
-  return NextResponse.redirect(data.signedUrl, 302);
+  const response = NextResponse.redirect(data.signedUrl, 302);
+  response.headers.set('Cache-Control', 'private, no-store');
+  return response;
 }

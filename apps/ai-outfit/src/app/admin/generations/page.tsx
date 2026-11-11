@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { adminRequest } from '../_components/admin-request';
 import { Alert, Button, Descriptions, Drawer, Image as AntImage, Spin, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
@@ -53,13 +54,14 @@ export default function AdminGenerationsPage() {
   const [imageError, setImageError] = useState<string | null>(null);
   const [references, setReferences] = useState<GenerationReferences | null>(null);
   const [referencesLoading, setReferencesLoading] = useState(false);
+  const [referencesError, setReferencesError] = useState<string | null>(null);
+  const detailRequest = useRef<AbortController | null>(null);
 
-  const loadRows = useCallback(async () => {
-    const res = await fetch(`/api/admin/outfit_generations?page=${page}&limit=${pageSize}`);
-    const json = (await res.json()) as { data?: GenerationRow[]; total?: number; error?: string };
-    if (!res.ok) throw new Error(json.error ?? `请求失败 (${res.status})`);
-    return json;
-  }, [page, pageSize]);
+  useEffect(() => () => { detailRequest.current?.abort(); }, []);
+
+  const loadRows = useCallback(() => adminRequest<{ data: GenerationRow[]; total: number }>(
+    `/api/admin/outfit_generations?page=${page}&limit=${pageSize}`,
+  ), [page, pageSize]);
 
   useEffect(() => {
     let active = true;
@@ -74,34 +76,42 @@ export default function AdminGenerationsPage() {
     return () => { active = false; };
   }, [loadRows]);
 
+  const closeDetail = () => {
+    detailRequest.current?.abort();
+    setDetail(null);
+  };
+
   const openDetail = async (row: GenerationRow) => {
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
+    const { signal } = controller;
     setDetail(row);
     setImageUrl(null);
     setImageError(null);
+    setImageLoading(Boolean(row.result_bucket && row.result_path));
     setReferences(null);
+    setReferencesError(null);
     setReferencesLoading(true);
-    fetch(`/api/admin/generation-references?id=${row.id}`)
-      .then(async (res) => {
-        const json = (await res.json()) as { data?: GenerationReferences; error?: string };
-        if (!res.ok || !json.data) throw new Error(json.error ?? '获取参考图失败');
-        setReferences(json.data);
+    void adminRequest<{ data: GenerationReferences }>(`/api/admin/generation-references?id=${row.id}`, { signal })
+      .then((json) => {
+        if (!json.data) throw new Error('Missing references');
+        if (!signal.aborted) setReferences(json.data);
       })
-      .catch(() => setReferences(null))
-      .finally(() => setReferencesLoading(false));
+      .catch(() => { if (!signal.aborted) setReferencesError('参考图加载失败，请重试'); })
+      .finally(() => { if (!signal.aborted) setReferencesLoading(false); });
 
     if (!row.result_bucket || !row.result_path) return;
 
-    setImageLoading(true);
     try {
       const query = new URLSearchParams({ bucket: row.result_bucket, path: row.result_path });
-      const res = await fetch(`/api/admin/signed-url?${query.toString()}`);
-      const json = (await res.json()) as { url?: string; error?: string };
-      if (!res.ok || !json.url) throw new Error(json.error ?? '获取结果图失败');
-      setImageUrl(json.url);
-    } catch (e) {
-      setImageError(e instanceof Error ? e.message : '获取结果图失败');
+      const json = await adminRequest<{ url: string }>(`/api/admin/signed-url?${query.toString()}`, { signal });
+      if (!json.url) throw new Error('Missing result');
+      if (!signal.aborted) setImageUrl(json.url);
+    } catch {
+      if (!signal.aborted) setImageError('结果图加载失败，请重试');
     } finally {
-      setImageLoading(false);
+      if (!signal.aborted) setImageLoading(false);
     }
   };
 
@@ -166,7 +176,7 @@ export default function AdminGenerationsPage() {
       <Drawer
         title="生成记录详情"
         open={detail !== null}
-        onClose={() => setDetail(null)}
+        onClose={closeDetail}
         size={560}
         destroyOnHidden
       >
@@ -195,6 +205,8 @@ export default function AdminGenerationsPage() {
               <Typography.Text strong>参考图</Typography.Text>
               <div className="mt-1 flex flex-col gap-2">
                 {referencesLoading && <Spin size="small" />}
+                {referencesError && <Alert type="warning" showIcon title={referencesError}
+                  action={<Button size="small" onClick={() => { void openDetail(detail); }}>重试</Button>} />}
                 {references && (
                   <div className="flex flex-wrap gap-3">
                     {references.character?.url && (
@@ -235,7 +247,7 @@ export default function AdminGenerationsPage() {
             </div>
 
             {detail.status === 'failed' && (
-              <Alert type="error" showIcon message="生成失败" description={detail.error ?? '无错误信息'} />
+              <Alert type="error" showIcon title="生成失败" description={detail.error ?? '无错误信息'} />
             )}
 
             {detail.result_bucket && detail.result_path && (
@@ -243,7 +255,8 @@ export default function AdminGenerationsPage() {
                 <Typography.Text strong>生成结果</Typography.Text>
                 <div className="mt-1">
                   {imageLoading && <Spin />}
-                  {imageError && <Alert type="warning" showIcon message={imageError} />}
+                  {imageError && <Alert type="warning" showIcon title={imageError}
+                    action={<Button size="small" onClick={() => { void openDetail(detail); }}>重试</Button>} />}
                   {imageUrl && <AntImage src={imageUrl} alt="生成结果" style={{ maxWidth: '100%' }} />}
                 </div>
               </div>

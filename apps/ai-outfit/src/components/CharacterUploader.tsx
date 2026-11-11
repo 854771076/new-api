@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Upload, X } from 'lucide-react';
 
 type Props = {
@@ -10,7 +10,7 @@ type Props = {
   onClose?: () => void;
 };
 
-const MAX_SIZE = 8 * 1024 * 1024;
+const MAX_SIZE = 4 * 1024 * 1024;
 const ACCEPTED = ['image/jpeg', 'image/png', 'image/webp'];
 
 export function CharacterUploader({ onUploaded, onClose }: Props) {
@@ -24,18 +24,23 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
   const [progress, setProgress] = useState(0);
   const [err, setErr] = useState<string | null>(null);
 
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
   function validateAndSet(f: File) {
+    if (uploading) return false;
     setErr(null);
+    setFile(null);
+    setPreview(null);
     if (!ACCEPTED.includes(f.type)) {
       setErr(`不支持的格式：${f.type}（仅接受 jpeg/png/webp）`);
       return false;
     }
     if (f.size > MAX_SIZE) {
-      setErr(`文件太大：${(f.size / 1024 / 1024).toFixed(1)}MB（上限 8MB）`);
+      setErr(`文件太大：${(f.size / 1024 / 1024).toFixed(1)} MiB（上限 4 MiB）`);
       return false;
     }
     setFile(f);
-    setName((prev) => prev || f.name.replace(/\.[^.]+$/, ''));
+    setName((prev) => prev || f.name.replace(/\.[^.]+$/, '').trim().slice(0, 100) || '未命名');
     const url = URL.createObjectURL(f);
     setPreview(url);
     return true;
@@ -48,14 +53,24 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
 
   async function handleUpload() {
     if (!file || uploading) return;
+    const uploadName = name.trim();
+    const uploadDescription = description.trim();
+    if (file.size > MAX_SIZE || !ACCEPTED.includes(file.type)) {
+      setErr('仅接受不超过 4 MiB 的 JPG / PNG / WebP 图片');
+      return;
+    }
+    if (!uploadName || uploadName.length > 100 || uploadDescription.length > 1000) {
+      setErr('名称须为 1 至 100 个字符，描述不超过 1000 个字符');
+      return;
+    }
     setUploading(true);
     setProgress(5);
     setErr(null);
 
     const form = new FormData();
     form.append('file', file);
-    if (name.trim()) form.append('name', name.trim());
-    if (description.trim()) form.append('description', description.trim());
+    form.append('name', uploadName);
+    if (uploadDescription) form.append('description', uploadDescription);
 
     try {
       // 用 XMLHttpRequest 以获取 progress（fetch 不支持 upload progress）
@@ -112,6 +127,8 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
           type="file"
           accept="image/jpeg,image/png,image/webp"
           className="hidden"
+          disabled={uploading}
+          aria-label="人物图片"
           onChange={(e) => handleFileList(e.target.files)}
         />
         {preview ? (
@@ -124,7 +141,8 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
               <button
                 type="button"
                 className="btn btn-ghost btn-xs btn-circle"
-                onClick={() => { setFile(null); setPreview(null); }}
+                disabled={uploading}
+                onClick={() => { setFile(null); setPreview(null); if (inputRef.current) inputRef.current.value = ''; }}
                 aria-label="移除"
               >
                 <X size={14} />
@@ -134,12 +152,12 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
         ) : (
           <button
             type="button"
-            className="flex w-full flex-col items-center gap-2"
+            className="btn btn-ghost h-auto w-full flex-col gap-2 py-4"
             onClick={() => inputRef.current?.click()}
           >
             <Upload size={32} className="text-base-content/40" />
             <p className="text-sm font-medium">拖拽图片到这里，或点击选择</p>
-            <p className="text-xs text-base-content/50">支持 JPG / PNG / WebP，≤ 8MB</p>
+            <p className="text-xs text-base-content/50">支持 JPG / PNG / WebP，≤ 4 MiB</p>
           </button>
         )}
       </div>
@@ -150,24 +168,32 @@ export function CharacterUploader({ onUploaded, onClose }: Props) {
         <div className="space-y-2">
           <fieldset className="fieldset w-full">
             <legend className="fieldset-legend">名称</legend>
+            <label htmlFor="character-upload-name">人物名称</label>
             <input
+              id="character-upload-name"
+              disabled={uploading}
+              required
+              minLength={1}
               type="text"
               className="input input-sm w-full"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="人物名称（默认用文件名）"
-              maxLength={64}
+              maxLength={100}
             />
           </fieldset>
           <fieldset className="fieldset w-full">
             <legend className="fieldset-legend">描述（可选）</legend>
+            <label htmlFor="character-upload-description">人物描述（可选）</label>
             <textarea
+              id="character-upload-description"
+              disabled={uploading}
               className="textarea textarea-sm w-full"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="简单描述一下这个人物"
               rows={2}
-              maxLength={500}
+              maxLength={1000}
             />
           </fieldset>
 

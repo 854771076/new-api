@@ -1,5 +1,4 @@
 import { redirect } from 'next/navigation';
-import Link from 'next/link';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { StudioClient } from './_components/StudioClient';
 import { getSignedUrls } from '@/lib/media-urls';
@@ -8,10 +7,6 @@ import { config } from '@/lib/config';
 export const dynamic = 'force-dynamic';
 
 const LIMIT = 24;
-
-const FALLBACK_MODELS = [
-  { id: 'fallback', model_id: 'gpt-image-1', display_name: 'GPT Image 1', provider: 'openai', is_default: true },
-];
 
 export default async function StudioPage({
   searchParams,
@@ -41,6 +36,7 @@ export default async function StudioPage({
   const { data: characters } = await supabase
     .from('characters')
     .select('id, name, image_path, cover_path, bucket')
+    .eq('client_id', config.gatewayClientId)
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
     .limit(LIMIT);
@@ -49,32 +45,34 @@ export default async function StudioPage({
   let outfitQuery = supabase
     .from('outfits')
     .select('id, name_zh, name_en, description_zh, description_en, category, bucket, thumb_path')
+    .eq('client_id', config.gatewayClientId)
     .eq('is_active', true);
   if (outfitCat) outfitQuery = outfitQuery.eq('category', outfitCat);
   if (outfitQ) {
     // ilike 组合 name_zh + name_en + description_zh + description_en
-    const pattern = `%${outfitQ}%`;
+    const pattern = `%${outfitQ}%`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     outfitQuery = outfitQuery.or(
-      `name_zh.ilike.${pattern},name_en.ilike.${pattern},description_zh.ilike.${pattern},description_en.ilike.${pattern}`,
+      `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
-  const { data: outfits } = await outfitQuery.order('sort_order', { ascending: true }).limit(LIMIT);
+  const { data: outfits } = await outfitQuery.order('sort_order', { ascending: true }).order('id', { ascending: true }).limit(LIMIT);
 
   // 3. 姿势
   let poseQuery = supabase
     .from('poses')
     .select('id, name_zh, system, category, angle, bucket, thumb_path')
+    .eq('client_id', config.gatewayClientId)
     .eq('is_active', true);
   if (poseSys) poseQuery = poseQuery.eq('system', poseSys);
   if (poseCat) poseQuery = poseQuery.eq('category', poseCat);
   if (poseAngle) poseQuery = poseQuery.eq('angle', poseAngle);
   if (poseQ) {
-    const pattern = `%${poseQ}%`;
+    const pattern = `%${poseQ}%`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     poseQuery = poseQuery.or(
-      `name_zh.ilike.${pattern},name_en.ilike.${pattern},description_zh.ilike.${pattern},description_en.ilike.${pattern}`,
+      `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
-  const { data: poses } = await poseQuery.order('sort_order', { ascending: true }).limit(LIMIT);
+  const { data: poses } = await poseQuery.order('sort_order', { ascending: true }).order('id', { ascending: true }).limit(LIMIT);
 
   // 4. 批量 signed URL（人物优先用封面图，减少列表流量）
   const charPaths = (characters ?? []).map((c) => c.cover_path?.trim() || c.image_path);
@@ -89,9 +87,9 @@ export default async function StudioPage({
 
   // 5. category/system/angle 列表（供筛选 chips）
   const [catRows, sysRows, angleRows] = await Promise.all([
-    supabase.from('outfits').select('category').eq('is_active', true).not('category', 'is', null),
-    supabase.from('poses').select('system').eq('is_active', true).not('system', 'is', null),
-    supabase.from('poses').select('angle').eq('is_active', true).not('angle', 'is', null),
+    supabase.from('outfits').select('category').eq('client_id', config.gatewayClientId).eq('is_active', true).not('category', 'is', null),
+    supabase.from('poses').select('system').eq('client_id', config.gatewayClientId).eq('is_active', true).not('system', 'is', null),
+    supabase.from('poses').select('angle').eq('client_id', config.gatewayClientId).eq('is_active', true).not('angle', 'is', null),
   ]);
   const outfitCats = Array.from(new Set((catRows.data ?? []).map((r) => r.category).filter(Boolean))) as string[];
   const poseSystems = Array.from(new Set((sysRows.data ?? []).map((r) => r.system).filter(Boolean))) as string[];
@@ -103,19 +101,24 @@ export default async function StudioPage({
     .from('ai_models')
     .select('id, model_id, display_name, provider, is_default')
     .eq('is_active', true)
+    .eq('usage', 'outfit')
     .in('client_id', [currentClientId, ''])
-    .order('sort_order', { ascending: true });
-  const models = !modelError && (modelRows ?? []).length > 0
-    ? (modelRows ?? []).map((m) => ({
+    .order('sort_order', { ascending: true }).order('id', { ascending: true });
+  const models = modelError ? [] : (modelRows ?? []).map((m) => ({
         id: m.id as string,
         model_id: m.model_id as string,
         display_name: m.display_name as string,
         provider: m.provider as string | null,
         is_default: Boolean(m.is_default),
-      }))
-    : FALLBACK_MODELS;
+      }));
 
   return (
+    <>
+      {models.length === 0 ? (
+        <div role="alert" className="alert alert-warning alert-soft mb-4">
+          <span>{modelError ? '生成模型暂时不可用，请刷新重试；当前无法生成。' : '当前没有启用的生成模型，请联系管理员；当前无法生成。'}</span>
+        </div>
+      ) : null}
     <StudioClient
       characters={(characters ?? []).map((c) => ({
         id: c.id,
@@ -142,8 +145,6 @@ export default async function StudioPage({
       initialPoseAngle={poseAngle ?? ''}
       models={models}
     />
+    </>
   );
 }
-
-// 避免 ESLint 抱怨未使用的 Link
-void Link;

@@ -13,6 +13,7 @@ interface RecentFailure {
 }
 
 type CountResult = { count: number | null; error: { message: string } | null };
+const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 
 export async function GET(req: NextRequest) {
   const check = await requireAdmin(req);
@@ -23,16 +24,17 @@ export async function GET(req: NextRequest) {
   const todayStart = `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`;
 
   const [total, today, succeeded, failed, outfits, poses, characters, failures] = await Promise.all([
-    admin.from('outfit_generations').select('*', { count: 'exact', head: true }),
-    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).gte('created_at', todayStart),
-    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('status', 'succeeded'),
-    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('status', 'failed'),
-    admin.from('outfits').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    admin.from('poses').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    admin.from('characters').select('*', { count: 'exact', head: true }),
+    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId),
+    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId).gte('created_at', todayStart),
+    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId).eq('status', 'succeeded'),
+    admin.from('outfit_generations').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId).eq('status', 'failed'),
+    admin.from('outfits').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId).eq('is_active', true),
+    admin.from('poses').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId).eq('is_active', true),
+    admin.from('characters').select('*', { count: 'exact', head: true }).eq('client_id', check.clientId),
     admin
       .from('outfit_generations')
       .select('id, model, prompt, error, created_at')
+      .eq('client_id', check.clientId)
       .eq('status', 'failed')
       .order('created_at', { ascending: false })
       .limit(5),
@@ -44,12 +46,12 @@ export async function GET(req: NextRequest) {
   };
   const countResults = [total, today, succeeded, failed, outfits, poses, characters] as unknown as CountResult[];
   const queryError = countResults.find((result) => result.error)?.error ?? failureResult.error;
-  if (queryError) return NextResponse.json({ error: queryError.message }, { status: 500 });
+  if (queryError) return json({ error: 'LOAD_FAILED' }, 500);
 
   const totalCount = total.count ?? 0;
   const succeededCount = succeeded.count ?? 0;
 
-  return NextResponse.json({
+  return json({
     data: {
       generations_total: totalCount,
       generations_today: today.count ?? 0,

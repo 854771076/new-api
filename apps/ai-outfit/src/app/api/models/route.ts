@@ -15,17 +15,6 @@ interface AiModelRow {
   is_default: boolean;
 }
 
-// 迁移未执行导致表为空时的内置兜底。
-const FALLBACK_MODELS = [
-  {
-    model_id: 'gpt-image-1',
-    display_name: 'GPT Image 1',
-    provider: 'openai',
-    usage: 'outfit',
-    is_default: true,
-  },
-];
-
 export async function GET() {
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
@@ -36,13 +25,14 @@ export async function GET() {
     .from('ai_models')
     .select('id, model_id, display_name, provider, usage, default_size, default_quality, is_default')
     .eq('is_active', true)
+    .eq('usage', 'outfit')
     .in('client_id', [currentClientId, ''])
-    .order('sort_order', { ascending: true });
+    .order('sort_order', { ascending: true }).order('id', { ascending: true });
 
-  const rows = (data ?? []) as AiModelRow[];
-  if (error || rows.length === 0) {
-    return NextResponse.json({ success: true, data: FALLBACK_MODELS });
+  if (error) {
+    return NextResponse.json({ success: false, error: { message: '生成模型暂时不可用，请稍后重试', code: 'MODELS_UNAVAILABLE' } }, { status: 503 });
   }
+  const rows = (data ?? []) as AiModelRow[];
 
   return NextResponse.json({
     success: true,

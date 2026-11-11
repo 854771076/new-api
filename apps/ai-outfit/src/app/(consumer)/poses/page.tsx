@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { MediaCard } from '@/components/MediaCard';
 import { getSignedUrls } from '@/lib/media-urls';
+import { config } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,8 @@ export default async function PosesPage({
   if (!user) redirect('/login');
 
   const sp = await searchParams;
-  const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1);
+  const requestedPage = Number(sp.page ?? '1');
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 && requestedPage <= Number.MAX_SAFE_INTEGER / PAGE_SIZE ? requestedPage : 1;
   const from = (page - 1) * PAGE_SIZE;
   const q = sp.q?.trim();
   const activeSystem = sp.system?.trim();
@@ -26,8 +28,8 @@ export default async function PosesPage({
 
   // 1. system + angle distinct
   const [{ data: systems }, { data: angles }] = await Promise.all([
-    supabase.from('poses').select('system').eq('is_active', true).not('system', 'is', null).order('system'),
-    supabase.from('poses').select('angle').eq('is_active', true).not('angle', 'is', null).order('angle'),
+    supabase.from('poses').select('system').eq('client_id', config.gatewayClientId).eq('is_active', true).not('system', 'is', null).order('system'),
+    supabase.from('poses').select('angle').eq('client_id', config.gatewayClientId).eq('is_active', true).not('angle', 'is', null).order('angle'),
   ]);
   const allSystems = Array.from(new Set((systems ?? []).map((p) => p.system).filter(Boolean))) as string[];
   const allAngles = Array.from(new Set((angles ?? []).map((p) => p.angle).filter(Boolean))) as string[];
@@ -36,18 +38,18 @@ export default async function PosesPage({
   let query = supabase
     .from('poses')
     .select('id, name_zh, system, category, angle, bucket, thumb_path', { count: 'exact' })
-    .eq('is_active', true);
+    .eq('client_id', config.gatewayClientId).eq('is_active', true);
   if (activeSystem) query = query.eq('system', activeSystem);
   if (activeAngle) query = query.eq('angle', activeAngle);
   if (q) {
-    const pattern = `%${q}%`;
+    const pattern = `%${q}%`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     query = query.or(
-      `name_zh.ilike.${pattern},name_en.ilike.${pattern},description_zh.ilike.${pattern},description_en.ilike.${pattern}`,
+      `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
 
   const { data: poses, count: total, error } = await query
-    .order('system').order('category').order('sort_order')
+    .order('system').order('category').order('sort_order').order('id')
     .range(from, from + PAGE_SIZE - 1);
 
   if (error) {
@@ -72,6 +74,9 @@ export default async function PosesPage({
     const s = params.toString();
     return s ? `/poses?${s}` : '/poses';
   };
+
+  if (page > totalPages) redirect(buildHref({ page: String(totalPages) }));
+  const firstPage = Math.min(Math.max(1, page - 3), Math.max(1, totalPages - 6));
 
   // 4. Empty state
   if (!poses || poses.length === 0) {
@@ -151,18 +156,21 @@ export default async function PosesPage({
 
       {/* 分页 */}
       {totalPages > 1 ? (
-        <div className="flex flex-wrap justify-center gap-1">
-          {Array.from({ length: Math.min(7, totalPages) }, (_, i) => i + 1).map((p) => (
+        <nav aria-label="姿势分页" className="flex flex-wrap justify-center gap-1">
+          {page > 1 ? <Link href={buildHref({ page: String(page - 1) })} className="btn btn-sm btn-outline">上一页</Link> : <button className="btn btn-sm btn-outline" disabled>上一页</button>}
+          {Array.from({ length: Math.min(7, totalPages) }, (_, i) => firstPage + i).map((p) => (
             <Link
               key={p}
               href={buildHref({ page: String(p) })}
+              aria-current={p === page ? 'page' : undefined}
               className={`btn btn-sm ${p === page ? 'btn-primary' : 'btn-outline'}`}
             >
               {p}
             </Link>
           ))}
-          <span className="btn btn-sm btn-ghost">共 {total} 个</span>
-        </div>
+          {page < totalPages ? <Link href={buildHref({ page: String(page + 1) })} className="btn btn-sm btn-outline">下一页</Link> : <button className="btn btn-sm btn-outline" disabled>下一页</button>}
+          <span className="self-center px-2 text-sm">第 {page} / {totalPages} 页 · 共 {total} 个</span>
+        </nav>
       ) : null}
     </div>
   );

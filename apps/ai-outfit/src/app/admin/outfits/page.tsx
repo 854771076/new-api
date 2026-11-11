@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Button, Input, Tag, Popconfirm, message, Form, Modal, InputNumber, Switch } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { adminRequest, adminMutation } from '../_components/admin-request';
 
 interface Row {
   id: string;
@@ -21,6 +22,7 @@ export default function AdminOutfitsPage() {
   const [pageSize, setPageSize] = useState(20);
   const [keyword, setKeyword] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<Row | null>(null);
   const [form] = Form.useForm();
 
@@ -28,8 +30,7 @@ export default function AdminOutfitsPage() {
     setLoading(true);
     try {
       const url = `/api/admin/outfits?page=${page}&limit=${pageSize}&keyword=${encodeURIComponent(keyword)}`;
-      const res = await fetch(url);
-      const json = (await res.json()) as { data: Row[]; total: number };
+      const json = await adminRequest<{ data: Row[]; total: number }>(url);
       setRows(json.data ?? []);
       setTotal(json.total ?? 0);
     } catch {
@@ -57,31 +58,25 @@ export default function AdminOutfitsPage() {
     setModalOpen(true);
   };
   const handleDelete = async (r: Row) => {
-    const res = await fetch(`/api/admin/outfits?id=${r.id}`, { method: 'DELETE' });
-    if (res.ok) { message.success('已删除'); fetchData(); }
+    if (await adminMutation(`/api/admin/outfits?id=${r.id}`, 'DELETE')) { message.success('已删除'); void fetchData(); }
   };
   const handleToggleActive = async (r: Row) => {
-    const res = await fetch(`/api/admin/outfits?id=${r.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ is_active: !r.is_active }),
-    });
-    if (res.ok) {
+    if (await adminMutation(`/api/admin/outfits?id=${r.id}`, 'PATCH', { is_active: !r.is_active })) {
       message.success(r.is_active ? '已下架' : '已上架');
-      fetchData();
+      void fetchData();
     }
   };
   const handleSubmit = async () => {
-    const values = await form.validateFields();
-    if (editing) {
-      const res = await fetch(`/api/admin/outfits?id=${editing.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已更新'); }
-    } else {
-      const res = await fetch('/api/admin/outfits', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) });
-      if (res.ok) { message.success('已创建'); }
-    }
+    const values = await form.validateFields().catch(() => null);
+    if (!values || saving) return;
+    const fields = editing ? { name_zh: values.name_zh, category: values.category, description_zh: values.description_zh, sort_order: values.sort_order, is_active: values.is_active } : values;
+    setSaving(true);
+    const saved = await adminMutation(editing ? `/api/admin/outfits?id=${editing.id}` : '/api/admin/outfits', editing ? 'PATCH' : 'POST', fields);
+    setSaving(false);
+    if (!saved) return;
+    message.success(editing ? '已更新' : '已创建');
     setModalOpen(false);
-    fetchData();
+    void fetchData();
   };
 
   const columns: ColumnsType<Row> = [
@@ -129,16 +124,18 @@ export default function AdminOutfitsPage() {
       <Modal
         title={editing ? '编辑服装' : '新建服装'}
         open={modalOpen}
-        onCancel={() => setModalOpen(false)}
+        onCancel={() => { if (!saving) setModalOpen(false); }}
         onOk={handleSubmit}
-        destroyOnClose
+        confirmLoading={saving}
+        cancelButtonProps={{ disabled: saving }}
+        destroyOnHidden
       >
         <Form form={form} layout="vertical">
           <Form.Item label="名称 (中文)" name="name_zh" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
           <Form.Item label="供应商素材 ID" name="provider_id" rules={[{ required: true }]}>
-            <Input placeholder="同租户内唯一，如 SWM-0042" />
+            <Input disabled={editing !== null} placeholder="同租户内唯一，如 SWM-0042" />
           </Form.Item>
           <Form.Item label="分类" name="category" rules={[{ required: true }]}>
             <Input />
@@ -147,13 +144,13 @@ export default function AdminOutfitsPage() {
             <Input.TextArea rows={2} />
           </Form.Item>
           <Form.Item label="存储桶" name="bucket" rules={[{ required: true }]}>
-            <Input placeholder="media-official" />
+            <Input disabled={editing !== null} placeholder="media-official" />
           </Form.Item>
           <Form.Item label="缩略图路径" name="thumb_path" rules={[{ required: true }]}>
-            <Input placeholder="nac_xxx/outfits/SWM-0042.webp" />
+            <Input disabled={editing !== null} placeholder="nac_xxx/outfits/SWM-0042.webp" />
           </Form.Item>
           <Form.Item label="预览图路径" name="preview_path" rules={[{ required: true }]}>
-            <Input placeholder="与缩略图同目录的高清图" />
+            <Input disabled={editing !== null} placeholder="与缩略图同目录的高清图" />
           </Form.Item>
           <Form.Item label="排序" name="sort_order">
             <InputNumber min={0} />

@@ -1,7 +1,7 @@
 // lib/media-urls.ts — SSR 端批量生成 Supabase Storage signed URL。
-// 使用 service_role admin client，仅 trusted server 代码使用。
+// Signed URLs must enforce the caller's Storage RLS, including legacy object ownership.
 import 'server-only';
-import { createAdminSupabase } from '@/lib/supabase/admin';
+import { createServerSupabase } from '@/lib/supabase/server';
 
 /**
  * 批量生成 signed URL。
@@ -17,11 +17,11 @@ export async function getSignedUrls(
   const valid = paths.filter((p): p is string => Boolean(p && p.trim()));
   if (valid.length === 0) return {};
 
-  const supabase = createAdminSupabase();
+  const supabase = await createServerSupabase();
   const { data, error } = await supabase.storage.from(bucket).createSignedUrls(valid, expiresIn);
 
   if (error || !data) {
-    console.warn('[media-urls] createSignedUrls failed:', error?.message ?? 'no data');
+    console.warn('[media-urls] createSignedUrls failed');
     return {};
   }
 

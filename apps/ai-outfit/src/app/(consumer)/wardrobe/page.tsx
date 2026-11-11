@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { MediaCard } from '@/components/MediaCard';
 import { getSignedUrls } from '@/lib/media-urls';
+import { config } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +19,8 @@ export default async function WardrobePage({
   if (!user) redirect('/login');
 
   const sp = await searchParams;
-  const page = Math.max(1, parseInt(sp.page ?? '1', 10) || 1);
+  const requestedPage = Number(sp.page ?? '1');
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 && requestedPage <= Number.MAX_SAFE_INTEGER / PAGE_SIZE ? requestedPage : 1;
   const from = (page - 1) * PAGE_SIZE;
   const q = sp.q?.trim();
   const activeCategory = sp.category?.trim();
@@ -27,6 +29,7 @@ export default async function WardrobePage({
   const { data: catRows } = await supabase
     .from('outfits')
     .select('category')
+    .eq('client_id', config.gatewayClientId)
     .eq('is_active', true)
     .not('category', 'is', null);
   const categories = Array.from(new Set((catRows ?? []).map((r) => r.category).filter(Boolean))) as string[];
@@ -35,17 +38,18 @@ export default async function WardrobePage({
   let query = supabase
     .from('outfits')
     .select('id, name_zh, name_en, description_zh, description_en, category, bucket, thumb_path, sort_order', { count: 'exact' })
+    .eq('client_id', config.gatewayClientId)
     .eq('is_active', true);
   if (activeCategory) query = query.eq('category', activeCategory);
   if (q) {
-    const pattern = `%${q}%`;
+    const pattern = `%${q}%`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
     query = query.or(
-      `name_zh.ilike.${pattern},name_en.ilike.${pattern},description_zh.ilike.${pattern},description_en.ilike.${pattern}`,
+      `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
 
   const { data: rows, count: total, error: err } = await query
-    .order('sort_order', { ascending: true })
+    .order('sort_order', { ascending: true }).order('id', { ascending: true })
     .range(from, from + PAGE_SIZE - 1);
 
   if (err) {
@@ -71,6 +75,9 @@ export default async function WardrobePage({
     const s = params.toString();
     return s ? `/wardrobe?${s}` : '/wardrobe';
   };
+
+  if (page > totalPages) redirect(buildHref({ page: String(totalPages) }));
+  const firstPage = Math.min(Math.max(1, page - 3), Math.max(1, totalPages - 6));
 
   // 4. Empty state
   if (!rows || rows.length === 0) {
@@ -164,18 +171,21 @@ export default async function WardrobePage({
 
       {/* 分页 */}
       {totalPages > 1 ? (
-        <div className="flex flex-wrap justify-center gap-1">
-          {Array.from({ length: Math.min(7, totalPages) }, (_, i) => i + 1).map((p) => (
+        <nav aria-label="服装分页" className="flex flex-wrap justify-center gap-1">
+          {page > 1 ? <Link href={buildHref({ page: String(page - 1) })} className="btn btn-sm btn-outline">上一页</Link> : <button className="btn btn-sm btn-outline" disabled>上一页</button>}
+          {Array.from({ length: Math.min(7, totalPages) }, (_, i) => firstPage + i).map((p) => (
             <Link
               key={p}
               href={buildHref({ page: String(p) })}
+              aria-current={p === page ? 'page' : undefined}
               className={`btn btn-sm ${p === page ? 'btn-primary' : 'btn-outline'}`}
             >
               {p}
             </Link>
           ))}
-          <span className="btn btn-sm btn-ghost">共 {total} 套</span>
-        </div>
+          {page < totalPages ? <Link href={buildHref({ page: String(page + 1) })} className="btn btn-sm btn-outline">下一页</Link> : <button className="btn btn-sm btn-outline" disabled>下一页</button>}
+          <span className="self-center px-2 text-sm">第 {page} / {totalPages} 页 · 共 {total} 套</span>
+        </nav>
       ) : null}
     </div>
   );

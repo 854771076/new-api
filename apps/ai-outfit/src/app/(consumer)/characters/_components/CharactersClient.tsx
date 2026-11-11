@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, Trash2, Pencil, ImageOff } from 'lucide-react';
 import { CharacterUploader } from '@/components/CharacterUploader';
@@ -29,13 +29,34 @@ function formatDate(iso: string): string {
 
 export function CharactersClient({ initialItems }: Props) {
   const router = useRouter();
+  const [serverItems, setServerItems] = useState(initialItems);
   const [items, setItems] = useState<CharacterItem[]>(initialItems);
+  // Refresh merges new server props without resetting local state. Keep the list current,
+  // but leave the independent edit draft intact.
+  if (initialItems !== serverItems) {
+    setServerItems(initialItems);
+    setItems(initialItems);
+  }
   const [uploadOpen, setUploadOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const uploadDialog = useRef<HTMLDialogElement>(null);
+  const editDialog = useRef<HTMLDialogElement>(null);
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    for (const [dialog, open] of [
+      [uploadDialog.current, uploadOpen],
+      [editDialog.current, editingId !== null],
+      [deleteDialog.current, deletingId !== null],
+    ] as const) {
+      if (open && !dialog?.open) dialog?.showModal();
+      if (!open && dialog?.open) dialog.close();
+    }
+  }, [uploadOpen, editingId, deletingId]);
 
   const refresh = useCallback(() => {
     router.refresh();
@@ -63,6 +84,10 @@ export function CharactersClient({ initialItems }: Props) {
 
   async function handleSaveEdit() {
     if (!editingId) return;
+    if (!editName.trim() || editName.trim().length > 100 || editDesc.trim().length > 1000) {
+      setErr('名称须为 1 至 100 个字符，描述不超过 1000 个字符');
+      return;
+    }
     setErr(null);
     try {
       const res = await fetch(`/api/characters?id=${encodeURIComponent(editingId)}`, {
@@ -152,42 +177,45 @@ export function CharactersClient({ initialItems }: Props) {
       )}
 
       {/* 上传 Modal */}
-      {uploadOpen ? (
-        <div className="modal modal-open" role="dialog" aria-modal="true" aria-label="上传人物">
-          <div className="modal-box max-w-lg">
-            <h3 className="mb-3 text-lg font-bold">上传新人物</h3>
+      <dialog ref={uploadDialog} className="modal" aria-label="上传人物" onClose={() => setUploadOpen(false)}>
+        <div className="modal-box max-w-lg">
+          <h3 className="mb-3 text-lg font-bold">上传新人物</h3>
+          {uploadOpen ? (
             <CharacterUploader
               onClose={() => setUploadOpen(false)}
               onUploaded={() => { setUploadOpen(false); refresh(); }}
             />
-          </div>
+          ) : null}
         </div>
-      ) : null}
+      </dialog>
 
       {/* 编辑 Modal */}
-      {editingId ? (
-        <div className="modal modal-open" role="dialog" aria-modal="true" aria-label="编辑人物">
+      <dialog ref={editDialog} className="modal" aria-label="编辑人物" onClose={() => setEditingId(null)}>
           <div className="modal-box max-w-sm">
             <h3 className="mb-3 text-lg font-bold">编辑人物</h3>
             <div className="space-y-3">
               <fieldset className="fieldset w-full">
                 <legend className="fieldset-legend">名称</legend>
+                <label htmlFor="character-edit-name">人物名称</label>
                 <input
+                  id="character-edit-name"
                   type="text"
                   className="input input-sm w-full"
                   value={editName}
                   onChange={(e) => setEditName(e.target.value)}
-                  maxLength={64}
+                  maxLength={100}
                 />
               </fieldset>
               <fieldset className="fieldset w-full">
                 <legend className="fieldset-legend">描述</legend>
+                <label htmlFor="character-edit-description">人物描述</label>
                 <textarea
+                  id="character-edit-description"
                   className="textarea textarea-sm w-full"
                   rows={3}
                   value={editDesc}
                   onChange={(e) => setEditDesc(e.target.value)}
-                  maxLength={500}
+                  maxLength={1000}
                 />
               </fieldset>
               {err ? <div role="alert" className="alert alert-error alert-soft text-sm">{err}</div> : null}
@@ -197,12 +225,10 @@ export function CharactersClient({ initialItems }: Props) {
               <button type="button" className="btn btn-sm btn-primary" onClick={handleSaveEdit}>保存</button>
             </div>
           </div>
-        </div>
-      ) : null}
+      </dialog>
 
       {/* 删除确认 Modal */}
-      {deletingId ? (
-        <div className="modal modal-open" role="dialog" aria-modal="true" aria-label="确认删除">
+      <dialog ref={deleteDialog} className="modal" aria-label="确认删除" onClose={() => setDeletingId(null)}>
           <div className="modal-box max-w-sm">
             <h3 className="mb-2 text-lg font-bold">确认删除？</h3>
             <p className="text-sm text-base-content/70">删除后无法恢复，Storage 图片也会一并清除。</p>
@@ -211,14 +237,13 @@ export function CharactersClient({ initialItems }: Props) {
               <button
                 type="button"
                 className="btn btn-sm btn-error"
-                onClick={() => handleDelete(deletingId)}
+                onClick={() => { if (deletingId) void handleDelete(deletingId); }}
               >
                 删除
               </button>
             </div>
           </div>
-        </div>
-      ) : null}
+      </dialog>
     </div>
   );
 }
