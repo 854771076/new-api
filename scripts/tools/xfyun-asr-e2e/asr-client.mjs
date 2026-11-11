@@ -2,25 +2,35 @@
 /**
  * 讯飞 IFASR 离线转写的端侧（客户端）联调脚本。
  *
- * 它只从客户端视角调用网关的 /v1/audio/transcriptions，覆盖三种音频来源
+ * 同步模式只从客户端视角调用网关的 /v1/audio/transcriptions，覆盖三种音频来源
  * （multipart 文件 / Base64 扩展字段 / HTTP(S) URL 扩展字段）与三种响应格式，
  * 用来验证「配置好渠道后，客户端确实能拿到转写结果」。
+ *
+ * 异步模式调用网关的任务端点：POST /v1/audio/transcriptions/tasks 提交后拿任务号，
+ * 再轮询 GET /v1/audio/transcriptions/tasks/:task_id 直到终态，用来验证
+ * 「转写被托管成 new-api 的异步任务，客户端可以自己取回结果」。
  *
  * 用法（凭据只从环境变量或参数读，不落盘）:
  *   node asr-client.mjs --base http://localhost:3000 --token "$ASR_TOKEN" \
  *     --audio ./sample.wav --source multipart --format verbose_json
  *
+ *   node asr-client.mjs --mode async --base http://localhost:3000 \
+ *     --token "$ASR_TOKEN" --audio ./sample.wav
+ *
  * 参数:
  *   --base    网关地址，默认 http://localhost:3000
  *   --token   用户令牌（也可用环境变量 ASR_TOKEN）
  *   --model   模型名，默认 ifasr-llm-v1
- *   --audio   本地音频文件路径（multipart 与 base64 来源必填）
+ *   --audio   本地音频文件路径（multipart 与 base64 来源必填；异步模式必填）
  *   --url     HTTP(S) 音频地址（--source url 时必填）
- *   --source  multipart（默认）| base64 | url
- *   --format  json（默认）| verbose_json | text
+ *   --source  multipart（默认）| base64 | url（异步模式只接受 multipart）
+ *   --format  json（默认）| verbose_json | text（异步模式只接受 json 语义）
+ *   --mode    sync（默认）| async
  *   --expect  期望响应文本包含的子串；命中即判定通过
+ *   --poll-interval  异步模式轮询间隔（毫秒），默认 3000
+ *   --timeout  异步模式等待终态的超时（秒），默认 300
  *
- * 退出码: 0 通过 / 1 失败 / 2 参数或环境错误
+ * 退出码: 0 通过 / 1 失败 / 2 跳过（缺凭据或参数不合法）
  */
 
 import fs from 'node:fs'
@@ -30,6 +40,9 @@ const DEFAULT_BASE = 'http://localhost:3000'
 const DEFAULT_MODEL = 'ifasr-llm-v1'
 const DEFAULT_SOURCE = 'multipart'
 const DEFAULT_FORMAT = 'json'
+const DEFAULT_MODE = 'sync'
+const DEFAULT_POLL_INTERVAL_MS = 3000
+const DEFAULT_TIMEOUT_SECONDS = 300
 
 const MIME_BY_EXT = {
   '.wav': 'audio/wav',
@@ -154,6 +167,99 @@ function summarizeJSON(body) {
   return summary
 }
 
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+// 异步模式：提交任务 → 轮询到终态 → 打印转写结果。
+// 任务链路只接受 multipart 上传，因此这里不提供 Base64 / URL 来源。
+async function runAsync({ base, token, model, audio, expect, pollIntervalMs, timeoutMs }) {
+  const endpoint = `${base}/v1/audio/transcriptions/tasks`
+  const built = buildMultipartBody(audio, { model })
+
+  console.log(`→ POST ${endpoint}`)
+  console.log(`  模式 async / 模型 ${model} / 音频 ${audio.fileName} (${audio.data.length} 字节)`)
+
+  const startedAt = Date.now()
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': built.contentType,
+      },
+      body: built.body,
+    })
+  } catch (error) {
+    fail(`请求失败: ${error.message}`)
+  }
+  const body = await response.text()
+  console.log(`← ${response.status} (${Date.now() - startedAt}ms)`)
+  if (!response.ok) {
+    fail(`网关返回非 2xx: ${body.slice(0, 600)}`)
+  }
+
+  let submitted
+  try {
+    submitted = JSON.parse(body)
+  } catch {
+    fail(`提交响应不是合法 JSON: ${body.slice(0, 300)}`)
+  }
+  const taskId = submitted.id || submitted.task_id
+  if (!taskId) {
+    fail(`提交响应缺少任务号: ${body.slice(0, 300)}`)
+  }
+  console.log(`  任务号 ${taskId} / 初始状态 ${submitted.status || '(未知)'}`)
+
+  const pollEndpoint = `${base}/v1/audio/transcriptions/tasks/${encodeURIComponent(taskId)}`
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await sleep(pollIntervalMs)
+    let poll
+    try {
+      poll = await fetch(pollEndpoint, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+    } catch (error) {
+      fail(`查询任务失败: ${error.message}`)
+    }
+    const pollBody = await poll.text()
+    if (!poll.ok) {
+      fail(`查询任务返回非 2xx: ${pollBody.slice(0, 600)}`)
+    }
+    let parsed
+    try {
+      parsed = JSON.parse(pollBody)
+    } catch {
+      fail(`任务响应不是合法 JSON: ${pollBody.slice(0, 300)}`)
+    }
+    const status = String(parsed.status || '')
+    console.log(`  状态 ${status}（${Math.round((Date.now() - startedAt) / 1000)}s）`)
+    if (status === 'failed' || status === 'cancelled') {
+      const reason =
+        (parsed.error && (parsed.error.message || parsed.error.code)) || '(未给出原因)'
+      fail(`任务失败: ${reason}`)
+    }
+    if (status === 'succeeded') {
+      const text = typeof parsed.text === 'string' ? parsed.text : ''
+      const segments = Array.isArray(parsed.segments) ? parsed.segments.length : 0
+      console.log(`  duration ${parsed.duration}s / segments ${segments} 段 / text ${text.length} 字`)
+      console.log(`  首 40 字: ${text.slice(0, 40)}`)
+      console.log(`  总耗时 ${Math.round((Date.now() - startedAt) / 1000)}s`)
+      if (text === '') {
+        fail('任务成功但文本为空')
+      }
+      if (expect && !text.includes(expect)) {
+        fail(`响应文本未包含期望子串: ${expect}`)
+      }
+      console.log('✓ 通过')
+      return
+    }
+  }
+  fail(`等待任务终态超时（${Math.round(timeoutMs / 1000)}s），任务号 ${taskId}`)
+}
+
 async function main() {
   let args
   try {
@@ -168,9 +274,15 @@ async function main() {
   const model = args.model || DEFAULT_MODEL
   const source = args.source || DEFAULT_SOURCE
   const format = args.format || DEFAULT_FORMAT
+  const mode = args.mode || DEFAULT_MODE
 
   if (!token) {
-    console.error('✗ 缺少令牌：用 --token 或环境变量 ASR_TOKEN 提供')
+    // 没有凭据就不跑：这是「跳过」，不是「失败」，退出码与断言失败区分开。
+    console.log('- 跳过：未提供令牌（--token 或环境变量 ASR_TOKEN）')
+    process.exit(2)
+  }
+  if (!['sync', 'async'].includes(mode)) {
+    console.error(`✗ 不支持的 --mode: ${mode}`)
     process.exit(2)
   }
   if (!['multipart', 'base64', 'url'].includes(source)) {
@@ -181,6 +293,37 @@ async function main() {
     console.error(`✗ 不支持的 --format: ${format}`)
     process.exit(2)
   }
+
+  if (mode === 'async') {
+    let audio
+    try {
+      audio = readAudio(args.audio)
+    } catch (error) {
+      console.error(`✗ ${error.message}`)
+      process.exit(2)
+    }
+    const pollIntervalMs = Number(args['poll-interval'] || DEFAULT_POLL_INTERVAL_MS)
+    const timeoutMs = Number(args.timeout || DEFAULT_TIMEOUT_SECONDS) * 1000
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      console.error('✗ --poll-interval 必须是正数（毫秒）')
+      process.exit(2)
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      console.error('✗ --timeout 必须是正数（秒）')
+      process.exit(2)
+    }
+    await runAsync({
+      base,
+      token,
+      model,
+      audio,
+      expect: args.expect,
+      pollIntervalMs,
+      timeoutMs,
+    })
+    return
+  }
+
 
   const fields = { model, response_format: format }
   let audio = null
