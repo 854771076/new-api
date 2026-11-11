@@ -96,6 +96,11 @@ type NewAPIError struct {
 	errorCode      ErrorCode
 	StatusCode     int
 	Metadata       json.RawMessage
+	// adminReason is the operator-facing explanation of a failure. It never
+	// reaches the client response; the error log and the admin console show
+	// it so an operator can tell a transport failure from a local rejection
+	// without reading the raw upstream body.
+	adminReason string
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.
@@ -118,6 +123,15 @@ func (e *NewAPIError) GetErrorType() ErrorType {
 		return ""
 	}
 	return e.errorType
+}
+
+// AdminReason returns the operator-facing explanation of the failure, or ""
+// when the error carries none.
+func (e *NewAPIError) AdminReason() string {
+	if e == nil {
+		return ""
+	}
+	return e.adminReason
 }
 
 func (e *NewAPIError) Error() string {
@@ -407,6 +421,15 @@ func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
 			fmt.Printf("ErrOptionWithHideErrMsg: %s, origin error: %s", replaceStr, e.Err)
 		}
 		e.Err = errors.New(replaceStr)
+	}
+}
+
+// ErrOptionWithAdminReason attaches the operator-facing explanation of the
+// failure. The reason is admin-only: it is written to the error log and shown
+// in the admin console, and never returned to the client.
+func ErrOptionWithAdminReason(reason string) NewAPIErrorOptions {
+	return func(e *NewAPIError) {
+		e.adminReason = reason
 	}
 }
 

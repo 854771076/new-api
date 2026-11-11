@@ -3,7 +3,6 @@ package service
 import (
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"path/filepath"
 	"strings"

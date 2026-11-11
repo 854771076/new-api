@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -483,6 +484,14 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 // maxUploadFileBytes bounds one uploaded file, for both inlined JSON
 // placeholders and a raw file request body, by MAX_FILE_DOWNLOAD_MB.
 func maxUploadFileBytes() int64 {
+	limitMB := constant.MaxFileDownloadMB
+	if limitMB <= 0 {
+		limitMB = 64
+	}
+	return int64(limitMB) << 20
+}
+
+func maxInlineFileBytes() int64 {
 	limitMB := constant.MaxFileDownloadMB
 	if limitMB <= 0 {
 		limitMB = 64

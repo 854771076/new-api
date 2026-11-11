@@ -359,7 +359,7 @@ func MapASRError(err error) ASRErrorStatus {
 //
 // 客户端可见的错误码始终是调用方传入的标准错误码，不引入讯飞专有的客户端错误码；
 // 上游的业务错误码、描述、失败类型、阶段与错误分类进入错误信息与管理员可见的说明。
-func NewASRAPIError(err error, fallbackCode types.ErrorCode) *types.NewAPIError {
+func NewASRAPIError(err error, fallbackCode types.ErrorCode, upstreamURLs ...string) *types.NewAPIError {
 	if err == nil {
 		return nil
 	}
@@ -368,7 +368,7 @@ func NewASRAPIError(err error, fallbackCode types.ErrorCode) *types.NewAPIError 
 	if skipRetry {
 		options = append(options, types.ErrOptionWithSkipRetry())
 	}
-	options = append(options, types.ErrOptionWithAdminReason(asrAdminReason(err)))
+	options = append(options, types.ErrOptionWithAdminReason(asrAdminReason(err, upstreamURLs...)))
 	return types.NewError(err, fallbackCode, options...)
 }
 
@@ -391,7 +391,7 @@ func asrErrorBehavior(err error) (int, bool) {
 // asrAdminReason 汇总管理员可见的失败说明：分类、阶段、上游错误码与描述。
 //
 // 说明只进入日志的管理员段，不发给客户端；内容经仓库既有的脱敏机制处理。
-func asrAdminReason(err error) string {
+func asrAdminReason(err error, upstreamURLs ...string) string {
 	parts := []string{"分类：" + asrCategoryDescription(classifyASRError(err))}
 	var upstream *ASRUpstreamError
 	if errors.As(err, &upstream) {
@@ -406,7 +406,7 @@ func asrAdminReason(err error) string {
 			parts = append(parts, "上游描述："+upstream.Description)
 		}
 	}
-	return common.MaskSensitiveInfo(strings.Join(parts, "，"))
+	return common.MaskSensitiveInfo(strings.Join(parts, "，"), upstreamURLs...)
 }
 
 // asrStageName 返回失败阶段的中文名称。

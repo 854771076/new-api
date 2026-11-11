@@ -335,7 +335,7 @@ func TestASRAdminReasonMasksSensitiveInfo(t *testing.T) {
 			Description:  "上传失败：https://example.com/audio.wav",
 			Stage:        asrStageUpload,
 		},
-	}, types.ErrorCodeDoRequestFailed)
+	}, types.ErrorCodeDoRequestFailed, "https://example.com")
 	require.NotNil(t, apiErr)
 
 	adminReason := apiErr.AdminReason()

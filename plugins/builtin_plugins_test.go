@@ -16,7 +16,7 @@ var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "
 
 // responsesPluginKeys 是声明 openai_responses 协议的内置插件名单。名单是这份
 // 契约的来源：名单内的插件丢掉该声明会直接失败，名单外的插件走别的协议。
-var responsesPluginKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu"}
+var responsesPluginKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
 
 // claimsHostProtocol reports whether the plugin declares the given host protocol.
 func claimsHostProtocol(plugin *jsplugin.LoadedPlugin, name string) bool {

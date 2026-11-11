@@ -202,7 +202,7 @@ func (a *Adaptor) doASRResponse(c *gin.Context, info *relaycommon.RelayInfo) (an
 		PollInterval: asrAdaptorPollInterval,
 	})
 	if err != nil {
-		return nil, NewASRAPIError(err, types.ErrorCodeDoRequestFailed)
+		return nil, NewASRAPIError(err, types.ErrorCodeDoRequestFailed, baseURL)
 	}
 
 	// 上游未回报原始时长时回落到本地解析出的音频时长，保证响应里的时长与计费时长一致。

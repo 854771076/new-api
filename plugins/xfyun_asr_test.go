@@ -393,9 +393,7 @@ func TestXfyunASRPluginManifest(t *testing.T) {
 	assert.Equal(t, map[string]any{"duration": int64(60)}, plugin.Meta.UsageExamples[0].Facts)
 
 	for _, hook := range []string{"buildSubmitRequest", "parseSubmitResponse", "buildQueryRequest", "parseTaskResult", "extractUsage", "extractUsageOnComplete"} {
-		callable, err := plugin.Engine.HasExport(t.Context(), hook)
-		require.NoError(t, err)
-		assert.True(t, callable, hook)
+		assert.True(t, plugin.Engine.HasExport(hook), hook)
 	}
 	for _, hook := range []string{"decodeRequest", "render"} {
 		callable, err := plugin.Engine.HasCallablePath(t.Context(), "protocols", pluginruntime.ProtocolOpenAIAudio, hook)
