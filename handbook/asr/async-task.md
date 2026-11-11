@@ -66,7 +66,7 @@
 #### curl
 
 ```bash
-curl -X POST http://10.255.87.24:30000/v1/audio/transcriptions/tasks \
+curl -X POST http://gateway.example.internal:30000/v1/audio/transcriptions/tasks \
   -H "Authorization: Bearer sk-YOUR-API-KEY" \
   -F "model=xfyun-ifasr-llm-v1" \
   -F "file=@meeting.wav"
@@ -77,7 +77,7 @@ curl -X POST http://10.255.87.24:30000/v1/audio/transcriptions/tasks \
 ```python
 import requests
 
-BASE_URL = "http://10.255.87.24:30000"
+BASE_URL = "http://gateway.example.internal:30000"
 API_KEY = "sk-YOUR-API-KEY"
 
 with open("meeting.wav", "rb") as audio:
@@ -103,7 +103,7 @@ RequestBody body = new MultipartBody.Builder()
         .build();
 
 Request request = new Request.Builder()
-        .url("http://10.255.87.24:30000/v1/audio/transcriptions/tasks")
+        .url("http://gateway.example.internal:30000/v1/audio/transcriptions/tasks")
         .header("Authorization", "Bearer " + API_KEY)
         .post(body)
         .build();
@@ -147,7 +147,7 @@ try (Response response = client.newCall(request).execute()) {
 ### 4.1 请求
 
 ```bash
-curl http://10.255.87.24:30000/v1/audio/transcriptions/tasks/task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ \
+curl http://gateway.example.internal:30000/v1/audio/transcriptions/tasks/task_MIJdP5U3BCZ3GVLd8MVvRERRnPnOGrbQ \
   -H "Authorization: Bearer sk-YOUR-API-KEY"
 ```
 
@@ -236,7 +236,7 @@ curl http://10.255.87.24:30000/v1/audio/transcriptions/tasks/task_MIJdP5U3BCZ3GV
 import time
 import requests
 
-BASE_URL = "http://10.255.87.24:30000"
+BASE_URL = "http://gateway.example.internal:30000"
 API_KEY = "sk-YOUR-API-KEY"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 POLL_INTERVAL = 3      # 轮询间隔（秒）
@@ -284,14 +284,14 @@ if __name__ == "__main__":
 ### 5.2 curl
 
 ```bash
-TASK_ID=$(curl -s -X POST http://10.255.87.24:30000/v1/audio/transcriptions/tasks \
+TASK_ID=$(curl -s -X POST http://gateway.example.internal:30000/v1/audio/transcriptions/tasks \
   -H "Authorization: Bearer sk-YOUR-API-KEY" \
   -F "model=xfyun-ifasr-llm-v1" \
   -F "file=@meeting.wav" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
 
 echo "任务号 $TASK_ID"
 while true; do
-  BODY=$(curl -s http://10.255.87.24:30000/v1/audio/transcriptions/tasks/$TASK_ID \
+  BODY=$(curl -s http://gateway.example.internal:30000/v1/audio/transcriptions/tasks/$TASK_ID \
     -H "Authorization: Bearer sk-YOUR-API-KEY")
   echo "$BODY" | head -c 200; echo
   case "$BODY" in

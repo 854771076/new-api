@@ -49,7 +49,7 @@ ASR 提供两个入口，**模型与端点是绑定的**：
 | 内容 | 说明 |
 |------|------|
 | 请求协议 | HTTP |
-| 请求地址 | `http://10.255.87.24:30000/v1/chat/completions` |
+| 请求地址 | `http://gateway.example.internal:30000/v1/chat/completions` |
 | 认证方式 | `Authorization: Bearer <api-key>` |
 | 字符编码 | UTF-8 |
 | 响应格式 | JSON |
@@ -114,7 +114,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="sk-YOUR-API-KEY",
-    base_url="http://10.255.87.24:30000/v1"
+    base_url="http://gateway.example.internal:30000/v1"
 )
 
 audio_path = "audio.wav"
@@ -170,7 +170,7 @@ import java.util.Base64;
 public class AsrExample {
     public static void main(String[] args) throws Exception {
         String apiKey = "sk-YOUR-API-KEY";
-        String endpoint = "http://10.255.87.24:30000/v1/chat/completions";
+        String endpoint = "http://gateway.example.internal:30000/v1/chat/completions";
         String audioFilePath = "audio.wav";
 
         ObjectMapper mapper = new ObjectMapper();
@@ -262,7 +262,7 @@ public class AsrExample {
 
 ```bash
 # 短音频转写（请将 audio.wav 替换为实际文件路径）
-curl -X POST http://10.255.87.24:30000/v1/chat/completions \
+curl -X POST http://gateway.example.internal:30000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-YOUR-API-KEY" \
   -d '{
@@ -317,7 +317,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="sk-YOUR-API-KEY",
-    base_url="http://10.255.87.24:30000/v1"
+    base_url="http://gateway.example.internal:30000/v1"
 )
 
 MAX_CHUNK_SEC = 3600   # 最大分块时长（秒）
@@ -460,7 +460,7 @@ public class AsrLongAudioExample {
 
     public AsrLongAudioExample() {
         this.apiKey = "sk-YOUR-API-KEY";
-        this.endpoint = "http://10.255.87.24:30000/v1/chat/completions";
+        this.endpoint = "http://gateway.example.internal:30000/v1/chat/completions";
         this.mapper = new ObjectMapper();
         this.mapper.configure(
             com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);

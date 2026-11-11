@@ -3,7 +3,7 @@
 > **报告对象**：部门技术评审 / 业务接入方
 > **报告日期**：2026-10-27
 > **交付内容**：new-api 平台内新增「讯飞 ASR 离线转写」任务插件，以**异步任务**方式对外提供，客户端提交音频后轮询取回转写结果
-> **测试环境**：`http://10.255.87.24:30000`（test-190 集群，双节点主备 + PostgreSQL + Redis）
+> **测试环境**：`http://gateway.example.internal:30000`（test-190 集群，双节点主备 + PostgreSQL + Redis）
 > **代码分支**：`newapi924-1015`（已合入并推送 gitlab）
 
 ---
@@ -58,7 +58,7 @@
 
 | 项 | 值 |
 |----|-----|
-| 网关地址 | `http://10.255.87.24:30000` |
+| 网关地址 | `http://gateway.example.internal:30000` |
 | 部署形态 | new-api 双节点主备（`new-api-1-190-2` / `new-api-2-190-2`） |
 | 数据库 | PostgreSQL（`new-api-2` 库） |
 | 缓存 | Redis（独立实例，与老栈键空间隔离） |
@@ -201,12 +201,12 @@
 
 ```bash
 # 1) 提交一条音频，取得任务号
-curl -X POST http://10.255.87.24:30000/v1/audio/transcriptions/tasks \
+curl -X POST http://gateway.example.internal:30000/v1/audio/transcriptions/tasks \
   -H "Authorization: Bearer <API_KEY>" \
   -F "model=<渠道模型名>" -F "file=@meeting.wav"
 
 # 2) 轮询任务状态
-curl http://10.255.87.24:30000/v1/audio/transcriptions/tasks/<task_id> \
+curl http://gateway.example.internal:30000/v1/audio/transcriptions/tasks/<task_id> \
   -H "Authorization: Bearer <API_KEY>"
 
 # 3) 核对计费：任务日志中 billing_mode=tiered_expr、usage_facts.duration 等于音频秒数
