@@ -866,6 +866,106 @@ func (a *TaskAdaptor) hookFetcher(baseURL, proxy string) pluginruntime.Fetcher {
 	}
 }
 
+// hookUploader sends a driver hook's utils.uploadFile requests, resolving the
+// request_file reference to the client's uploaded bytes and building the
+// multipart body, through the channel's proxy like poll requests.
+func (a *TaskAdaptor) hookUploader(c *gin.Context, baseURL, proxy string) pluginruntime.Uploader {
+	return func(ctx context.Context, request pluginruntime.UploadRequest) (pluginruntime.UploadResponse, error) {
+		if err := pluginruntime.ValidateRequestURL(request.URL, baseURL, a.plugin.Meta.AllowedHosts); err != nil {
+			return pluginruntime.UploadResponse{}, err
+		}
+		field, index, validRef := pluginruntime.ParseFileReference(request.FileRef)
+		if !validRef {
+			return pluginruntime.UploadResponse{}, fmt.Errorf("unknown file reference %q", request.FileRef)
+		}
+		form, parseErr := common.ParseMultipartFormReusable(c)
+		if parseErr != nil {
+			return pluginruntime.UploadResponse{}, parseErr
+		}
+		defer form.RemoveAll()
+		files := form.File[field]
+		if index >= len(files) {
+			return pluginruntime.UploadResponse{}, fmt.Errorf("unknown file reference %q", request.FileRef)
+		}
+		file, openErr := files[index].Open()
+		if openErr != nil {
+			return pluginruntime.UploadResponse{}, openErr
+		}
+		defer file.Close()
+		filename := request.Filename
+		if filename == "" {
+			filename = files[index].Filename
+		}
+		mimeType := request.MimeType
+		if mimeType == "" {
+			mimeType = files[index].Header.Get("Content-Type")
+		}
+		fieldName := request.FieldName
+		if fieldName == "" {
+			fieldName = "file"
+		}
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		header := make(textproto.MIMEHeader)
+		disposition := mime.FormatMediaType("form-data", map[string]string{"name": fieldName, "filename": filename})
+		if disposition == "" {
+			return pluginruntime.UploadResponse{}, fmt.Errorf("invalid multipart name or filename")
+		}
+		header.Set("Content-Disposition", disposition)
+		if mimeType != "" {
+			header.Set("Content-Type", mimeType)
+		}
+		destination, createErr := writer.CreatePart(header)
+		if createErr != nil {
+			return pluginruntime.UploadResponse{}, createErr
+		}
+		if _, copyErr := io.Copy(destination, file); copyErr != nil {
+			return pluginruntime.UploadResponse{}, copyErr
+		}
+		if closeErr := writer.Close(); closeErr != nil {
+			return pluginruntime.UploadResponse{}, closeErr
+		}
+
+		client, err := service.GetHttpClientWithProxySettings(proxy, a.channelSetting())
+		if err != nil {
+			return pluginruntime.UploadResponse{}, err
+		}
+		// A redirect reaches the plugin as it is; fetching its location is a
+		// new request, checked and counted again.
+		noRedirects := *client
+		noRedirects.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, request.URL, bytes.NewReader(body.Bytes()))
+		if err != nil {
+			return pluginruntime.UploadResponse{}, err
+		}
+		for name, value := range request.Headers {
+			req.Header.Set(name, value)
+		}
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		started := time.Now()
+		resp, err := noRedirects.Do(req)
+		if err != nil {
+			logger.LogDebug(ctx, "task_plugin subsystem=upload event=failed plugin=%q hook=%q host=%q reason=transport_error elapsed_ms=%d",
+				a.plugin.Meta.Key, request.Hook, req.URL.Host, time.Since(started).Milliseconds())
+			return pluginruntime.UploadResponse{}, err
+		}
+		defer resp.Body.Close()
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, pluginruntime.MaxFetchBodyBytes+1))
+		if err != nil {
+			return pluginruntime.UploadResponse{}, err
+		}
+		headers := make(map[string]string, len(resp.Header))
+		for name, values := range resp.Header {
+			if len(values) > 0 {
+				headers[name] = values[0]
+			}
+		}
+		logger.LogDebug(ctx, "task_plugin subsystem=upload event=done plugin=%q hook=%q host=%q status=%d bytes=%d elapsed_ms=%d",
+			a.plugin.Meta.Key, request.Hook, req.URL.Host, resp.StatusCode, len(respBody), time.Since(started).Milliseconds())
+		return pluginruntime.UploadResponse{Status: resp.StatusCode, Headers: headers, Body: respBody}, nil
+	}
+}
+
 func (a *TaskAdaptor) doFetchDescriptor(baseURL, key, proxy string, descriptor requestDescriptor) (*http.Response, error) {
 	if err := pluginruntime.ValidateRequestURL(descriptor.URL, baseURL, a.plugin.Meta.AllowedHosts); err != nil {
 		return nil, err
@@ -1635,6 +1735,7 @@ func (a *TaskAdaptor) buildSubmit(c *gin.Context, info *relaycommon.RelayInfo) (
 	fetchContext := c.Request.Context()
 	if info.HasChannelMeta() {
 		fetchContext = pluginruntime.WithFetcher(fetchContext, a.hookFetcher(info.ChannelBaseUrl, info.ChannelSetting.Proxy))
+		fetchContext = pluginruntime.WithUploader(fetchContext, a.hookUploader(c, info.ChannelBaseUrl, info.ChannelSetting.Proxy))
 	}
 	descriptor, err := a.requestDescriptor(fetchContext, "buildSubmitRequest", a.submitContext(c, info))
 	if err != nil {

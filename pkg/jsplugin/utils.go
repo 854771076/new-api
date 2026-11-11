@@ -43,6 +43,13 @@ func injectGlobals(runtime *moejs.Runtime, identity func() string, now func() ti
 			}
 			return call.fetch(r, moejs.Arg(args, 0))
 		}),
+		"uploadFile": runtime.Function("uploadFile", 1, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
+			call := currentCall()
+			if call == nil {
+				return moejs.Undefined(), fmt.Errorf("utils.uploadFile is not available outside hooks")
+			}
+			return call.uploadFile(r, moejs.Arg(args, 0))
+		}),
 		"hasCapability": runtime.Function("hasCapability", 1, func(r *moejs.Realm, _ moejs.Value, args []moejs.Value) (moejs.Value, error) {
 			name, err := stringValue(r, moejs.Arg(args, 0))
 			if err != nil {

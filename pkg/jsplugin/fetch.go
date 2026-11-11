@@ -48,6 +48,34 @@ func WithFetcher(ctx context.Context, fetcher Fetcher) context.Context {
 	return context.WithValue(ctx, fetcherContextKey{}, fetcher)
 }
 
+// Uploader sends one utils.uploadFile request for the hook call whose context
+// carries it. Like Fetcher it receives a context already bounded by the call's
+// budget; the host resolves the request_file bytes and builds the multipart body.
+type Uploader func(ctx context.Context, request UploadRequest) (UploadResponse, error)
+
+type UploadRequest struct {
+	Hook      string // the calling hook, filled by the engine for logs and errors
+	URL       string
+	Headers   map[string]string
+	FileRef   string // request_file:<field> or request_file:<field>#<index>
+	FieldName string // multipart field name, default "file"
+	Filename  string // multipart filename, default the file's own
+	MimeType  string // multipart Content-Type, default the file's own
+}
+
+type UploadResponse struct {
+	Status  int
+	Headers map[string]string
+	Body    []byte
+}
+
+type uploaderContextKey struct{}
+
+// WithUploader makes utils.uploadFile available to the hook called with ctx.
+func WithUploader(ctx context.Context, uploader Uploader) context.Context {
+	return context.WithValue(ctx, uploaderContextKey{}, uploader)
+}
+
 // runtimeCall is the hook call a runtime is running, as its host functions
 // see it. The engine sets it for one call and clears it when the call ends,
 // so an idle pooled runtime keeps no request data.
@@ -57,6 +85,7 @@ type runtimeCall struct {
 	ctx      context.Context
 	hook     string
 	fetcher  Fetcher
+	uploader Uploader
 	watchdog *runtimeWatchdog
 	// holdsSlot and parked are what the call holds of the engine's
 	// semaphore and parked tokens; release returns exactly that.
@@ -90,27 +119,89 @@ func (c *runtimeCall) fetch(r *moejs.Realm, argument moejs.Value) (moejs.Value, 
 		return moejs.Undefined(), err
 	}
 	request.Hook = c.hook
+	status, headers, body, err := c.runNetwork(r, "utils.fetch", host, func(ctx context.Context) (int, map[string]string, []byte, error) {
+		response, err := c.fetcher(ctx, request)
+		return response.Status, response.Headers, response.Body, err
+	})
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	bodyValue := moejs.String("")
+	if wantBytes {
+		// An ArrayBuffer over the response bytes, which belong to this call.
+		if body == nil {
+			body = []byte{}
+		}
+		if bodyValue, err = r.FromGo(body); err != nil {
+			return moejs.Undefined(), err
+		}
+	} else if request.Method != http.MethodHead {
+		text := string(body)
+		if bodyValue, err = c.runtime.ParseJSONString(text); err != nil {
+			bodyValue = moejs.String(text)
+		}
+	}
+	return fetchResult(r, status, headers, bodyValue)
+}
+
+// uploadFile is utils.uploadFile. It sends one multipart file to the channel
+// base URL host (or an allowed host) and returns the response, so a driver can
+// upload reference media before it submits the billable task. It shares the
+// utils.fetch budget.
+func (c *runtimeCall) uploadFile(r *moejs.Realm, argument moejs.Value) (moejs.Value, error) {
+	if c.uploader == nil {
+		return moejs.Undefined(), fmt.Errorf("utils.uploadFile is not available in %s", c.hook)
+	}
+	request, host, err := uploadRequest(r, argument)
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	request.Hook = c.hook
+	status, headers, body, err := c.runNetwork(r, "utils.uploadFile", host, func(ctx context.Context) (int, map[string]string, []byte, error) {
+		response, err := c.uploader(ctx, request)
+		return response.Status, response.Headers, response.Body, err
+	})
+	if err != nil {
+		return moejs.Undefined(), err
+	}
+	bodyValue := moejs.String("")
+	if text := string(body); text != "" {
+		if parsed, parseErr := c.runtime.ParseJSONString(text); parseErr == nil {
+			bodyValue = parsed
+		} else {
+			bodyValue = moejs.String(text)
+		}
+	}
+	return fetchResult(r, status, headers, bodyValue)
+}
+
+// runNetwork accounts one host network request against the call's fetch budget
+// and runs send while the call's JavaScript clock is stopped and its slot is
+// lent to other calls. operation names the utility in errors. send returns the
+// response status, headers and body; its context is bounded by the remaining
+// budget.
+func (c *runtimeCall) runNetwork(r *moejs.Realm, operation, host string, send func(ctx context.Context) (int, map[string]string, []byte, error)) (status int, headers map[string]string, body []byte, err error) {
 	if c.fetches >= maxFetchesPerCall {
-		return moejs.Undefined(), fmt.Errorf("utils.fetch allows at most %d requests per hook call", maxFetchesPerCall)
+		return 0, nil, nil, fmt.Errorf("%s allows at most %d requests per hook call", operation, maxFetchesPerCall)
 	}
 	remaining := maxFetchTimePerCall - c.fetchTime
 	if remaining <= 0 {
-		return moejs.Undefined(), fmt.Errorf("utils.fetch requests used up their %s per hook call", maxFetchTimePerCall)
+		return 0, nil, nil, fmt.Errorf("%s requests used up their %s per hook call", operation, maxFetchTimePerCall)
 	}
 	c.fetches++
-	timeout, timeoutCause := fetchTimeout, fmt.Errorf("utils.fetch to %s timed out after %s", host, fetchTimeout)
+	timeout, timeoutCause := fetchTimeout, fmt.Errorf("%s to %s timed out after %s", operation, host, fetchTimeout)
 	if remaining < fetchTimeout {
-		timeout, timeoutCause = remaining, fmt.Errorf("utils.fetch to %s ran past the %s of requests per hook call", host, maxFetchTimePerCall)
+		timeout, timeoutCause = remaining, fmt.Errorf("%s to %s ran past the %s of requests per hook call", operation, host, maxFetchTimePerCall)
 	}
 
 	if !c.watchdog.pause() {
 		// The call timed out or its caller left; the interrupt ends it.
-		return moejs.Undefined(), r.CheckInterrupt()
+		return 0, nil, nil, r.CheckInterrupt()
 	}
 	c.yieldSlot()
 	fetchContext, cancel := context.WithTimeoutCause(c.ctx, timeout, timeoutCause)
 	started := time.Now()
-	response, err := c.fetcher(fetchContext, request)
+	status, headers, body, err = send(fetchContext)
 	c.fetchTime += time.Since(started)
 	if err != nil && fetchContext.Err() != nil {
 		err = context.Cause(fetchContext)
@@ -121,14 +212,14 @@ func (c *runtimeCall) fetch(r *moejs.Realm, argument moejs.Value) (moejs.Value, 
 		// caught; interrupting discards the runtime as a timeout does.
 		cause := context.Cause(c.ctx)
 		if cause == nil {
-			cause = fmt.Errorf("plugin call could not resume after utils.fetch: %w", ErrCallAdmissionTimeout)
+			cause = fmt.Errorf("plugin call could not resume after %s: %w", operation, ErrCallAdmissionTimeout)
 		}
 		c.runtime.Interrupt(cause)
-		return moejs.Undefined(), r.CheckInterrupt()
+		return 0, nil, nil, r.CheckInterrupt()
 	}
 	c.watchdog.resume()
 	if interrupted := r.CheckInterrupt(); interrupted != nil {
-		return moejs.Undefined(), interrupted
+		return 0, nil, nil, interrupted
 	}
 
 	if err != nil {
@@ -136,43 +227,33 @@ func (c *runtimeCall) fetch(r *moejs.Realm, argument moejs.Value) (moejs.Value, 
 		if errors.As(err, &transportErr) {
 			err = transportErr.Err
 		}
-		return moejs.Undefined(), fmt.Errorf("utils.fetch to %s failed: %v", host, err)
+		return 0, nil, nil, fmt.Errorf("%s to %s failed: %v", operation, host, err)
 	}
-	if len(response.Body) > MaxFetchBodyBytes {
-		return moejs.Undefined(), fmt.Errorf("utils.fetch response from %s exceeds %d bytes", host, MaxFetchBodyBytes)
+	if len(body) > MaxFetchBodyBytes {
+		return 0, nil, nil, fmt.Errorf("%s response from %s exceeds %d bytes", operation, host, MaxFetchBodyBytes)
 	}
-	// The result is built from JavaScript objects, not a host map: a hook may
-	// return it, or part of it, as it is.
-	headers := r.NewObject()
-	for name, value := range response.Headers {
-		if err = headers.CreateDataPropertyOrThrow(r, r.KeyFromGoString(name), moejs.String(value)); err != nil {
+	return status, headers, body, nil
+}
+
+// fetchResult wraps a network response's status, headers and body into the
+// {status, headers, body} object the driver hooks return. The result is built
+// from JavaScript objects, not a host map, so a hook may return it as it is.
+func fetchResult(r *moejs.Realm, status int, headers map[string]string, body moejs.Value) (moejs.Value, error) {
+	headersObject := r.NewObject()
+	for name, value := range headers {
+		if err := headersObject.CreateDataPropertyOrThrow(r, r.KeyFromGoString(name), moejs.String(value)); err != nil {
 			return moejs.Undefined(), err
 		}
 	}
-	headersValue, err := r.FromGo(headers)
+	headersValue, err := r.FromGo(headersObject)
 	if err != nil {
 		return moejs.Undefined(), err
-	}
-	body := moejs.String("")
-	if wantBytes {
-		// An ArrayBuffer over the response bytes, which belong to this call.
-		if response.Body == nil {
-			response.Body = []byte{}
-		}
-		if body, err = r.FromGo(response.Body); err != nil {
-			return moejs.Undefined(), err
-		}
-	} else if request.Method != http.MethodHead {
-		text := string(response.Body)
-		if body, err = c.runtime.ParseJSONString(text); err != nil {
-			body = moejs.String(text)
-		}
 	}
 	result := r.NewObject()
 	for _, member := range []struct {
 		name  string
 		value moejs.Value
-	}{{"status", moejs.Int(int64(response.Status))}, {"headers", headersValue}, {"body", body}} {
+	}{{"status", moejs.Int(int64(status))}, {"headers", headersValue}, {"body", body}} {
 		if err = result.CreateDataPropertyOrThrow(r, r.KeyFromGoString(member.name), member.value); err != nil {
 			return moejs.Undefined(), err
 		}
@@ -256,6 +337,99 @@ func fetchRequest(r *moejs.Realm, argument moejs.Value) (request FetchRequest, h
 		return FetchRequest{}, "", false, r.TypeError("utils.fetch: %s", err)
 	}
 	return request, parsed.Host, wantBytes, nil
+}
+
+// uploadRequest reads the utils.uploadFile argument: {url, fileRef, fieldName?,
+// filename?, mimeType?, headers?}. fileRef names the request file to send, as
+// request_file:<field> or request_file:<field>#<index>.
+func uploadRequest(r *moejs.Realm, argument moejs.Value) (request UploadRequest, host string, err error) {
+	if !argument.IsObject() {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile request must be an object")
+	}
+	exported, err := r.ToGoStrict(argument)
+	if err != nil {
+		return UploadRequest{}, "", err
+	}
+	members, ok := exported.(map[string]any)
+	if !ok {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile request must be an object")
+	}
+	request = UploadRequest{FieldName: "file"}
+	for name, value := range members {
+		switch name {
+		case "url":
+			text, isString := value.(string)
+			if !isString {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile url must be a string")
+			}
+			request.URL = text
+		case "fileRef":
+			text, isString := value.(string)
+			if !isString {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile fileRef must be a string")
+			}
+			request.FileRef = text
+		case "fieldName":
+			if value == nil {
+				continue
+			}
+			text, isString := value.(string)
+			if !isString || strings.TrimSpace(text) == "" {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile fieldName must be a non-empty string")
+			}
+			request.FieldName = text
+		case "filename":
+			if value == nil {
+				continue
+			}
+			text, isString := value.(string)
+			if !isString {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile filename must be a string")
+			}
+			request.Filename = text
+		case "mimeType":
+			if value == nil {
+				continue
+			}
+			text, isString := value.(string)
+			if !isString {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile mimeType must be a string")
+			}
+			request.MimeType = text
+		case "headers":
+			if value == nil {
+				continue
+			}
+			headers, isObject := value.(map[string]any)
+			if !isObject {
+				return UploadRequest{}, "", r.TypeError("utils.uploadFile headers must be an object")
+			}
+			request.Headers = make(map[string]string, len(headers))
+			for headerName, headerValue := range headers {
+				text, isString := headerValue.(string)
+				if !isString {
+					return UploadRequest{}, "", r.TypeError("utils.uploadFile header %q must be a string", headerName)
+				}
+				request.Headers[strings.TrimSpace(headerName)] = text
+			}
+		default:
+			return UploadRequest{}, "", r.TypeError("utils.uploadFile request has unsupported member %q", name)
+		}
+	}
+	if strings.TrimSpace(request.FileRef) == "" {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile fileRef is required")
+	}
+	if len(request.URL) > maxFetchURLBytes {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile url exceeds %d bytes", maxFetchURLBytes)
+	}
+	parsed, err := url.Parse(request.URL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile url must be an absolute http(s) URL")
+	}
+	if err = ValidateRequestHeaders(request.Headers); err != nil {
+		return UploadRequest{}, "", r.TypeError("utils.uploadFile: %s", err)
+	}
+	return request, parsed.Host, nil
 }
 
 // yieldSlot lends the call's execution slot to other calls while it waits on

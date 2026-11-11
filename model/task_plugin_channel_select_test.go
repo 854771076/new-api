@@ -118,6 +118,62 @@ func TestNewAPIChannelServesExtendedTaskPlugins(t *testing.T) {
 	assert.Equal(t, "gateway", selected.Name, "requests without a pinned plugin keep using the gateway")
 }
 
+func TestRunningHubAccountPoolFailsOverByPriority(t *testing.T) {
+	truncateTables(t)
+	baseURL := "https://www.runninghub.ai"
+	setting := `{"task_plugin_key":"runninghub"}`
+	// Three RunningHub accounts, one type-61 channel each, all serving the same
+	// workflow model. Each account carries its own apiKey (Key); the priority
+	// orders the failover tiers, so a retry walks down the account pool.
+	accounts := []struct {
+		id       int
+		name     string
+		apiKey   string
+		priority int64
+	}{
+		{940001, "rh-primary", "rh-key-primary", 2},
+		{940002, "rh-secondary", "rh-key-secondary", 1},
+		{940003, "rh-backup", "rh-key-backup", 0},
+	}
+	for _, account := range accounts {
+		priority := account.priority
+		channel := Channel{
+			Id:       account.id,
+			Type:     constant.ChannelTypeTaskPlugin,
+			Status:   common.ChannelStatusEnabled,
+			Name:     account.name,
+			Key:      account.apiKey,
+			Models:   "minimax-h3-reference-to-video",
+			Group:    "default",
+			Priority: &priority,
+			BaseURL:  &baseURL,
+			Setting:  &setting,
+		}
+		require.NoError(t, channel.Insert())
+	}
+
+	tests := []struct {
+		name       string
+		retry      int
+		wantName   string
+		wantAPIKey string
+	}{
+		{"first attempt uses the primary account", 0, "rh-primary", "rh-key-primary"},
+		{"retry 1 falls to the secondary account", 1, "rh-secondary", "rh-key-secondary"},
+		{"retry 2 falls to the backup account", 2, "rh-backup", "rh-key-backup"},
+		{"retry past the last tier sticks to the backup", 9, "rh-backup", "rh-key-backup"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := GetChannel("default", "minimax-h3-reference-to-video", tc.retry, identityFilters("runninghub", nil))
+			require.NoError(t, err)
+			require.NotNil(t, selected)
+			assert.Equal(t, tc.wantName, selected.Name)
+			assert.Equal(t, tc.wantAPIKey, selected.Key)
+		})
+	}
+}
+
 func TestModelModifierNamesRouteWithAndWithoutMemoryCache(t *testing.T) {
 	truncateTables(t)
 	originalMemoryCache := common.MemoryCacheEnabled
