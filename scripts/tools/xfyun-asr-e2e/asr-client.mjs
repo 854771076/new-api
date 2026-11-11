@@ -29,6 +29,8 @@
  *   --expect  期望响应文本包含的子串；命中即判定通过
  *   --poll-interval  异步模式轮询间隔（毫秒），默认 3000
  *   --timeout  异步模式等待终态的超时（秒），默认 300
+ *   --submit-timeout  异步模式提交阶段的超时（秒），默认 120。超时后不要盲目
+ *                     重投：任务可能已被受理并正在转写，重复提交会重复计费
  *
  * 退出码: 0 通过 / 1 断言失败 / 2 参数或环境不合法 / 3 跳过（未提供令牌）
  */
@@ -43,6 +45,9 @@ const DEFAULT_FORMAT = 'json'
 const DEFAULT_MODE = 'sync'
 const DEFAULT_POLL_INTERVAL_MS = 3000
 const DEFAULT_TIMEOUT_SECONDS = 300
+// 提交阶段的独立超时。网关收下请求后可能迟迟不答复（例如上游转写慢或链路
+// 抖动），没有这个上限时 fetch 会一直挂着，表现为脚本「卡住」且看不出卡在哪。
+const DEFAULT_SUBMIT_TIMEOUT_SECONDS = 120
 // 退出码：0 通过 / 1 断言失败 / 2 参数或环境不合法 / 3 跳过（未提供令牌）。
 // 跳过与参数错误分开，CI 才能把「没配凭据」和「参数写错」区分开。
 const EXIT_FAIL = 1
@@ -176,9 +181,29 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+// fetchWithTimeout 给单次请求加上上限。超时抛出的错误带 timeout 标记，
+// 调用方据此区分「网络不通」与「网关收下了但迟迟不答复」。
+async function fetchWithTimeout(url, options, timeoutMs, stage) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const failure = new Error(`${stage}超时（${Math.round(timeoutMs / 1000)}s 无响应）`)
+      failure.timeout = true
+      failure.stage = stage
+      throw failure
+    }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 // 异步模式：提交任务 → 轮询到终态 → 打印转写结果。
 // 任务链路只接受 multipart 上传，因此这里不提供 Base64 / URL 来源。
-async function runAsync({ base, token, model, audio, expect, pollIntervalMs, timeoutMs }) {
+async function runAsync({ base, token, model, audio, expect, pollIntervalMs, timeoutMs, submitTimeoutMs }) {
   const endpoint = `${base}/v1/audio/transcriptions/tasks`
   const built = buildMultipartBody(audio, { model })
 
@@ -188,15 +213,30 @@ async function runAsync({ base, token, model, audio, expect, pollIntervalMs, tim
   const startedAt = Date.now()
   let response
   try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': built.contentType,
+    response = await fetchWithTimeout(
+      endpoint,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': built.contentType,
+        },
+        body: built.body,
       },
-      body: built.body,
-    })
+      submitTimeoutMs,
+      '提交',
+    )
   } catch (error) {
+    if (error.timeout) {
+      // 提交超时的处置与其它失败不同：请求可能已被网关受理并开始转写，
+      // 盲目重投会产生重复任务并重复计费。
+      console.error(
+        `✗ ${error.message}\n` +
+          '  网关可能已经受理并正在转写——请先到任务日志确认是否已产生任务，\n' +
+          '  确认没有再重投；重复提交会重复计费。',
+      )
+      process.exit(1)
+    }
     fail(`请求失败: ${error.message}`)
   }
   const body = await response.text()
@@ -219,14 +259,26 @@ async function runAsync({ base, token, model, audio, expect, pollIntervalMs, tim
 
   const pollEndpoint = `${base}/v1/audio/transcriptions/tasks/${encodeURIComponent(taskId)}`
   const deadline = Date.now() + timeoutMs
+  console.log(`  轮询中（上限 ${Math.round(timeoutMs / 1000)}s，间隔 ${Math.round(pollIntervalMs / 1000)}s）…`)
   while (Date.now() < deadline) {
     await sleep(pollIntervalMs)
     let poll
     try {
-      poll = await fetch(pollEndpoint, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      poll = await fetchWithTimeout(
+        pollEndpoint,
+        { headers: { Authorization: `Bearer ${token}` } },
+        30_000,
+        '查询',
+      )
     } catch (error) {
+      if (error.timeout) {
+        // 任务已提交，只是这一次查询没等到答复；重投会重复计费。
+        console.error(
+          `✗ ${error.message}\n` +
+            `  任务 ${taskId} 已提交，可用同一令牌稍后继续查询该任务号，不必重新提交。`,
+        )
+        process.exit(1)
+      }
       fail(`查询任务失败: ${error.message}`)
     }
     const pollBody = await poll.text()
@@ -320,12 +372,17 @@ async function main() {
     }
     const pollIntervalMs = Number(args['poll-interval'] || DEFAULT_POLL_INTERVAL_MS)
     const timeoutMs = Number(args.timeout || DEFAULT_TIMEOUT_SECONDS) * 1000
+    const submitTimeoutMs = Number(args['submit-timeout'] || DEFAULT_SUBMIT_TIMEOUT_SECONDS) * 1000
     if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
       console.error('✗ --poll-interval 必须是正数（毫秒）')
       process.exit(2)
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       console.error('✗ --timeout 必须是正数（秒）')
+      process.exit(2)
+    }
+    if (!Number.isFinite(submitTimeoutMs) || submitTimeoutMs <= 0) {
+      console.error('✗ --submit-timeout 必须是正数（秒）')
       process.exit(2)
     }
     await runAsync({
@@ -336,6 +393,7 @@ async function main() {
       expect: args.expect,
       pollIntervalMs,
       timeoutMs,
+      submitTimeoutMs,
     })
     return
   }
