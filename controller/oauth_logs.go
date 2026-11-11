@@ -33,6 +33,16 @@ func OAuthLogsList(c *gin.Context) {
 		return
 	}
 
+	// Logs are scoped to the OAuth App that owns the token. The app id is
+	// derived server-side from the token itself, so a client cannot widen the
+	// filter by sending a query parameter.
+	app, err := service.OAuthAppFromAccessToken(token)
+	if err != nil || app == nil || app.Id <= 0 {
+		c.Header("WWW-Authenticate", "Bearer error=\"invalid_token\"")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "access token is invalid or expired"})
+		return
+	}
+
 	scopeSet := make(map[string]struct{})
 	for _, s := range strings.Fields(scope) {
 		scopeSet[s] = struct{}{}
@@ -58,7 +68,7 @@ func OAuthLogsList(c *gin.Context) {
 	}
 
 	startIdx := (page - 1) * pageSize
-	logs, total, err := model.GetUserLogs(user.Id, model.LogFilter{}, startIdx, pageSize)
+	logs, total, err := model.GetUserLogs(user.Id, model.LogFilter{AppId: app.Id}, startIdx, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query_failed", "error_description": "failed to query logs"})
 		return
@@ -99,5 +109,6 @@ func sanitizeOAuthLog(log *model.Log) gin.H {
 		"channel_name":      log.ChannelName,
 		"group":             log.Group,
 		"request_id":        log.RequestId,
+		"app_id":            log.AppId,
 	}
 }

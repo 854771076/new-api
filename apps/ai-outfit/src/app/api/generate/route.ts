@@ -1,20 +1,26 @@
-// POST /api/generate — 换装生成核心。
-// 校验 → 校验模型 → 读取人物/服装/姿势 → 签参考图 URL → 渲染 prompt → 落 pending → 调网关 → 下载 → 上传 Storage → 写记录 → 返回结果。
+// POST /api/generate — 六阶段换装管线入口。
+// 幂等去重 → 重新校验素材/模型 → 冻结报价 → 落任务 → 编排（人物标准化/按需解析/服装板/两图换装）
+// → 成功提交作品与快照；失败标记并回滚本次新解析服装。网关 relay 负责实际 App 钱包计费。
 import 'server-only';
+import { createHash } from 'node:crypto';
 import { type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
-import { getSignedUrl } from '@/lib/media-urls';
 import { config } from '@/lib/config';
-import { generateImage, GatewayError } from '@/lib/gateway';
-import { DEFAULT_NEGATIVE_PROMPT, DEFAULT_OUTFIT_TEMPLATE, renderPrompt } from '@/lib/prompt';
-import type { OutfitGeneration } from '@/lib/types';
+import { GatewayError } from '@/lib/gateway-errors';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
 import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
-import { readGeneratedImage } from '@/lib/generated-image';
+import { buildQuote } from '@/lib/tryon/quote';
+import { runTryon, type TryonOrder } from '@/lib/tryon/orchestrate';
+import { PIPELINE_VERSION } from '@/lib/tryon/prompts';
+import { resolveTryonModel } from '@/lib/tryon/models';
+import type { OutfitGeneration } from '@/lib/types';
+import type { WearCandidate } from '@/lib/tryon/wear';
 import { z } from 'zod';
 
-export const maxDuration = 300;
+// Vercel Hobby 套餐将 Serverless 函数硬限制在 60s（声明更高也会被钳制）。
+// 多模型换装管线可能逼近该上限；超时由前端按 504 给出可重试提示，长期方案是异步任务化。
+export const maxDuration = 60;
 
 const bodySchema = z.object({
   character_id: z.string().uuid(),
@@ -23,22 +29,11 @@ const bodySchema = z.object({
   model: z.string().min(1).max(200),
   size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).optional(),
   prompt_extra: z.string().max(500).optional(),
+  // 客户端为同一组选择生成的稳定键；缺省时由服务端按入参派生，仍可去重完全相同的重复提交。
+  idempotency_key: z.string().min(8).max(200).optional(),
 }).strict();
 
-const SIGNED_URL_EXPIRES_IN = 3600;
-
-interface AiModelRow {
-  model_id: string;
-  client_id: string;
-  default_size: string | null;
-}
-
-interface PromptTemplateRow {
-  template: string;
-  negative_prompt: string | null;
-  client_id: string;
-  is_default: boolean;
-}
+const OUTFIT_SELECT = 'id, source, category, name_zh, user_id, bucket, thumb_path, preview_path, parse_status, product_bucket, product_path, garment_type, semantic_hints, original_bucket, original_path, parse_attempts, is_active';
 
 export async function POST(req: NextRequest) {
   try { requireGatewayOrigin(req); } catch (error) { return gatewayFailure(error); }
@@ -53,149 +48,142 @@ export async function POST(req: NextRequest) {
     return gatewayFailure(new GatewayError(400, '请选择有效素材，服装最多 6 套，提示词最多 500 字', 'INVALID_BODY'));
   }
 
-  const currentClientId = config.gatewayClientId;
+  const clientId = config.gatewayClientId;
+  const admin = createAdminSupabase();
+  const idempotencyKey = body.idempotency_key ?? deriveIdempotencyKey(body);
 
-  // 0. 校验模型可用性：必须在落 pending / 调网关之前
-  const { data: modelData } = await supabase
-    .from('ai_models')
-    .select('model_id, client_id, default_size')
-    .eq('model_id', body.model)
-    .eq('usage', 'outfit')
-    .eq('is_active', true)
-    .in('client_id', [currentClientId, '']);
-
-  const modelRows = (modelData ?? []) as AiModelRow[];
-  const modelRow = modelRows.find((m) => m.client_id === currentClientId) ?? modelRows[0];
-  if (!modelRow) {
-    return gatewayFailure(new GatewayError(400, '所选模型不可用', 'MODEL_NOT_AVAILABLE'));
+  // 0. 幂等：同用户同键重复提交直接返回原任务，不重复创建/扣费。
+  const { data: existing } = await admin.from('outfit_generations')
+    .select('id, status, stage, result_bucket, result_path')
+    .eq('client_id', clientId).eq('user_id', user.id).eq('idempotency_key', idempotencyKey)
+    .maybeSingle();
+  if (existing) {
+    return gatewaySuccess({ id: existing.id, result_path: existing.result_path, result_bucket: existing.result_bucket, deduped: true });
   }
 
-  const effectiveSize = bodySchema.shape.size.unwrap().safeParse(body.size ?? modelRow.default_size ?? '1024x1024');
-  if (!effectiveSize.success) return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
-
-  // 1. 读取素材（service_role 能绕过 RLS；但这里 RLS 已限制 client_id 匹配）
-  const { data: character } = await supabase
-    .from('characters').select('id, name, image_path, bucket')
-    .eq('id', body.character_id).eq('user_id', user.id).eq('client_id', currentClientId).maybeSingle();
-
-  const { data: outfits } = await supabase
-    .from('outfits').select('id, name_zh, name_en, description_zh, category, bucket, thumb_path, preview_path')
-    .in('id', body.outfit_ids).eq('client_id', currentClientId).eq('is_active', true);
-
-  const { data: pose } = await supabase
-    .from('poses').select('id, name_zh, system, category, angle, bucket, thumb_path, preview_path')
-    .eq('id', body.pose_id).eq('client_id', currentClientId).eq('is_active', true).maybeSingle();
-
-  if (!character) return gatewayFailure(new GatewayError(404, '人物不存在或无权限', 'CHARACTER_NOT_FOUND'));
-  if (!outfits || outfits.length !== body.outfit_ids.length) return gatewayFailure(new GatewayError(400, '所选服装已失效，请重新选择', 'OUTFIT_NOT_AVAILABLE'));
-  if (!pose) return gatewayFailure(new GatewayError(404, '姿势不存在', 'POSE_NOT_FOUND'));
-  outfits.sort((a, b) => body.outfit_ids.indexOf(a.id) - body.outfit_ids.indexOf(b.id));
-
-  // 2. 签参考图 URL（bucket 取自各行：人物 media-user，服装/姿势 media-official）
-  const [characterImage, poseImage] = await Promise.all([
-    getSignedUrl(character.bucket, character.image_path, SIGNED_URL_EXPIRES_IN),
-    getSignedUrl(pose.bucket, pose.preview_path?.trim() || pose.thumb_path, SIGNED_URL_EXPIRES_IN),
+  // 1. 提交时重新校验素材归属与可用性（防止报价后被下架/替换）。
+  const [{ data: character }, { data: outfits }, { data: pose }] = await Promise.all([
+    supabase.from('characters')
+      .select('id, name, bucket, image_path, cover_path, persona_status, persona_version')
+      .eq('id', body.character_id).eq('user_id', user.id).eq('client_id', clientId).maybeSingle(),
+    supabase.from('outfits').select(OUTFIT_SELECT)
+      .in('id', body.outfit_ids).eq('client_id', clientId),
+    supabase.from('poses').select('id, name_zh, system, category, angle, bucket, thumb_path, preview_path')
+      .eq('id', body.pose_id).eq('client_id', clientId).eq('is_active', true).maybeSingle(),
   ]);
 
-  const resolvedOutfits: { name_zh: string; category: string; url: string | null }[] = await Promise.all(
-    outfits.map(async (o) => ({
-      name_zh: o.name_zh,
-      category: o.category,
-      url: await getSignedUrl(o.bucket, o.preview_path?.trim() || o.thumb_path, SIGNED_URL_EXPIRES_IN),
-    })),
-  );
-  const usableOutfits: { name_zh: string; category: string; url: string }[] = [];
-  for (const o of resolvedOutfits) {
-    if (o.url) usableOutfits.push({ name_zh: o.name_zh, category: o.category, url: o.url });
+  if (!character) return gatewayFailure(new GatewayError(404, '人物不存在或无权限', 'CHARACTER_NOT_FOUND'));
+  if (!pose) return gatewayFailure(new GatewayError(404, '姿势不存在', 'POSE_NOT_FOUND'));
+  const candidates = (outfits ?? []).filter((o) => o.is_active) as WearCandidate[];
+  if (candidates.length !== body.outfit_ids.length) {
+    return gatewayFailure(new GatewayError(400, '所选服装已失效，请重新选择', 'OUTFIT_NOT_AVAILABLE'));
+  }
+  // 个人服装只能由所有者在换装中触发解析（RLS 已限定，服务端再显式拦截）。
+  if (candidates.some((o) => o.source === 'user' && o.user_id !== user.id)) {
+    return gatewayFailure(new GatewayError(403, '存在无权使用的个人服装', 'OUTFIT_FORBIDDEN'));
   }
 
-  if (!characterImage || !poseImage || usableOutfits.length !== outfits.length) {
-    return gatewayFailure(new GatewayError(400, '所选素材缺少参考图，请更换素材', 'MATERIAL_IMAGE_MISSING'));
+  // 2. 模型与报价：模型必须可用；报价按当前素材实时计算并冻结进任务。
+  const [imageModelRes, visionModelRes] = await Promise.all([
+    resolveTryonModel(supabase, 'image'),
+    resolveTryonModel(supabase, 'vision'),
+  ]);
+  if (body.model !== imageModelRes.model) {
+    return gatewayFailure(new GatewayError(400, '所选模型不可用', 'MODEL_NOT_AVAILABLE'));
   }
+  const size = body.size ?? imageModelRes.defaultSize ?? '1024x1536';
+  if (!bodySchema.shape.size.unwrap().safeParse(size).success) {
+    return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
+  }
+  const quote = buildQuote(candidates);
 
-  // 3. 读取提示词模板并渲染
-  const { data: templateData } = await supabase
-    .from('prompt_templates')
-    .select('template, negative_prompt, client_id, is_default, sort_order')
-    .eq('usage', 'outfit')
-    .eq('is_active', true)
-    .in('client_id', [currentClientId, ''])
-    .order('sort_order', { ascending: true });
-
-  const templateRows = (templateData ?? []) as PromptTemplateRow[];
-  const defaultTemplates = templateRows.filter((t) => t.is_default);
-  const templatePool = defaultTemplates.length > 0 ? defaultTemplates : templateRows;
-  const templateRow = templatePool.find((t) => t.client_id === currentClientId) ?? templatePool[0];
-
-  const prompt = renderPrompt(
-    templateRow?.template?.trim() ? templateRow.template : DEFAULT_OUTFIT_TEMPLATE,
-    {
-      character: character.name ?? '',
-      outfits: usableOutfits.map((o) => `${o.name_zh}（${o.category}）`).join(' + '),
-      pose: `${pose.name_zh}（${pose.system}·${pose.category}·${pose.angle}）`,
-      extra: body.prompt_extra ?? '',
-    },
-  );
-  const negativePrompt = templateRow?.negative_prompt?.trim() ? templateRow.negative_prompt : DEFAULT_NEGATIVE_PROMPT;
-
-  // 4. 先落一条 pending 记录（client_id 是 NOT NULL 且 RLS 依赖它，必须显式写入）
-  const admin = createAdminSupabase();
+  // 3. 一次性创建任务（部分唯一索引兜底并发重复提交）。
   const { data: pendingRow, error: insertErr } = await admin
     .from('outfit_generations').insert({
-      client_id: currentClientId,
+      client_id: clientId,
       user_id: user.id,
       character_id: character.id,
       outfit_ids: body.outfit_ids,
       pose_id: pose.id,
-      prompt,
+      prompt: body.prompt_extra?.trim() || null,
       model: body.model,
       status: 'pending',
+      stage: 'quoted',
+      idempotency_key: idempotencyKey,
+      quote,
+      quote_accepted_at: new Date().toISOString(),
+      parse_fee_quota: quote.parse_fee_quota,
+      tryon_fee_quota: quote.tryon_fee_quota,
+      pipeline_version: PIPELINE_VERSION,
     }).select('id').single();
 
   if (insertErr || !pendingRow) {
+    const { data: raced } = await admin.from('outfit_generations')
+      .select('id, result_bucket, result_path')
+      .eq('client_id', clientId).eq('user_id', user.id).eq('idempotency_key', idempotencyKey)
+      .maybeSingle();
+    if (raced) return gatewaySuccess({ id: raced.id, result_path: raced.result_path, result_bucket: raced.result_bucket, deduped: true });
     return gatewayFailure(new GatewayError(500, '无法创建生成记录，请稍后重试', 'UPSTREAM_DATABASE_ERROR'));
   }
   const recordId = pendingRow.id;
 
+  // 4. 编排执行。
+  const order: TryonOrder = {
+    recordId,
+    clientId,
+    userId: user.id,
+    character,
+    candidates,
+    quote,
+    imageModel: imageModelRes.model,
+    visionModel: visionModelRes.model,
+    size,
+  };
+
   try {
-    // Reference order binds the first image to identity and the last to pose.
-    const referenceImages = [characterImage, ...usableOutfits.map((o) => o.url), poseImage];
-    const result = await generateImage({
-      model: modelRow.model_id,
-      prompt,
-      size: effectiveSize.data,
-      n: 1,
-      negative_prompt: negativePrompt,
-      reference_images: referenceImages,
-    });
-    const image = result.images[0];
-    if (!image) throw new Error('网关返回空 images 数组');
+    const result = await runTryon(supabase, order);
+    const { error: updateErr } = await admin.from('outfit_generations').update({
+      status: 'succeeded',
+      stage: 'done',
+      result_bucket: result.resultBucket,
+      result_path: result.resultPath,
+      board_bucket: result.boardBucket,
+      board_path: result.boardPath,
+      garment_manifest: result.manifest,
+      persona_snapshot: result.personaSnapshot,
+      wear_snapshot: result.wearSnapshot,
+      provider_snapshot: result.providerSnapshot,
+      charged_quota: quote.total_quota,
+      gateway_request_id: result.gatewayRequestId ?? null,
+      gateway_usage: result.gatewayUsage ?? null,
+    } satisfies Partial<OutfitGeneration>)
+      .eq('id', recordId).eq('user_id', user.id).eq('client_id', clientId);
 
-    const bytes = await readGeneratedImage(image);
-    const resultBucket = 'media-user';
-    const resultPath = `${currentClientId}/${user.id}/${recordId}.png`;
-    const { error: uploadError } = await createAdminSupabase().storage.from(resultBucket)
-      .upload(resultPath, bytes, { contentType: 'image/png', upsert: false });
-    if (uploadError) throw new GatewayError(503, '图片保存失败，请稍后重试', 'UPSTREAM_STORAGE_ERROR');
-
-    // 7. 更新记录
-    const { error: upStatErr } = await admin
-      .from('outfit_generations')
-      .update({
-        status: 'succeeded',
-        result_bucket: resultBucket,
-        result_path: resultPath,
-        gateway_request_id: result.request_id,
-        gateway_usage: result.usage ?? null,
-      } satisfies Partial<OutfitGeneration>)
-      .eq('id', recordId).eq('user_id', user.id).eq('client_id', currentClientId);
-
-    if (upStatErr) throw new Error(`更新记录失败：${upStatErr.message}`);
-
-    return gatewaySuccess({ id: recordId, result_path: resultPath, result_bucket: resultBucket });
+    if (updateErr) throw new GatewayError(500, '生成结果保存失败，请稍后重试', 'UPSTREAM_DATABASE_ERROR');
+    return gatewaySuccess({ id: recordId, result_path: result.resultPath, result_bucket: result.resultBucket });
   } catch (error) {
-    const safe = error instanceof GatewayError ? error : new GatewayError(502, '生成或图片保存失败，请稍后重试', 'UPSTREAM_GENERATE_FAILED');
-    await admin.from('outfit_generations').update({ status: 'failed', error: safe.message }).eq('id', recordId).eq('user_id', user.id).eq('client_id', currentClientId);
+    const safe = error instanceof GatewayError
+      ? error
+      : new GatewayError(502, '生成失败，请稍后重试', 'UPSTREAM_GENERATE_FAILED');
+    await admin.from('outfit_generations').update({
+      status: 'failed',
+      stage: 'failed',
+      error: safe.message,
+      refunded_quota: quote.total_quota,
+    }).eq('id', recordId).eq('user_id', user.id).eq('client_id', clientId);
     return gatewayFailure(safe);
   }
+}
+
+function deriveIdempotencyKey(body: z.infer<typeof bodySchema>): string {
+  const basis = JSON.stringify({
+    c: body.character_id,
+    o: [...body.outfit_ids].sort(),
+    p: body.pose_id,
+    m: body.model,
+    s: body.size ?? null,
+  });
+  // SHA-256 而不是短整型哈希：同一用户累积大量任务时避免生日碰撞把不同选择误判为重复提交。
+  const digest = createHash('sha256').update(basis).digest('hex');
+  return `auto-${digest}-${body.outfit_ids.length}`;
 }

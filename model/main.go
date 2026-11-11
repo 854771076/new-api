@@ -424,7 +424,24 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
+	if err := ensureClickHouseLogAppId(); err != nil {
+		return err
+	}
 	return syncClickHouseLogTTL(ttlDays)
+}
+
+// ensureClickHouseLogAppId adds the app_id column to pre-existing ClickHouse
+// log tables. CREATE TABLE IF NOT EXISTS never alters an existing table, so the
+// column must be backfilled idempotently on startup.
+func ensureClickHouseLogAppId() error {
+	var createTableSQL string
+	if err := LOG_DB.Raw("SHOW CREATE TABLE logs").Scan(&createTableSQL).Error; err != nil {
+		return err
+	}
+	if strings.Contains(strings.ToUpper(createTableSQL), "APP_ID") {
+		return nil
+	}
+	return LOG_DB.Exec("ALTER TABLE logs ADD COLUMN IF NOT EXISTS app_id Int32 DEFAULT 0").Error
 }
 
 func clickHouseLogTTLDays() int {
@@ -468,6 +485,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	is_stream UInt8 DEFAULT 0,
 	channel_id Int32 DEFAULT 0,
 	token_id Int32 DEFAULT 0,
+	app_id Int32 DEFAULT 0,
 	`+"`group`"+` String DEFAULT '',
 	ip String DEFAULT '',
 	request_id String DEFAULT '',

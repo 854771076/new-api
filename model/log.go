@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
 
@@ -71,6 +72,7 @@ type Log struct {
 	ChannelId         int    `json:"channel" gorm:"index"`
 	ChannelName       string `json:"channel_name" gorm:"->"`
 	TokenId           int    `json:"token_id" gorm:"default:0;index"`
+	AppId             int    `json:"app_id" gorm:"index;default:0"`
 	Group             string `json:"group" gorm:"index"`
 	Ip                string `json:"ip" gorm:"index;default:''"`
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
@@ -333,6 +335,7 @@ type RecordConsumeLogParams struct {
 	UseTimeSeconds   int               `json:"use_time_seconds"`
 	IsStream         bool              `json:"is_stream"`
 	Group            string            `json:"group"`
+	AppId            int               `json:"app_id"`
 	Other            *LogOther         `json:"other"`
 }
 
@@ -348,6 +351,10 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	other := params.Other
 	content := other.setContent(params.Content)
 	otherStr := other.JSONString()
+	appId := params.AppId
+	if appId == 0 {
+		appId = common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID)
+	}
 	// 判断是否需要记录 IP
 	needRecordIp := false
 	if settingMap, err := GetUserSetting(userId, false); err == nil {
@@ -368,6 +375,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 		Quota:            params.Quota,
 		ChannelId:        params.ChannelId,
 		TokenId:          params.TokenId,
+		AppId:            appId,
 		UseTime:          params.UseTimeSeconds,
 		IsStream:         params.IsStream,
 		Group:            params.Group,
@@ -418,6 +426,7 @@ type RecordTaskBillingLogParams struct {
 	ModelName string
 	Quota     int
 	TokenId   int
+	AppId     int
 	Group     string
 	Other     *LogOther
 	NodeName  string // 任务发起节点；为空时回退当前节点
@@ -447,6 +456,7 @@ func RecordTaskBillingLog(params RecordTaskBillingLogParams) {
 		Quota:     params.Quota,
 		ChannelId: params.ChannelId,
 		TokenId:   params.TokenId,
+		AppId:     params.AppId,
 		Group:     params.Group,
 		Other:     other.JSONString(),
 	}
@@ -486,6 +496,7 @@ type LogFilter struct {
 	Group             string
 	RequestId         string
 	UpstreamRequestId string
+	AppId             int
 }
 
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
@@ -519,6 +530,9 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	}
 	if f.Group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", f.Group)
+	}
+	if f.AppId != 0 {
+		tx = tx.Where("logs.app_id = ?", f.AppId)
 	}
 	return tx, nil
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { QUOTA_PER_CREDIT } from '@/lib/constants';
 
 const quotaSchema = z.number().int().safe().nonnegative();
 
@@ -26,6 +27,7 @@ export const logsSchema = z.object({
     channel_name: z.string().optional(),
     request_id: z.string().optional(),
     created_at: z.string().optional(),
+    app_id: quotaSchema.optional(),
   })),
   total: quotaSchema,
   page: quotaSchema.positive(),
@@ -83,8 +85,13 @@ export interface SupabaseUserLite {
   user_metadata: { name?: string; full_name?: string };
 }
 
-export function formatQuota(value: number | undefined): string {
-  return value === undefined ? '—' : `${value.toLocaleString('zh-CN')} quota`;
+// 网关内部 quota 换算成面向用户的积分：1 积分 = QUOTA_PER_CREDIT quota。
+// 整数不显示小数，非整数最多保留 2 位。
+export function formatCredits(value: number | undefined): string {
+  if (value === undefined) return '—';
+  const credits = value / QUOTA_PER_CREDIT;
+  const rounded = Number.isInteger(credits) ? credits : Math.round(credits * 100) / 100;
+  return `${rounded.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 积分`;
 }
 
 export function formatPrice(amount: number, currency: string): string {

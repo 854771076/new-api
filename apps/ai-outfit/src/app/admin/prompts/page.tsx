@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Button, Input, Tag, Popconfirm, message, Form, Modal, InputNumber, Switch, Select, Alert } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { adminRequest, adminMutation } from '../_components/admin-request';
+import { PageHeader } from '../_components/page-header';
+import { useResponsivePagination } from '../_components/responsive-pagination';
 
 interface Row {
   id: string;
@@ -33,6 +35,10 @@ export default function AdminPromptsPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const pagination = useResponsivePagination({
+    current: page, pageSize, total,
+    onChange: (p, ps) => { setLoading(true); setPage(p); setPageSize(ps); },
+  });
   const [keyword, setKeyword] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -107,14 +113,14 @@ export default function AdminPromptsPage() {
   };
 
   const columns: ColumnsType<Row> = [
-    { title: '名称', dataIndex: 'name', key: 'name' },
+    { title: '名称', dataIndex: 'name', key: 'name', ellipsis: true },
     { title: '用途', dataIndex: 'usage', key: 'usage', render: (v) => <Tag>{v}</Tag> },
-    { title: '是否默认', dataIndex: 'is_default', key: 'is_default', render: (v) => v ? <Tag color="blue">默认</Tag> : '-' },
+    { title: '是否默认', dataIndex: 'is_default', key: 'is_default', responsive: ['md'], render: (v) => v ? <Tag color="blue">默认</Tag> : '-' },
     { title: '启用', dataIndex: 'is_active', key: 'is_active', render: (v) => v ? <Tag color="green">是</Tag> : <Tag color="red">否</Tag> },
-    { title: '排序', dataIndex: 'sort_order', key: 'sort_order' },
-    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', render: (v) => new Date(v).toLocaleString() },
+    { title: '排序', dataIndex: 'sort_order', key: 'sort_order', responsive: ['lg'] },
+    { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', responsive: ['md'], render: (v) => new Date(v).toLocaleString() },
     {
-      title: '操作', key: 'op', render: (_, r) => (
+      title: '操作', key: 'op', fixed: 'right', width: 240, render: (_, r) => (
         r.client_id === '' ? <Tag>共享默认（只读）</Tag> : <Space>
           <Button size="small" onClick={() => handleEdit(r)}>编辑</Button>
           <Button size="small" onClick={() => handleToggleActive(r)}>{r.is_active ? '停用' : '启用'}</Button>
@@ -129,28 +135,31 @@ export default function AdminPromptsPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h1 className="text-xl font-bold">提示词模板</h1>
-        <Space>
-          <Input.Search
-            placeholder="按名称搜索"
-            allowClear
-            style={{ width: 260 }}
-            onSearch={(v) => {
-              if (v === keyword && page === 1) { void reload(); return; }
-              setLoading(true); setKeyword(v); setPage(1);
-            }}
-          />
-          <Button type="primary" onClick={handleNew}>新建模板</Button>
-        </Space>
-      </div>
+      <PageHeader
+        title="提示词模板"
+        extra={
+          <>
+            <Input.Search
+              placeholder="按名称搜索"
+              allowClear
+              className="w-full sm:w-64"
+              onSearch={(v) => {
+                if (v === keyword && page === 1) { void reload(); return; }
+                setLoading(true); setKeyword(v); setPage(1);
+              }}
+            />
+            <Button type="primary" onClick={handleNew}>新建模板</Button>
+          </>
+        }
+      />
 
       <Table
         rowKey="id"
         columns={columns}
         dataSource={rows}
         loading={loading}
-        pagination={{ current: page, pageSize, total, showSizeChanger: true, showTotal: (t) => `共 ${t} 条`, onChange: (p, ps) => { setLoading(true); setPage(p); setPageSize(ps); } }}
+        scroll={{ x: 'max-content' }}
+        pagination={pagination}
       />
 
       <Modal
@@ -166,7 +175,7 @@ export default function AdminPromptsPage() {
         <Alert
           type="info"
           showIcon
-          style={{ marginBottom: 16 }}
+          className="mb-4"
           title="可用占位符"
           description={
             <div className="flex flex-wrap items-center gap-2">

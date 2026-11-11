@@ -4,6 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { Table, Space, Button, Input, Tag, Popconfirm, message, Form, Modal, InputNumber, Switch } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { adminRequest, adminMutation } from '../_components/admin-request';
+import { PageHeader } from '../_components/page-header';
+import { useResponsivePagination } from '../_components/responsive-pagination';
 
 interface Row {
   id: string;
@@ -16,35 +18,44 @@ interface Row {
 
 export default function AdminOutfitsPage() {
   const [rows, setRows] = useState<Row[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const pagination = useResponsivePagination({
+    current: page, pageSize, total,
+    onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+  });
   const [keyword, setKeyword] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<Row | null>(null);
   const [form] = Form.useForm();
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const url = `/api/admin/outfits?page=${page}&limit=${pageSize}&keyword=${encodeURIComponent(keyword)}`;
-      const json = await adminRequest<{ data: Row[]; total: number }>(url);
-      setRows(json.data ?? []);
-      setTotal(json.total ?? 0);
-    } catch {
-      message.error('加载失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [page, pageSize, keyword]);
+  const fetchData = useCallback(() => adminRequest<{ data: Row[]; total: number }>(
+    `/api/admin/outfits?page=${page}&limit=${pageSize}&keyword=${encodeURIComponent(keyword)}`,
+  ), [page, pageSize, keyword]);
 
   useEffect(() => {
-    // 延迟到下一个任务执行，避免在 effect 同步阶段触发 setState
-    const timer = setTimeout(() => { void fetchData(); }, 0);
-    return () => clearTimeout(timer);
+    let active = true;
+    fetchData()
+      .then((json) => {
+        if (!active) return;
+        setRows(json.data ?? []);
+        setTotal(json.total ?? 0);
+      })
+      .catch(() => { if (active) message.error('加载失败'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [fetchData]);
+
+  const reload = () => {
+    setLoading(true);
+    fetchData()
+      .then((json) => { setRows(json.data ?? []); setTotal(json.total ?? 0); })
+      .catch(() => message.error('加载失败'))
+      .finally(() => setLoading(false));
+  };
 
   const handleNew = () => {
     setEditing(null);
@@ -58,12 +69,12 @@ export default function AdminOutfitsPage() {
     setModalOpen(true);
   };
   const handleDelete = async (r: Row) => {
-    if (await adminMutation(`/api/admin/outfits?id=${r.id}`, 'DELETE')) { message.success('已删除'); void fetchData(); }
+    if (await adminMutation(`/api/admin/outfits?id=${r.id}`, 'DELETE')) { message.success('已删除'); reload(); }
   };
   const handleToggleActive = async (r: Row) => {
     if (await adminMutation(`/api/admin/outfits?id=${r.id}`, 'PATCH', { is_active: !r.is_active })) {
       message.success(r.is_active ? '已下架' : '已上架');
-      void fetchData();
+      reload();
     }
   };
   const handleSubmit = async () => {
@@ -76,17 +87,17 @@ export default function AdminOutfitsPage() {
     if (!saved) return;
     message.success(editing ? '已更新' : '已创建');
     setModalOpen(false);
-    void fetchData();
+    reload();
   };
 
   const columns: ColumnsType<Row> = [
-    { title: '名称', dataIndex: 'name_zh', key: 'name_zh' },
+    { title: '名称', dataIndex: 'name_zh', key: 'name_zh', ellipsis: true },
     { title: '分类', dataIndex: 'category', key: 'category', render: (v) => <Tag>{v}</Tag> },
-    { title: '排序', dataIndex: 'sort_order', key: 'sort_order' },
-    { title: '启用', dataIndex: 'is_active', key: 'is_active', render: (v) => v ? <Tag color="green">是</Tag> : <Tag color="red">否</Tag> },
-    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', render: (v) => new Date(v).toLocaleString() },
+    { title: '排序', dataIndex: 'sort_order', key: 'sort_order', responsive: ['lg'] },
+    { title: '启用', dataIndex: 'is_active', key: 'is_active', responsive: ['md'], render: (v) => v ? <Tag color="green">是</Tag> : <Tag color="red">否</Tag> },
+    { title: '创建时间', dataIndex: 'created_at', key: 'created_at', responsive: ['md'], render: (v) => new Date(v).toLocaleString() },
     {
-      title: '操作', key: 'op', render: (_, r) => (
+      title: '操作', key: 'op', fixed: 'right', width: 200, render: (_, r) => (
         <Space>
           <Button size="small" onClick={() => handleEdit(r)}>编辑</Button>
           <Button size="small" onClick={() => handleToggleActive(r)}>{r.is_active ? '下架' : '上架'}</Button>
@@ -100,25 +111,28 @@ export default function AdminOutfitsPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between gap-3">
-        <h1 className="text-xl font-bold">服装管理</h1>
-        <Space>
-          <Input.Search
-            placeholder="按名称/分类搜索"
-            allowClear
-            style={{ width: 260 }}
-            onSearch={(v) => { setKeyword(v); setPage(1); }}
-          />
-          <Button type="primary" onClick={handleNew}>新建服装</Button>
-        </Space>
-      </div>
+      <PageHeader
+        title="服装管理"
+        extra={
+          <>
+            <Input.Search
+              placeholder="按名称/分类搜索"
+              allowClear
+              className="w-full sm:w-64"
+              onSearch={(v) => { setKeyword(v); setPage(1); }}
+            />
+            <Button type="primary" onClick={handleNew}>新建服装</Button>
+          </>
+        }
+      />
 
       <Table
         rowKey="id"
         columns={columns}
         dataSource={rows}
         loading={loading}
-        pagination={{ current: page, pageSize, total, showSizeChanger: true, showTotal: (t) => `共 ${t} 条`, onChange: (p, ps) => { setPage(p); setPageSize(ps); } }}
+        scroll={{ x: 'max-content' }}
+        pagination={pagination}
       />
 
       <Modal

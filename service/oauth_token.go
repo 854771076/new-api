@@ -501,3 +501,14 @@ func ValidateOAuthAccessToken(raw string) (*model.User, string, error) {
 	}
 	return user, claims.Scope, nil
 }
+
+// OAuthAppFromAccessToken resolves the OAuth App that owns the given access
+// token. It reuses the same signature/issuer/expiry validation as
+// ValidateOAuthAccessToken but returns the app row instead of the user.
+func OAuthAppFromAccessToken(raw string) (*model.OAuthApp, error) {
+	claims, err := parseOAuthAccessClaims(raw)
+	if err != nil {
+		return nil, err
+	}
+	return model.GetOAuthAppByClientID(claims.ClientID)
+}

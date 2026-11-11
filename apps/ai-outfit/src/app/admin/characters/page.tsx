@@ -4,6 +4,8 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Table, Tag } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { adminRequest } from '../_components/admin-request';
+import { PageHeader } from '../_components/page-header';
+import { useResponsivePagination } from '../_components/responsive-pagination';
 
 interface CharacterRow {
   id: string;
@@ -15,11 +17,11 @@ interface CharacterRow {
 }
 
 const columns: ColumnsType<CharacterRow> = [
-  { title: '名称', dataIndex: 'name' },
-  { title: '用户 ID', dataIndex: 'user_id' },
-  { title: '描述', dataIndex: 'description' },
-  { title: '公开', dataIndex: 'is_public', render: (value: boolean) => <Tag>{value ? '是' : '否'}</Tag> },
-  { title: '创建时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString() },
+  { title: '名称', dataIndex: 'name', ellipsis: true },
+  { title: '用户 ID', dataIndex: 'user_id', ellipsis: true, responsive: ['md'] },
+  { title: '描述', dataIndex: 'description', ellipsis: true },
+  { title: '公开', dataIndex: 'is_public', responsive: ['md'], render: (value: boolean) => <Tag>{value ? '是' : '否'}</Tag> },
+  { title: '创建时间', dataIndex: 'created_at', responsive: ['lg'], render: (value: string) => new Date(value).toLocaleString() },
 ];
 
 export default function AdminCharactersPage() {
@@ -29,6 +31,10 @@ export default function AdminCharactersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const pagination = useResponsivePagination({
+    current: page, pageSize: 20, total,
+    onChange: (value) => { setLoading(true); setPage(value); },
+  });
   useEffect(() => {
     let active = true;
     adminRequest<{ data: CharacterRow[]; total: number }>(`/api/admin/characters?page=${page}&limit=20`)
@@ -44,10 +50,11 @@ export default function AdminCharactersPage() {
   }, [page, reloadKey]);
   return (
     <div>
-      <h1 className="mb-4 text-xl font-bold">人物管理（只读）</h1>
-      {error && <Alert type="error" showIcon title="加载失败" action={<Button onClick={() => { setLoading(true); setReloadKey((value) => value + 1); }}>重试</Button>} />}
+      <PageHeader title="人物管理（只读）" />
+      {error && <Alert type="error" showIcon className="mb-4" title="加载失败" action={<Button onClick={() => { setLoading(true); setReloadKey((value) => value + 1); }}>重试</Button>} />}
       <Table rowKey="id" columns={columns} dataSource={rows} loading={loading}
-        pagination={{ current: page, pageSize: 20, total, onChange: (value) => { setLoading(true); setPage(value); } }} />
+        scroll={{ x: 'max-content' }}
+        pagination={pagination} />
     </div>
   );
 }

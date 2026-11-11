@@ -97,6 +97,7 @@ export interface GatewayLogEntry {
   group_name?: string;
   request_id?: string;
   created_at?: string;
+  app_id?: number;
   [key: string]: unknown;
 }
 
@@ -216,6 +217,7 @@ export async function fetchGatewayLogs(
       request_type: typeof raw.type === 'number' ? String(raw.type) : undefined,
       group_name: typeof raw.group === 'string' ? raw.group : undefined,
       request_id: typeof raw.request_id === 'string' ? raw.request_id : undefined,
+      app_id: typeof raw.app_id === 'number' ? raw.app_id : undefined,
       // 网关字段名是 model_name，前端统一用 model
       model: typeof model === 'string' ? model : undefined,
       created_at:
@@ -246,6 +248,27 @@ export async function fetchGatewayLogs(
 }
 
 // ===== AI Relay（保留原有函数 + 重构复用 requestWithAuth） =====
+
+export interface GatewayModel {
+  id: string;
+  owned_by?: string;
+}
+
+/**
+ * GET /v1/models — 网关当前可用的模型目录（OAuth api:read 即可访问）。
+ */
+export async function listGatewayModels(opts?: FetchGatewayOptions): Promise<GatewayModel[]> {
+  const res = await requestWithAuth('GET', '/v1/models', { accessToken: opts?.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = z.object({
+    data: z.array(z.object({
+      id: z.string().trim().min(1).max(200),
+      owned_by: z.string().max(200).optional(),
+    }).passthrough()),
+  }).safeParse(await readJson(res));
+  if (!parsed.success) throw new GatewayError(502, 'Invalid gateway models response.', 'UPSTREAM_INVALID_RESPONSE');
+  return parsed.data.data.map((model) => ({ id: model.id, owned_by: model.owned_by }));
+}
 
 
 export interface ChatMessage {
@@ -306,6 +329,28 @@ export async function streamChatCompletion(
 }
 
 export async function chatCompletion(model: string, messages: ChatMessage[]): Promise<string> {
+  const res = await requestWithAuth('POST', '/v1/chat/completions', {
+    body: JSON.stringify({ model, stream: false, messages }),
+  });
+  if (!res.ok) throw await readGatewayError(res);
+  const json = (await res.json()) as { choices: { message: { content: string } }[] };
+  return json.choices[0]?.message?.content ?? '';
+}
+
+export type VisionContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export interface VisionMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string | VisionContentPart[];
+}
+
+/**
+ * 多模态视觉对话（非流式）。图片以 HTTPS signed URL 传入，遵循 OpenAI vision 消息结构，
+ * 由网关 /v1/chat/completions 透传给支持视觉的模型。
+ */
+export async function visionChatCompletion(model: string, messages: VisionMessage[]): Promise<string> {
   const res = await requestWithAuth('POST', '/v1/chat/completions', {
     body: JSON.stringify({ model, stream: false, messages }),
   });
@@ -423,6 +468,55 @@ export async function generateImage(input: ImageGenerateInput): Promise<ImageGen
       }
       form.append('image[]', new Blob([new Uint8Array(png)], { type: 'image/png' }), `reference-${index + offset + 1}.png`);
     }
+  }
+
+  const res = await requestWithAuth('POST', '/v1/images/edits', { body: form, accessToken: values.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = imageGenerateResponseSchema.safeParse(await readJson(res));
+  if (!parsed.success) throw new GatewayError(502, 'Invalid gateway image response.', 'UPSTREAM_INVALID_RESPONSE');
+  return { images: parsed.data.data, usage: parsed.data.usage, request_id: parsed.data.request_id };
+}
+
+export interface ReferenceImageInput {
+  model: string;
+  /** Frozen pipeline prompt (v1 product / v2 persona / v4 try-on); sent verbatim, no role prefix. */
+  prompt: string;
+  /** One or two HTTPS signed reference URLs in the exact order the prompt describes. */
+  reference_images: string[];
+  size?: string;
+  accessToken?: string;
+}
+
+/**
+ * 六阶段管线专用：把冻结英文提示词原样发送，参考图固定 1–2 张（人物标准化 1 张、
+ * 商品图 2 张、最终换装 2 张），不注入旧版多图角色前缀，避免覆盖 v1/v2/v4 约束。
+ */
+export async function generateReferenceImage(input: ReferenceImageInput): Promise<ImageGenerateResult> {
+  const parsedInput = z.object({
+    model: z.string().trim().min(1).max(200),
+    prompt: z.string().trim().min(1).max(MAX_IMAGE_PROMPT_LENGTH),
+    reference_images: z.array(imageUrlSchema).min(1).max(2),
+    size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).default('auto'),
+    accessToken: z.string().optional(),
+  }).strict().safeParse(input);
+  if (!parsedInput.success) throw new GatewayError(400, 'Invalid image edit request.', 'BAD_REQUEST_INVALID_BODY');
+  const values = parsedInput.data;
+
+  const form = new FormData();
+  form.set('model', values.model);
+  form.set('prompt', values.prompt);
+  form.set('size', values.size);
+  form.set('n', '1');
+  let uploadBytes = 0;
+  for (const url of values.reference_images) {
+    const png = await readGeneratedImage({ url }).catch(() => {
+      throw new GatewayError(502, 'Reference images could not be prepared.', 'UPSTREAM_REFERENCE_IMAGE_ERROR');
+    });
+    uploadBytes += png.byteLength;
+    if (!png.byteLength || png.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
+      throw new GatewayError(413, 'Reference images exceed the upload limit.', 'REFERENCE_IMAGES_TOO_LARGE');
+    }
+    form.append('image[]', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'reference.png');
   }
 
   const res = await requestWithAuth('POST', '/v1/images/edits', { body: form, accessToken: values.accessToken });

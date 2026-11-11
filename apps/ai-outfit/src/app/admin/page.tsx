@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Alert, Button, Card, Col, Row, Spin, Statistic, Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import { PageHeader } from './_components/page-header';
 
 interface RecentFailure {
   id: string;
@@ -67,45 +68,41 @@ export default function AdminOverviewPage() {
     setReloadKey((key) => key + 1);
   };
 
-  const primaryCards: StatCard[] = stats
+  const statCards: StatCard[] = stats
     ? [
         { key: 'total', title: '生成总数', value: stats.generations_total },
         { key: 'today', title: '今日生成', value: stats.generations_today },
         { key: 'rate', title: '成功率', value: stats.success_rate, suffix: '%', precision: 1 },
+        { key: 'succeeded', title: '生成成功数', value: stats.generations_succeeded },
         { key: 'failed', title: '失败数', value: stats.generations_failed },
-      ]
-    : [];
-
-  const secondaryCards: StatCard[] = stats
-    ? [
         { key: 'outfits', title: '在售服装', value: stats.outfits_active },
         { key: 'poses', title: '在售姿势', value: stats.poses_active },
         { key: 'characters', title: '人物总数', value: stats.characters_total },
-        { key: 'succeeded', title: '生成成功数', value: stats.generations_succeeded },
       ]
     : [];
 
   const failureColumns: ColumnsType<RecentFailure> = [
-    { title: '模型', dataIndex: 'model', key: 'model' },
-    { title: '错误', dataIndex: 'error', key: 'error', render: (value: string | null) => value ?? '-' },
+    { title: '模型', dataIndex: 'model', key: 'model', ellipsis: true },
+    { title: '错误', dataIndex: 'error', key: 'error', ellipsis: true, render: (value: string | null) => value ?? '-' },
     {
       title: '时间',
       dataIndex: 'created_at',
       key: 'created_at',
+      responsive: ['md'],
       render: (value: string) => new Date(value).toLocaleString(),
     },
   ];
 
   return (
     <div>
-      <h1 className="mb-4 text-xl font-bold">运营概览</h1>
+      <PageHeader title="运营概览" />
 
       {error && (
         <Alert
           type="error"
           showIcon
           className="mb-4"
-          message="统计数据加载失败"
+          title="统计数据加载失败"
           description={error}
           action={<Button size="small" onClick={handleRetry}>重试</Button>}
         />
@@ -115,18 +112,8 @@ export default function AdminOverviewPage() {
         {stats && (
           <>
             <Row gutter={[16, 16]}>
-              {primaryCards.map((card) => (
-                <Col key={card.key} xs={24} sm={12} lg={6}>
-                  <Card>
-                    <Statistic title={card.title} value={card.value} suffix={card.suffix} precision={card.precision} />
-                  </Card>
-                </Col>
-              ))}
-            </Row>
-
-            <Row gutter={[16, 16]} className="mt-4">
-              {secondaryCards.map((card) => (
-                <Col key={card.key} xs={24} sm={12} lg={6}>
+              {statCards.map((card) => (
+                <Col key={card.key} xs={12} sm={12} md={8} lg={6} xl={6} xxl={3}>
                   <Card>
                     <Statistic title={card.title} value={card.value} suffix={card.suffix} precision={card.precision} />
                   </Card>
@@ -141,6 +128,7 @@ export default function AdminOverviewPage() {
                 columns={failureColumns}
                 dataSource={stats.recent_failures}
                 pagination={false}
+                scroll={{ x: 'max-content' }}
                 onRow={() => ({
                   onClick: () => router.push('/admin/generations'),
                   style: { cursor: 'pointer' },

@@ -121,6 +121,7 @@ mock.module('@supabase/supabase-js', () => ({ createClient: () => database }));
 const { NextRequest } = await import('next/server');
 const { persistGatewaySession, getGatewayAccessToken } = await import('../gateway-session');
 const { fetchGatewayCatalog, fetchGatewayUserinfo, fetchGatewayCheckout, generateImage, GatewayError } = await import('../gateway');
+const { readGatewayError } = await import('../gateway-errors');
 const { POST: topup } = await import('../../app/api/gateway/topup/route');
 const { POST: checkout } = await import('../../app/api/gateway/checkout/route');
 const { POST: logout } = await import('../../app/api/auth/logout/route');
@@ -326,15 +327,53 @@ test.each([
   await expect(fetchGatewayCheckout({ kind: 'product', id: 1, payment_method: 'balance' })).rejects.toMatchObject({ status: 502 });
 });
 
-test('OAuth checkout errors preserve safe status/code but never arbitrary error bodies', async () => {
+test('OAuth checkout errors map to safe Chinese reasons and never leak arbitrary error bodies', async () => {
   await persistGatewaySession(session, user);
   jsonFetch({ error: 'checkout_failed', error_description: 'Insufficient balance' }, 400);
   const response = await checkout(request('/api/gateway/checkout', { kind: 'plan', id: 1, payment_method: 'balance' }));
-  expect(await response.json()).toEqual({ success: false, message: 'Insufficient balance.', data: null, error_code: 'UPSTREAM_CHECKOUT_FAILED' });
+  expect(await response.json()).toMatchObject({ success: false, error_code: 'UPSTREAM_CHECKOUT_FAILED' });
+
+  const cases = [
+    { desc: 'Waffo Pancake configuration is incomplete', code: 'UPSTREAM_PAYMENT_NOT_CONFIGURED' },
+    { desc: 'Top-up amount cannot be less than 10', code: 'UPSTREAM_CHECKOUT_AMOUNT_INVALID' },
+    { desc: 'Payment, redemption, subscription features are disabled until compliance confirmed', code: 'UPSTREAM_PAYMENT_DISABLED' },
+    { desc: 'product is not enabled', code: 'UPSTREAM_CHECKOUT_UNAVAILABLE' },
+  ];
+  for (const c of cases) {
+    jsonFetch({ error: 'checkout_failed', error_description: c.desc }, 400);
+    await expect(fetchGatewayCheckout({ kind: 'product', id: 1, payment_method: 'waffo_pancake' }))
+      .rejects.toMatchObject({ status: 400, code: c.code });
+  }
+
+  // Unrecognized descriptions fall back to a generic message and never surface raw upstream text.
   jsonFetch({ error: 'checkout_failed', error_description: 'secret-token-must-not-leak' }, 400);
-  await expect(fetchGatewayCheckout({ kind: 'plan', id: 1, payment_method: 'balance' })).rejects.not.toThrow('secret-token-must-not-leak');
+  const leaked = await fetchGatewayCheckout({ kind: 'plan', id: 1, payment_method: 'balance' }).catch(e => e);
+  expect(leaked).toBeInstanceOf(GatewayError);
+  expect(leaked.message).not.toContain('secret-token-must-not-leak');
   globalThis.fetch = mock(async () => new Response('<html>secret credentials</html>', { status: 502 }));
   await expect(fetchGatewayCheckout({ kind: 'plan', id: 1, payment_method: 'balance' })).rejects.toBeInstanceOf(GatewayError);
+});
+
+test('relay nested errors from /v1/image generation surface a readable Chinese reason', async () => {
+  const relay = await readGatewayError(new Response(
+    JSON.stringify({ error: { code: 'model_not_found', message: 'No available channel for model gpt-image-2 under group', type: 'new_api_error' } }),
+    { status: 404, headers: { 'Content-Type': 'application/json' } },
+  ));
+  expect(relay).toMatchObject({ status: 404, code: 'UPSTREAM_RELAY_MODEL_NOT_FOUND' });
+  // The raw upstream message (which may carry internal request ids) is not forwarded.
+  expect(relay.message).not.toContain('No available channel');
+
+  const unknown = await readGatewayError(new Response(
+    JSON.stringify({ error: { code: 'some_unknown_relay_code', message: 'internal host https://10.0.0.5 detail' } }),
+    { status: 500, headers: { 'Content-Type': 'application/json' } },
+  ));
+  expect(unknown).toBeInstanceOf(GatewayError);
+  expect(unknown.message).not.toContain('10.0.0.5');
+
+  // Non-JSON gateway error pages fall back to a safe status-based message, never the HTML body.
+  const html = await readGatewayError(new Response('<html>secret credentials</html>', { status: 502 }));
+  expect(html).toBeInstanceOf(GatewayError);
+  expect(html.message).not.toContain('secret credentials');
 });
 
 test('catalog unwraps plan wrappers and account responses explicitly include app quota', async () => {
@@ -351,18 +390,24 @@ test('catalog unwraps plan wrappers and account responses explicitly include app
   expect(await fetchGatewayUserinfo()).toMatchObject({ app_quota: 4, app_used_quota: 2, quota: 100 });
 });
 
-test('logs BFF validates pagination and only returns whitelisted usage fields', async () => {
+test('logs BFF validates pagination, maps gateway app_id, and never sends a client app filter', async () => {
   const invalid = await logs(new NextRequest('https://outfit.example/api/gateway/logs?page_size=101'));
   expect(invalid.status).toBe(400);
   expect(authCalls).toBe(0);
   await persistGatewaySession(session, user);
-  jsonFetch({ items: [{ id: 1, model_name: 'outfit', quota: 11, prompt_tokens: 0, completion_tokens: 7, created_at: 0,
-    token: 'secret provider token', content: 'secret upstream diagnostics' }], total: 1 });
-  const response = await logs(new NextRequest('https://outfit.example/api/gateway/logs'));
+  const upstream = jsonFetch({ items: [{ id: 1, model_name: 'outfit', quota: 11, prompt_tokens: 0, completion_tokens: 7, created_at: 0,
+    app_id: 7, token: 'secret provider token', content: 'secret upstream diagnostics' }], total: 1 });
+  const response = await logs(new NextRequest('https://outfit.example/api/gateway/logs?app_id=99'));
   const body = await response.json();
   expect(body).toMatchObject({ success: true, message: '', error_code: null, data: { total: 1, page: 1, page_size: 20 } });
-  expect(body.data.data[0]).toEqual({ id: 1, model: 'outfit', quota: 11, prompt_tokens: 0, completion_tokens: 7, created_at: '1970-01-01T00:00:00.000Z' });
+  expect(body.data.data[0]).toEqual({ id: 1, model: 'outfit', quota: 11, prompt_tokens: 0, completion_tokens: 7,
+    created_at: '1970-01-01T00:00:00.000Z', app_id: 7 });
   expect(JSON.stringify(body)).not.toContain('secret');
+  // App scoping is enforced server-side from the OAuth token; the BFF forwards
+  // only pagination and drops any client-supplied app_id.
+  const requestUrl = new URL(upstream.mock.calls[0][0]);
+  expect(requestUrl.pathname).toBe('/oauth/logs');
+  expect(requestUrl.searchParams.get('app_id')).toBeNull();
 });
 
 test('simultaneous refreshes share the database lease and persist only the rotated pair', async () => {

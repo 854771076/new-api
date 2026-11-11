@@ -25,7 +25,7 @@ export async function GET() {
     .from('ai_models')
     .select('id, model_id, display_name, provider, usage, default_size, default_quality, is_default')
     .eq('is_active', true)
-    .eq('usage', 'outfit')
+    .eq('usage', 'image')
     .in('client_id', [currentClientId, ''])
     .order('sort_order', { ascending: true }).order('id', { ascending: true });
 

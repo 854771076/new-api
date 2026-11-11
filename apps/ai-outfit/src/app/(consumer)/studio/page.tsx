@@ -41,10 +41,10 @@ export default async function StudioPage({
     .order('created_at', { ascending: false })
     .limit(LIMIT);
 
-  // 2. 服装
+  // 2. 服装：RLS 已并集返回官方服装 + 当前用户自己的个人服装（source 区分归属）。
   let outfitQuery = supabase
     .from('outfits')
-    .select('id, name_zh, name_en, description_zh, description_en, category, bucket, thumb_path')
+    .select('id, name_zh, name_en, description_zh, description_en, category, bucket, thumb_path, source, parse_status')
     .eq('client_id', config.gatewayClientId)
     .eq('is_active', true);
   if (outfitCat) outfitQuery = outfitQuery.eq('category', outfitCat);
@@ -75,15 +75,19 @@ export default async function StudioPage({
   const { data: poses } = await poseQuery.order('sort_order', { ascending: true }).order('id', { ascending: true }).limit(LIMIT);
 
   // 4. 批量 signed URL（人物优先用封面图，减少列表流量）
+  // 服装按行内 bucket 分组签名：官方在 media-official，个人服装在 media-user。
   const charPaths = (characters ?? []).map((c) => c.cover_path?.trim() || c.image_path);
-  const outfitPaths = (outfits ?? []).map((o) => o.thumb_path);
   const posePaths = (poses ?? []).map((p) => p.thumb_path);
+  const officialOutfitPaths = (outfits ?? []).filter((o) => o.bucket === 'media-official').map((o) => o.thumb_path);
+  const personalOutfitPaths = (outfits ?? []).filter((o) => o.bucket !== 'media-official').map((o) => o.thumb_path);
 
-  const [charUrls, outfitUrls, poseUrls] = await Promise.all([
+  const [charUrls, officialOutfitUrls, personalOutfitUrls, poseUrls] = await Promise.all([
     getSignedUrls('media-user', charPaths),
-    getSignedUrls('media-official', outfitPaths),
+    getSignedUrls('media-official', officialOutfitPaths),
+    getSignedUrls('media-user', personalOutfitPaths),
     getSignedUrls('media-official', posePaths),
   ]);
+  const outfitUrls: Record<string, string> = { ...officialOutfitUrls, ...personalOutfitUrls };
 
   // 5. category/system/angle 列表（供筛选 chips）
   const [catRows, sysRows, angleRows] = await Promise.all([
@@ -101,7 +105,7 @@ export default async function StudioPage({
     .from('ai_models')
     .select('id, model_id, display_name, provider, is_default')
     .eq('is_active', true)
-    .eq('usage', 'outfit')
+    .eq('usage', 'image')
     .in('client_id', [currentClientId, ''])
     .order('sort_order', { ascending: true }).order('id', { ascending: true });
   const models = modelError ? [] : (modelRows ?? []).map((m) => ({
@@ -128,6 +132,8 @@ export default async function StudioPage({
       outfits={(outfits ?? []).map((o) => ({
         id: o.id, name: o.name_zh ?? o.name_en ?? '未命名',
         subtitle: o.category ?? undefined, signedUrl: outfitUrls[o.thumb_path],
+        source: (o.source === 'user' ? 'user' : 'official') as 'official' | 'user',
+        parseStatus: o.parse_status as 'pending' | 'parsing' | 'ready' | 'failed',
       }))}
       poses={(poses ?? []).map((p) => ({
         id: p.id, name: p.name_zh ?? '未命名',

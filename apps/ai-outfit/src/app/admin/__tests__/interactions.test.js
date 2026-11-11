@@ -67,7 +67,7 @@ const settle = async (predicate) => {
 };
 const baseRow = { id: 'bb2ed7f9-b315-447c-9389-fb40b2ca13e4', client_id: 'nac_outfit', is_active: true, is_default: false, usage: 'outfit', sort_order: 0, created_at: '2026-11-10T00:00:00Z', updated_at: '2026-11-10T00:00:00Z' };
 const cases = [
-  { Page: Models, path: 'ai_models', row: { ...baseRow, model_id: 'safe-model', display_name: 'Preserved model' }, field: 'display_name', value: 'Preserved model' },
+  { Page: Models, path: 'ai_models', row: { ...baseRow, usage: 'image', model_id: 'safe-model', display_name: 'Preserved model' }, field: 'display_name', value: 'Preserved model' },
   { Page: Prompts, path: 'prompt_templates', row: { ...baseRow, name: 'Preserved prompt', template: 'Use {{outfits}}' }, field: 'name', value: 'Preserved prompt' },
   { Page: Outfits, path: 'outfits', row: { ...baseRow, name_zh: 'Preserved outfit', category: 'casual', provider_id: 'provider', bucket: 'media-official', thumb_path: 'nac_outfit/thumb.png', preview_path: 'nac_outfit/preview.png' }, field: 'name_zh', value: 'Preserved outfit' },
 ];
@@ -122,6 +122,9 @@ test('repeating an unchanged model search reloads instead of leaving a spinner',
 
 test('admin navigation uses implemented links and removes local plans editing', async () => {
   await mount(Layout, { role: 'admin', children: 'Content' });
+  const menuButton = document.querySelector('button[aria-label="打开导航菜单"]');
+  expect(menuButton).not.toBeNull();
+  await click(menuButton);
   for (const path of ['/admin', '/admin/outfits', '/admin/poses', '/admin/characters', '/admin/generations', '/admin/models', '/admin/prompts']) expect(document.querySelector(`a[href="${path}"]`)).not.toBeNull();
   expect(document.querySelector('a[href="/admin/plans"]')).toBeNull();
 });

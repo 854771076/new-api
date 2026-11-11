@@ -7,16 +7,17 @@ import { z } from 'zod';
 const text = z.string().trim().min(1).max(200);
 const optionalText = z.string().max(10000).nullable().optional();
 const flags = { is_active: z.boolean().optional(), sort_order: z.number().int().min(0).max(2147483647).optional() };
-const usage = z.enum(['outfit', 'portrait', 'general']);
+const modelUsage = z.enum(['image', 'vision']);
+const promptUsage = z.enum(['outfit', 'portrait', 'general']);
 const modelSchema = z.object({
   model_id: text, display_name: text, provider: z.string().max(200).nullable().optional(),
-  usage: usage.optional(), description_zh: optionalText,
+  usage: modelUsage.optional(), description_zh: optionalText,
   default_size: z.string().max(100).nullable().optional(), default_quality: z.string().max(100).nullable().optional(),
   is_default: z.boolean().optional(), ...flags,
 }).strict();
 const promptSchema = z.object({
   name: text, template: z.string().trim().min(1).max(50000), negative_prompt: optionalText,
-  usage: usage.optional(), is_default: z.boolean().optional(), ...flags,
+  usage: promptUsage.optional(), is_default: z.boolean().optional(), ...flags,
 }).strict();
 const outfitSchema = z.object({
   name_zh: text, name_en: z.string().max(200).nullable().optional(), category: text,

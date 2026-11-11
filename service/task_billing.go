@@ -86,6 +86,7 @@ func LogTaskConsumption(c *gin.Context, info *relaycommon.RelayInfo, task *model
 		Content:   logContent,
 		TokenId:   info.TokenId,
 		Group:     info.UsingGroup,
+		AppId:     info.AppId,
 		Other:     other,
 	})
 	model.UpdateUserUsedQuotaAndRequestCount(info.UserId, info.PriceData.Quota)
@@ -302,6 +303,7 @@ func RefundTaskQuota(ctx context.Context, task *model.Task, reason string) bool 
 		ModelName: taskModelName(task),
 		Quota:     quota,
 		TokenId:   task.PrivateData.TokenId,
+		AppId:     task.AppId,
 		Group:     task.Group,
 		Other:     other,
 	})
@@ -395,6 +397,7 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 		ModelName: taskModelName(task),
 		Quota:     logQuota,
 		TokenId:   task.PrivateData.TokenId,
+		AppId:     task.AppId,
 		Group:     task.Group,
 		Other:     other,
 		NodeName:  task.PrivateData.NodeName,

@@ -12,6 +12,8 @@ type Props = {
   disabled?: boolean;
   compact?: boolean;
   variant?: 'card' | 'tile';
+  /** 左上角归属/状态角标（如「我的」），与右上角「已选」不冲突。 */
+  badge?: React.ReactNode;
 };
 
 export function MediaCard({
@@ -24,6 +26,7 @@ export function MediaCard({
   disabled = false,
   compact,
   variant = 'card',
+  badge,
 }: Props) {
   const interactive = Boolean(onSelect);
   const Container = interactive ? 'button' : 'div';
@@ -62,6 +65,9 @@ export function MediaCard({
             <span className="sr-only">暂无图片</span>
           </span>
         )}
+        {badge ? (
+          <span className="badge badge-ghost absolute left-2 top-2" aria-hidden="true">{badge}</span>
+        ) : null}
         {selected ? (
           <span className="badge badge-primary absolute right-2 top-2 gap-1" aria-hidden="true">
             <Check size={14} />已选

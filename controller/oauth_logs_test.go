@@ -54,11 +54,21 @@ func setupOAuthLogsTestEnv(t *testing.T) *oauthExtTestEnv {
 	require.NoError(t, app.SetScopes([]string{"openid", "profile", "email", "api:read", "api:write"}))
 	require.NoError(t, db.Create(app).Error)
 
+	otherApp := &model.OAuthApp{
+		Name: "OAuth Logs Other App", ClientID: "logs-client-other",
+		ClientSecretHash: model.OAuthAppSecretHash("other-secret"),
+		Status:           model.OAuthAppStatusEnabled,
+		CreatedBy:        user.Id,
+	}
+	require.NoError(t, otherApp.SetRedirectURIs([]string{"https://other.example.com/callback"}))
+	require.NoError(t, otherApp.SetScopes([]string{"openid", "profile", "email", "api:read", "api:write"}))
+	require.NoError(t, db.Create(otherApp).Error)
+
 	// Seed a few log rows for this user.
 	now := common.GetTimestamp()
 	logs := []*model.Log{
 		{
-			UserId: user.Id, CreatedAt: now - 100, Username: user.Username,
+			UserId: user.Id, AppId: app.Id, CreatedAt: now - 100, Username: user.Username,
 			TokenName: "prod-token", ModelName: "gpt-4o-mini",
 			Quota: 10000, PromptTokens: 500, CompletionTokens: 300,
 			UseTime: 1500, ChannelId: 1, ChannelName: "openai",
@@ -68,7 +78,7 @@ func setupOAuthLogsTestEnv(t *testing.T) *oauthExtTestEnv {
 			Ip:      "1.2.3.4",                                  // sensitive
 		},
 		{
-			UserId: user.Id, CreatedAt: now - 50, Username: user.Username,
+			UserId: user.Id, AppId: app.Id, CreatedAt: now - 50, Username: user.Username,
 			TokenName: "prod-token", ModelName: "gpt-4o",
 			Quota: 20000, PromptTokens: 800, CompletionTokens: 500,
 			UseTime: 3000, ChannelId: 1, ChannelName: "openai",
@@ -76,6 +86,22 @@ func setupOAuthLogsTestEnv(t *testing.T) *oauthExtTestEnv {
 			Content: "PROMPT: Another request\nRESPONSE: Some other answer!",
 			Other:   `{"upstream_api_key":"sk-ANOTHERKEY999"}`,
 			Ip:      "5.6.7.8",
+		},
+		// Belongs to another app: must never appear in this app's OAuth logs.
+		{
+			UserId: user.Id, AppId: otherApp.Id, CreatedAt: now - 10, Username: user.Username,
+			TokenName: "other-token", ModelName: "gpt-4o",
+			Quota: 30000, PromptTokens: 100, CompletionTokens: 100,
+			UseTime: 900, ChannelId: 1, ChannelName: "openai",
+			Group: user.Group, RequestId: "req-003",
+		},
+		// Legacy row without an app: must not leak into any app-scoped feed.
+		{
+			UserId: user.Id, AppId: 0, CreatedAt: now - 5, Username: user.Username,
+			TokenName: "legacy-token", ModelName: "gpt-3.5",
+			Quota: 40000, PromptTokens: 10, CompletionTokens: 10,
+			UseTime: 100, ChannelId: 1, ChannelName: "openai",
+			Group: user.Group, RequestId: "req-004",
 		},
 	}
 	for _, l := range logs {
@@ -149,7 +175,7 @@ func TestOAuthLogsList_WhitelistNoSensitive(t *testing.T) {
 		// Whitelist fields must be present (per sanitizeOAuthLog).
 		for _, field := range []string{"id", "created_at", "username", "token_name",
 			"model_name", "quota", "prompt_tokens", "completion_tokens",
-			"use_time", "channel_name", "group", "request_id"} {
+			"use_time", "channel_name", "group", "request_id", "app_id"} {
 			_, present := item[field]
 			assert.True(t, present, "whitelist field %s must be present", field)
 		}
@@ -160,4 +186,63 @@ func TestOAuthLogsList_WhitelistNoSensitive(t *testing.T) {
 			assert.False(t, present, "sensitive/internal field %s must be excluded", field)
 		}
 	}
+}
+
+func TestOAuthLogsList_ScopedToTokenApp(t *testing.T) {
+	env := setupOAuthLogsTestEnv(t)
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/oauth/logs", nil)
+	c.Request.Header.Set("Authorization", "Bearer "+env.token)
+
+	OAuthLogsList(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var body struct {
+		Total int64 `json:"total"`
+		Items []struct {
+			RequestId string `json:"request_id"`
+			AppId     int    `json:"app_id"`
+		} `json:"items"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(recorder.Body.String(), &body))
+
+	// Only the two rows owned by the token's app: other-app and legacy rows
+	// (app_id 0) must never leak.
+	assert.Equal(t, int64(2), body.Total)
+	require.Len(t, body.Items, 2)
+	for _, item := range body.Items {
+		assert.Equal(t, env.app.Id, item.AppId)
+		assert.NotContains(t, []string{"req-003", "req-004"}, item.RequestId)
+	}
+}
+
+func TestOAuthLogsList_OtherAppTokenIsolated(t *testing.T) {
+	env := setupOAuthLogsTestEnv(t)
+	otherToken, _, err := service.IssueOAuthAccessToken(env.user.Id, "logs-client-other", "api:read")
+	require.NoError(t, err)
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/oauth/logs", nil)
+	c.Request.Header.Set("Authorization", "Bearer "+otherToken)
+
+	OAuthLogsList(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var body struct {
+		Total int64 `json:"total"`
+		Items []struct {
+			RequestId string `json:"request_id"`
+			AppId     int    `json:"app_id"`
+		} `json:"items"`
+	}
+	require.NoError(t, common.UnmarshalJsonStr(recorder.Body.String(), &body))
+
+	assert.Equal(t, int64(1), body.Total)
+	require.Len(t, body.Items, 1)
+	assert.Equal(t, "req-003", body.Items[0].RequestId)
+	assert.NotEqual(t, env.app.Id, body.Items[0].AppId)
 }

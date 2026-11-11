@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { adminRequest } from '../_components/admin-request';
+import { PageHeader } from '../_components/page-header';
+import { useResponsivePagination } from '../_components/responsive-pagination';
 import { Alert, Button, Descriptions, Drawer, Image as AntImage, Spin, Table, Tag, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
@@ -48,6 +50,10 @@ export default function AdminGenerationsPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const pagination = useResponsivePagination({
+    current: page, pageSize, total,
+    onChange: (nextPage, nextPageSize) => { setLoading(true); setPage(nextPage); setPageSize(nextPageSize); },
+  });
   const [detail, setDetail] = useState<GenerationRow | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
@@ -121,9 +127,10 @@ export default function AdminGenerationsPage() {
       dataIndex: 'created_at',
       key: 'created_at',
       width: 180,
+      responsive: ['md'],
       render: (value: string) => new Date(value).toLocaleString(),
     },
-    { title: '模型', dataIndex: 'model', key: 'model', width: 160 },
+    { title: '模型', dataIndex: 'model', key: 'model', width: 160, ellipsis: true },
     {
       title: '状态',
       dataIndex: 'status',
@@ -150,27 +157,15 @@ export default function AdminGenerationsPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold">生成记录</h1>
-      </div>
+      <PageHeader title="生成记录" />
 
       <Table
         rowKey="id"
         columns={columns}
         dataSource={rows}
         loading={loading}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          showTotal: (count) => `共 ${count} 条`,
-          onChange: (nextPage, nextPageSize) => {
-            setLoading(true);
-            setPage(nextPage);
-            setPageSize(nextPageSize);
-          },
-        }}
+        scroll={{ x: 'max-content' }}
+        pagination={pagination}
       />
 
       <Drawer
@@ -241,7 +236,7 @@ export default function AdminGenerationsPage() {
 
             <div>
               <Typography.Text strong>Prompt</Typography.Text>
-              <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-slate-100 p-3 text-xs">
+              <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-gray-50 p-3 text-xs">
                 {detail.prompt || '-'}
               </pre>
             </div>

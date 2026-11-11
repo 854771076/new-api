@@ -20,7 +20,31 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   return (
     <ConfigProvider
       locale={zhCN}
-      theme={{ token: { borderRadius: 8, colorPrimary: '#6366f1' } }}
+      theme={{
+        token: {
+          borderRadius: 8,
+          colorPrimary: '#6366f1',
+          colorBgLayout: '#f5f6fa',
+          colorBgContainer: '#ffffff',
+          colorBorderSecondary: '#e8eaf0',
+        },
+        components: {
+          Layout: {
+            headerBg: '#ffffff',
+            headerPadding: 24,
+            siderBg: '#ffffff',
+            bodyBg: '#f5f6fa',
+          },
+          Menu: {
+            itemBorderRadius: 8,
+            itemMarginInline: 8,
+          },
+          Table: {
+            headerBg: '#f8f9fc',
+            cellPaddingBlock: 12,
+          },
+        },
+      }}
     >
       <AntdApp>
         <AdminLayoutInner role={check.role}>{children}</AdminLayoutInner>
