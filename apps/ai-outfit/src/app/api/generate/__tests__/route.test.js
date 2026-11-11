@@ -55,8 +55,8 @@ mock.module('@/lib/gateway-session', () => ({ getGatewayAccessToken: async () =>
 mock.module('@/lib/tryon/models', () => ({
   resolveTryonModel: mock(async (_db, usage) =>
     (usage === 'image'
-      ? { model: 'img-model', defaultSize: '1024x1536' }
-      : { model: 'vision-model', defaultSize: null })),
+      ? { model: 'img-model', defaultSize: '1024x1536', priceQuota: 15000 }
+      : { model: 'vision-model', defaultSize: null, priceQuota: 3000 })),
 }));
 mock.module('@/lib/tryon/orchestrate', () => ({
   runTryon: mock(async (_db, order) => {
@@ -133,7 +133,7 @@ test('happy path freezes quote/snapshots and creates one succeeded task', async 
   const insert = inserts.find((i) => i.table === 'outfit_generations');
   expect(insert.input).toMatchObject({
     stage: 'quoted', idempotency_key: 'stable-key-123', pipeline_version: 'tryon-v1',
-    parse_fee_quota: 0, tryon_fee_quota: 0,
+    parse_fee_quota: 0, tryon_fee_quota: 15000,
   });
   expect(insert.input.quote).toMatchObject({ item_count: 1, unparsed_garment_ids: [] });
   expect(runTryonCalls).toHaveLength(1);

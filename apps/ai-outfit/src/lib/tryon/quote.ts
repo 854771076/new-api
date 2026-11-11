@@ -1,7 +1,7 @@
 // lib/tryon/quote.ts — 提交前报价：本次未解析个人服装的解析费 + 一次换装制作费。
-// 单价来自 constants（默认 0）；网关 relay 的实际模型用量计费不受这里影响。
+// 单价来自 ai_models.price_quota（换装费 = 生图模型单价，解析费 = 视觉模型单价 × 未解析件数）；
+// 网关 relay 仍按模型实际用量对 App 钱包计费，这里只是提交前展示与记账字段。
 import 'server-only';
-import { GARMENT_PARSE_FEE_QUOTA, TRYON_FEE_QUOTA } from '@/lib/constants';
 import type { GenerationQuote } from '@/lib/types';
 import type { WearCandidate } from './wear';
 
@@ -15,13 +15,16 @@ export function needsParsing(garment: WearCandidate): boolean {
  * 仅把本次未解析的个人服装计入解析费用，再加一次换装制作费。
  * 同一输入在任何时刻得到相同报价，保证「提交时重新校验价格」与提交前展示一致。
  */
-export function buildQuote(candidates: WearCandidate[]): GenerationQuote {
+export function buildQuote(
+  candidates: WearCandidate[],
+  pricing: { parsePrice: number; tryonPrice: number },
+): GenerationQuote {
   const unparsed = candidates.filter(needsParsing);
-  const parseFee = GARMENT_PARSE_FEE_QUOTA * unparsed.length;
-  const total = parseFee + TRYON_FEE_QUOTA;
+  const parseFee = pricing.parsePrice * unparsed.length;
+  const total = parseFee + pricing.tryonPrice;
   return {
     parse_fee_quota: parseFee,
-    tryon_fee_quota: TRYON_FEE_QUOTA,
+    tryon_fee_quota: pricing.tryonPrice,
     total_quota: total,
     unparsed_garment_ids: unparsed.map((g) => g.id),
     item_count: candidates.length,

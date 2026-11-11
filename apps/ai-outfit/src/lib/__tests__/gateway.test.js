@@ -376,6 +376,41 @@ test('relay nested errors from /v1/image generation surface a readable Chinese r
   expect(html.message).not.toContain('secret credentials');
 });
 
+test('relay codes with corrected keys and empty/null codes map by reason or status', async () => {
+  const cases = [
+    { code: 'channel:no_available_key', codeToken: 'UPSTREAM_RELAY_CHANNEL:NO_AVAILABLE_KEY', hint: '模型渠道暂不可用' },
+    { code: 'channel:response_time_exceeded', codeToken: 'UPSTREAM_RELAY_CHANNEL:RESPONSE_TIME_EXCEEDED', hint: '模型响应超时' },
+    { code: 'insufficient_user_quota', codeToken: 'UPSTREAM_RELAY_INSUFFICIENT_USER_QUOTA', hint: '网关额度不足' },
+    { code: 'model_price_error', codeToken: 'UPSTREAM_RELAY_MODEL_PRICE_ERROR', hint: '模型价格配置有误' },
+  ];
+  for (const c of cases) {
+    const err = await readGatewayError(new Response(
+      JSON.stringify({ error: { code: c.code, message: 'internal 10.0.0.5 detail', type: 'new_api_error' } }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } },
+    ));
+    expect(err).toMatchObject({ status: 400, code: c.codeToken });
+    expect(err.message).toContain(c.hint);
+    expect(err.message).not.toContain('10.0.0.5');
+  }
+
+  // code: null (upstream passthrough) must not be mistaken for a relay error.
+  const nullCode = await readGatewayError(new Response(
+    JSON.stringify({ error: { code: null, message: 'internal host detail', type: 'new_api_error' } }),
+    { status: 400, headers: { 'Content-Type': 'application/json' } },
+  ));
+  expect(nullCode).toBeInstanceOf(GatewayError);
+  expect(nullCode.message).toBe('请求参数有误，请检查后重试。');
+  expect(nullCode.message).not.toContain('生成请求被网关拒绝');
+
+  // Unknown 4xx falls back to an explicit HTTP status in the message.
+  const unknown4xx = await readGatewayError(new Response('{}', { status: 422 }));
+  expect(unknown4xx.message).toContain('HTTP 422');
+
+  // 413 maps to an oversized-upload hint.
+  const tooLarge = await readGatewayError(new Response('<html>413</html>', { status: 413 }));
+  expect(tooLarge.message).toContain('素材过大');
+});
+
 test('catalog unwraps plan wrappers and account responses explicitly include app quota', async () => {
   await persistGatewaySession(session, user);
   const plan = { id: 1, app_id: 3, title: 'Outfit plan', price_amount: 1, currency: 'USD', duration_unit: 'month', duration_value: 1, total_amount: 0, allow_balance_pay: true, max_purchase_per_user: 0 };

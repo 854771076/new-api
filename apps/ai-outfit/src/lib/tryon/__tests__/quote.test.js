@@ -32,15 +32,15 @@ test('a ready personal garment missing its product path is treated as unparsed',
 });
 
 test('quote counts only unparsed personal garments and records item count', () => {
-  const quote = buildQuote([official('o1'), readyPersonal('r1'), pendingPersonal('p1'), failedPersonal('f1')]);
+  const quote = buildQuote([official('o1'), readyPersonal('r1'), pendingPersonal('p1'), failedPersonal('f1')], { parsePrice: 3000, tryonPrice: 15000 });
   expect(quote.item_count).toBe(4);
   expect(quote.unparsed_garment_ids).toEqual(['p1', 'f1']);
-  // Default configured unit fees are zero; structure stays stable when operators raise them.
-  expect(quote).toMatchObject({ parse_fee_quota: 0, tryon_fee_quota: 0, total_quota: 0 });
+  // 解析费 = 视觉模型单价 × 未解析件数，换装费 = 生图模型单价。
+  expect(quote).toMatchObject({ parse_fee_quota: 6000, tryon_fee_quota: 15000, total_quota: 21000 });
 });
 
 test('all-official or all-ready selections carry no parse fee', () => {
-  const quote = buildQuote([official('o1'), readyPersonal('r1')]);
+  const quote = buildQuote([official('o1'), readyPersonal('r1')], { parsePrice: 3000, tryonPrice: 15000 });
   expect(quote.unparsed_garment_ids).toEqual([]);
   expect(quote.parse_fee_quota).toBe(0);
 });

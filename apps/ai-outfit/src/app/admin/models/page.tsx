@@ -17,6 +17,7 @@ interface Row {
   description_zh: string | null;
   default_size: string | null;
   default_quality: string | null;
+  price_quota: number;
   is_active: boolean;
   is_default: boolean;
   sort_order: number;
@@ -107,7 +108,7 @@ export default function AdminModelsPage() {
     setEditing(null);
     setManualModelId(false);
     form.resetFields();
-    form.setFieldsValue({ usage: 'image', is_active: true, sort_order: 0 });
+    form.setFieldsValue({ usage: 'image', is_active: true, sort_order: 0, price_quota: 0 });
     setModalOpen(true);
   };
   const handleEdit = (r: Row) => {
@@ -151,6 +152,7 @@ export default function AdminModelsPage() {
       return <Tag color={meta.color}>{meta.label}</Tag>;
     } },
     { title: '默认尺寸', dataIndex: 'default_size', key: 'default_size', responsive: ['lg'], render: (v) => v ?? '-' },
+    { title: '单价 (quota)', dataIndex: 'price_quota', key: 'price_quota', responsive: ['lg'], render: (v: number) => v ?? 0 },
     { title: '启用', dataIndex: 'is_active', key: 'is_active', render: (v) => v ? <Tag color="green">是</Tag> : <Tag color="red">否</Tag> },
     { title: '默认', dataIndex: 'is_default', key: 'is_default', responsive: ['md'], render: (v) => v ? <Tag color="blue">默认</Tag> : '-' },
     { title: '排序', dataIndex: 'sort_order', key: 'sort_order', responsive: ['lg'] },
@@ -251,6 +253,9 @@ export default function AdminModelsPage() {
           </Form.Item>
           <Form.Item label="默认质量" name="default_quality">
             <Input placeholder="例如 high" />
+          </Form.Item>
+          <Form.Item label="单价 (quota)" name="price_quota" tooltip="换装费 = 生图模型单价；解析费 = 视觉模型单价 × 未解析件数">
+            <InputNumber min={0} className="w-full" />
           </Form.Item>
           <Form.Item label="排序" name="sort_order">
             <InputNumber min={0} />

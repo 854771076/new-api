@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "bun test --parallel=1 --path-ignore-patterns='**/*.browser.test.mjs'"
   },
   "dependencies": {
     "@ant-design/icons": "^6.3.4",

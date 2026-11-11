@@ -8,6 +8,7 @@ import { GatewayError } from '@/lib/gateway-errors';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
 import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
 import { buildQuote } from '@/lib/tryon/quote';
+import { resolveTryonModel } from '@/lib/tryon/models';
 import { QUOTA_PER_CREDIT } from '@/lib/constants';
 import type { WearCandidate } from '@/lib/tryon/wear';
 import { z } from 'zod';
@@ -50,7 +51,14 @@ export async function POST(req: NextRequest) {
       return gatewayFailure(new GatewayError(400, '所选服装已失效，请重新选择', 'OUTFIT_NOT_AVAILABLE'));
     }
 
-    const quote = buildQuote(activeOutfits as WearCandidate[]);
+    const [imageModelRes, visionModelRes] = await Promise.all([
+      resolveTryonModel(supabase, 'image'),
+      resolveTryonModel(supabase, 'vision'),
+    ]);
+    const quote = buildQuote(activeOutfits as WearCandidate[], {
+      parsePrice: visionModelRes.priceQuota,
+      tryonPrice: imageModelRes.priceQuota,
+    });
     return gatewaySuccess({
       quote,
       credits: quote.total_quota / QUOTA_PER_CREDIT,

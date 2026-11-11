@@ -95,7 +95,10 @@ export async function POST(req: NextRequest) {
   if (!bodySchema.shape.size.unwrap().safeParse(size).success) {
     return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
   }
-  const quote = buildQuote(candidates);
+  const quote = buildQuote(candidates, {
+    parsePrice: visionModelRes.priceQuota,
+    tryonPrice: imageModelRes.priceQuota,
+  });
 
   // 3. 一次性创建任务（部分唯一索引兜底并发重复提交）。
   const { data: pendingRow, error: insertErr } = await admin

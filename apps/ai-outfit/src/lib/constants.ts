@@ -12,11 +12,3 @@ export const QUOTA_PER_CREDIT = 500;
  */
 export const GARMENT_CATEGORIES = ['上装', '下装', '连衣裙', '外套', '鞋履', '配饰'] as const;
 export type GarmentCategory = (typeof GARMENT_CATEGORIES)[number];
-
-/**
- * 应用层报价单价（单位：网关 quota）。网关 relay 仍按模型实际用量对 App 钱包计费，
- * 这里只是提交前给用户看的固定报价与记账字段，默认 0 表示不在网关计费之外另收固定费用。
- * 运营要启用固定费用时改这两个常量即可，无需改动编排逻辑。
- */
-export const GARMENT_PARSE_FEE_QUOTA = 0;
-export const TRYON_FEE_QUOTA = 0;
