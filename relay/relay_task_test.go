@@ -348,6 +348,7 @@ func newTaskSubmitContext(t *testing.T, originalModel, mapping string) (*gin.Con
 // plugin claiming openai_audio has to be rejected on the model.
 func newAudioTaskSubmitContext(t *testing.T, originalModel string) (*gin.Context, *relaycommon.RelayInfo) {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

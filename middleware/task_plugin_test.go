@@ -649,7 +649,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(body.Bytes()))
 			c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-			request, err := buildTaskPluginRouteRequest(c)
+			request, err := buildTaskPluginRouteRequest(c, false)
 			decoded, _ := request.Body.(map[string]any)
 			return decoded, err
 		}
@@ -2741,7 +2741,7 @@ func TestNativeRouteCredentialRewritesOnlyTheVendorsOwnForm(t *testing.T) {
 			var query map[string][]string
 			router.Use(NativeRouteCredential(testCase.plugin), func(c *gin.Context) {
 				captured = c.Request
-				requestContext, err := buildTaskPluginRouteRequest(c)
+				requestContext, err := buildTaskPluginRouteRequest(c, false)
 				require.NoError(t, err)
 				query = requestContext.Query
 				c.Status(http.StatusNoContent)

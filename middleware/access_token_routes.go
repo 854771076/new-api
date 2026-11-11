@@ -190,6 +190,9 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"DELETE /api/system-info/stale-instances":      accessTokenScopeRule("ops:write"),
 	"DELETE /api/system-info/instances/:node_name": accessTokenScopeRule("ops:write"),
 
+	// router/api-router.go: /api/concurrency
+	"GET /api/concurrency/snapshot": accessTokenScopeRule(service.AccessTokenScopeOf(authz.ConcurrencyRead)),
+
 	// router/api-router.go: /api/plugin/task
 	"GET /api/plugin/task":                           accessTokenScopeRule("plugin:read"),
 	"POST /api/plugin/task":                          accessTokenScopeRule("plugin:write"),
