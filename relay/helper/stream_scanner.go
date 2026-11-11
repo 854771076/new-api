@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -131,6 +132,10 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	// 无条件新建 StreamStatus
 	info.StreamStatus = relaycommon.NewStreamStatus()
+
+	// 分段耗时采集载体：首包时刻由扫描 goroutine 写，流持续由主流程读，
+	// 两者跨 goroutine，靠原子字段保证安全（不依赖 gin 上下文）。
+	timing := relaycommon.RequestTimingOf(c)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -308,6 +313,8 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 			if data != "[DONE]" {
 				info.SetFirstResponseTime()
+				// 首个上游 data 行：首包耗时 = 此刻 − 上游响应头到达时刻。
+				timing.MarkFirstByte(time.Now())
 				info.ReceivedResponseCount++
 
 				select {
@@ -342,6 +349,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	select {
 	case <-ticker.C:
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
+		// The gateway gave up waiting for upstream data. That is a different
+		// failure from an upstream that closed the connection, so it carries
+		// its own code and an operator can tell the two apart.
+		//
+		// The code only reaches the consume log: it is written to
+		// other.stream_status.error_code. A streaming idle timeout does not
+		// produce an error log row — the stream handler returns no error, so
+		// the request settles as a consume log like any other stream.
+		info.StreamStatus.SetErrorCode(string(types.ErrorCodeUpstreamIdleTimeout))
 	case <-stopChan:
 		// EndReason already set by the goroutine that triggered stopChan
 	case <-c.Request.Context().Done():
@@ -351,6 +367,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	cleanup()
+	// 上游流持续 = 流结束时刻 − 首个 data 行时刻。cleanup() 已等所有 goroutine
+	// 退出，首包时刻此时是终值。非流式路径不会走到这里，首包与流持续保持 0。
+	if firstByteAt := timing.FirstByteAt(); !firstByteAt.IsZero() {
+		timing.SetUpstreamStreamDuration(time.Since(firstByteAt))
+	}
 	// All stream goroutines have joined. Done from a successfully delivered
 	// protocol completion can now correct a cancellation that won while its
 	// callback was still running. Bare EOF and failed writes never qualify.

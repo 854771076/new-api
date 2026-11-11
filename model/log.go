@@ -404,6 +404,7 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 			CacheCreationTokens: int64(cacheCreationTokens),
 			UseGroup:            params.Group,
 			TokenID:             params.TokenId,
+			TokenKey:            c.GetString("token_key"),
 			ChannelID:           params.ChannelId,
 			NodeName:            common.NodeName,
 		})

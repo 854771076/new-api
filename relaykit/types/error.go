@@ -51,6 +51,33 @@ const (
 	ErrorCodeGetChannelFailed   ErrorCode = "get_channel_failed"
 	ErrorCodeGenRelayInfoFailed ErrorCode = "gen_relay_info_failed"
 
+	// upstream transport error: the request never produced an upstream
+	// response. These codes split the former catch-all "do_request_failed"
+	// into the concrete transport failures so an operator can tell a refused
+	// connection from a DNS, TLS or timeout failure without reading the raw
+	// error. ErrorCodeDoRequestFailed stays as the fallback for a failure
+	// that matches none of them.
+	//
+	// These codes are part of the public contract: the code of an upstream
+	// transport failure is also the "code" field of the error object the
+	// client receives, so a client can branch on it. The message, the type
+	// and the status code stay what they were.
+	ErrorCodeUpstreamTimeout            ErrorCode = "upstream_timeout"
+	ErrorCodeUpstreamConnectionRefused  ErrorCode = "upstream_connection_refused"
+	ErrorCodeUpstreamConnectionReset    ErrorCode = "upstream_connection_reset"
+	ErrorCodeUpstreamDNSError           ErrorCode = "upstream_dns_error"
+	ErrorCodeUpstreamTLSError           ErrorCode = "upstream_tls_error"
+	ErrorCodeUpstreamNetworkUnreachable ErrorCode = "upstream_network_unreachable"
+	ErrorCodeUpstreamUnexpectedEOF      ErrorCode = "upstream_unexpected_eof"
+	ErrorCodeUpstreamClientCanceled     ErrorCode = "upstream_client_canceled"
+	// ErrorCodeUpstreamIdleTimeout is the gateway giving up on a silent
+	// upstream stream. It only reaches the consume log, in the
+	// "stream_status" block of the log record: a streaming idle timeout
+	// never produces an error log row.
+	ErrorCodeUpstreamIdleTimeout      ErrorCode = "upstream_idle_timeout"
+	ErrorCodeUpstreamHTTP2GoAway      ErrorCode = "upstream_http2_goaway"
+	ErrorCodeUpstreamHTTP2StreamError ErrorCode = "upstream_http2_stream_error"
+
 	// channel error
 	ErrorCodeChannelNoAvailableKey        ErrorCode = "channel:no_available_key"
 	ErrorCodeChannelParamOverrideInvalid  ErrorCode = "channel:param_override_invalid"
@@ -96,10 +123,11 @@ type NewAPIError struct {
 	errorCode      ErrorCode
 	StatusCode     int
 	Metadata       json.RawMessage
-	// adminReason is the operator-facing explanation of a failure. It never
-	// reaches the client response; the error log and the admin console show
-	// it so an operator can tell a transport failure from a local rejection
-	// without reading the raw upstream body.
+	// adminReason is the operator-facing explanation of a failure. The
+	// producer is responsible for sanitizing it. It never reaches a client
+	// response: the error log and the admin console show it so an operator
+	// can tell a transport failure from a local rejection without reading
+	// the raw upstream body.
 	adminReason string
 }
 
@@ -175,18 +203,33 @@ func (e *NewAPIError) MaskSensitiveError(upstreamURLs ...string) string {
 	return kitutil.MaskSensitiveInfo(errStr, upstreamURLs...)
 }
 
+// MaskSensitiveErrorWithStatusCode renders the message a log record carries:
+// the status code, the error code and the masked message. The error code is
+// part of it because the message alone ("upstream error: do request failed")
+// does not say what actually went wrong.
 func (e *NewAPIError) MaskSensitiveErrorWithStatusCode(upstreamURLs ...string) string {
 	if e == nil {
 		return ""
 	}
 	msg := e.MaskSensitiveError(upstreamURLs...)
+	code := string(e.errorCode)
 	if e.StatusCode == 0 {
-		return msg
+		if code == "" {
+			return msg
+		}
+		if msg == "" {
+			return fmt.Sprintf("error_code=%s", code)
+		}
+		return fmt.Sprintf("error_code=%s, %s", code, msg)
+	}
+	prefix := fmt.Sprintf("status_code=%d", e.StatusCode)
+	if code != "" {
+		prefix += ", error_code=" + code
 	}
 	if msg == "" {
-		return fmt.Sprintf("status_code=%d", e.StatusCode)
+		return prefix
 	}
-	return fmt.Sprintf("status_code=%d, %s", e.StatusCode, msg)
+	return prefix + ", " + msg
 }
 
 func (e *NewAPIError) SetMessage(message string) {
@@ -425,8 +468,9 @@ func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
 }
 
 // ErrOptionWithAdminReason attaches the operator-facing explanation of the
-// failure. The reason is admin-only: it is written to the error log and shown
-// in the admin console, and never returned to the client.
+// failure. The reason must already be sanitized: it is stored in the
+// admin-scoped part of the log record, shown in the admin console, and never
+// returned to the client.
 func ErrOptionWithAdminReason(reason string) NewAPIErrorOptions {
 	return func(e *NewAPIError) {
 		e.adminReason = reason

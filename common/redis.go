@@ -7,6 +7,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -20,8 +21,24 @@ func RedisKeyCacheSeconds() int {
 	return SyncFrequency
 }
 
+// redisSentinelEnabled reports whether the runtime is configured for Sentinel HA.
+//
+// When REDIS_SENTINEL_MODE=true (case-insensitive) AND REDIS_SENTINEL_ADDRS is
+// non-empty, NewFailoverClient is used instead of NewClient/ParseURL. All callers
+// continue to hold a *redis.Client (NewFailoverClient returns the same concrete
+// type), so existing call sites are unaffected.
+func redisSentinelEnabled() bool {
+	if !strings.EqualFold(os.Getenv("REDIS_SENTINEL_MODE"), "true") {
+		return false
+	}
+	return strings.TrimSpace(os.Getenv("REDIS_SENTINEL_ADDRS")) != ""
+}
+
 // InitRedisClient This function is called after init()
 func InitRedisClient() (err error) {
+	if redisSentinelEnabled() {
+		return initSentinelClient()
+	}
 	if os.Getenv("REDIS_CONN_STRING") == "" {
 		RedisEnabled = false
 		SysLog(LogText("REDIS_CONN_STRING not set, Redis is not enabled"))
@@ -44,13 +61,68 @@ func InitRedisClient() (err error) {
 
 	_, err = RDB.Ping(ctx).Result()
 	if err != nil {
-		FatalLog(LogText("Redis ping test failed: %s", err.Error()))
+		// D-12: a startup ping failure is a reachability problem, not a
+		// configuration error — WARN and keep going instead of exiting.
+		// RedisEnabled stays true and RDB stays constructed, so the
+		// concurrency limiter still installs RedisLimiter and fails open per
+		// request until Redis recovers (self-heal), rather than turning a
+		// degradable dependency into a startup hard dependency. A malformed
+		// connection string still FatalLogs above — that is a config error.
+		SysError(LogText("Redis ping test failed, continuing without a live connection: %s", err.Error()))
+		return nil
 	}
 	if DebugEnabled {
 		SysLog(LogText("Redis connected to %s", opt.Addr))
 		SysLog(LogText("Redis database: %d", opt.DB))
 	}
-	return err
+	return nil
+}
+
+// initSentinelClient wires a *redis.Client backed by Redis Sentinel.
+// REDIS_CONN_STRING is intentionally ignored in this mode and only kept as a
+// fallback reference (logged at info level).
+func initSentinelClient() (err error) {
+	if os.Getenv("SYNC_FREQUENCY") == "" {
+		SysLog("SYNC_FREQUENCY not set, use default value 60")
+		SyncFrequency = 60
+	}
+
+	addrs := splitNonEmpty(os.Getenv("REDIS_SENTINEL_ADDRS"), ",")
+	if len(addrs) == 0 {
+		FatalLog("REDIS_SENTINEL_MODE=true but REDIS_SENTINEL_ADDRS is empty")
+	}
+
+	masterName := os.Getenv("REDIS_SENTINEL_MASTER_NAME")
+	if masterName == "" {
+		masterName = "mymaster"
+	}
+
+	fopt := &redis.FailoverOptions{
+		MasterName:       masterName,
+		SentinelAddrs:    addrs,
+		Password:         os.Getenv("REDIS_PASSWORD"),
+		SentinelPassword: os.Getenv("REDIS_SENTINEL_PASSWORD"),
+		DB:               parseIntDefault(os.Getenv("REDIS_DB"), 0),
+		PoolSize:         GetEnvOrDefault("REDIS_POOL_SIZE", 10),
+	}
+	if connStr := os.Getenv("REDIS_CONN_STRING"); connStr != "" {
+		SysLog("Redis Sentinel mode active; REDIS_CONN_STRING is ignored, kept for compatibility: " + connStr)
+	}
+	SysLog(fmt.Sprintf("Redis Sentinel enabled: master=%s, sentinels=%v", masterName, addrs))
+
+	RDB = redis.NewFailoverClient(fopt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err = RDB.Ping(ctx).Result(); err != nil {
+		// D-12, same as the plain client: reachability failure WARNs and
+		// keeps starting; empty REDIS_SENTINEL_ADDRS above stays FatalLog
+		// (config error, not reachability).
+		SysError("Redis Sentinel ping test failed, continuing without a live connection: " + err.Error())
+		return nil
+	}
+	return nil
 }
 
 func ParseRedisOption() *redis.Options {
@@ -59,6 +131,28 @@ func ParseRedisOption() *redis.Options {
 		FatalLog(LogText("failed to parse Redis connection string: %s", err.Error()))
 	}
 	return opt
+}
+
+func splitNonEmpty(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func parseIntDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 func RedisSet(key string, value string, expiration time.Duration) error {

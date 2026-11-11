@@ -32,7 +32,8 @@ func GetAllQuotaDates(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
 	username := c.Query("username")
-	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, username)
+	tokenKey := c.Query("token_key")
+	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, username, tokenKey)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -64,12 +65,13 @@ func GetUserQuotaDates(c *gin.Context) {
 	userId := c.GetInt("id")
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	tokenKey := c.Query("token_key")
 	startTimestamp, err := limitLogTimeRange(startTimestamp, endTimestamp)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	dates, err := model.GetQuotaDataByUserId(userId, startTimestamp, endTimestamp)
+	dates, err := model.GetQuotaDataByUserId(userId, tokenKey, startTimestamp, endTimestamp)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -88,7 +90,8 @@ func GetAllFlowQuotaDates(c *gin.Context) {
 		return
 	}
 	username := c.Query("username")
-	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, username, 0, c.GetInt("role"))
+	tokenKey := c.Query("token_key")
+	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, username, tokenKey, 0, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -111,7 +114,8 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser)
+	tokenKey := c.Query("token_key")
+	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, "", tokenKey, userId, common.RoleCommonUser)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -122,4 +126,37 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 		"data":    dates,
 	})
 	return
+}
+
+// GetQuotaDataTokenKeys 返回 quota_data 表里 distinct token_key 列表，用于 dashboard
+// 筛选弹窗的 Token Key autocomplete。admin/root 看全局，普通用户只看自己的。
+// start_timestamp/end_timestamp（秒）非 0 时，usage/token_used 只统计该时间窗口。
+// Query: ?username=&keyword=&limit=&start_timestamp=&end_timestamp=
+func GetQuotaDataTokenKeys(c *gin.Context) {
+	role := c.GetInt("role")
+	username := c.Query("username")
+	keyword := c.Query("keyword")
+	limitStr := c.Query("limit")
+	limit := 200
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
+	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	// 权限收敛：非 admin/root 强制 username = 当前用户。
+	if role < common.RoleAdminUser {
+		username = c.GetString("username")
+	}
+	entries, err := model.ListDistinctTokenKeys(username, keyword, startTimestamp, endTimestamp, limit)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    entries,
+	})
 }

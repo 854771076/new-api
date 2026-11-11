@@ -656,6 +656,12 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
 	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
+	// CHN-03: publish the channel's in-flight cap alongside its identity so the
+	// relay layer can take the per-attempt channel slot. Both hops (first hop via
+	// Distribute, retry hop via controller.getChannel) go through this one
+	// function, so the value always belongs to the currently selected channel;
+	// GetConcurrencyLimit is nil-safe and returns 0 = unlimited (D-18).
+	common.SetContextKey(c, constant.ContextKeyChannelConcurrencyLimit, channel.GetConcurrencyLimit())
 	switch channel.Type {
 	case constant.ChannelTypeTaskPlugin:
 		c.Set("task_plugin_key", channel.GetSetting().TaskPluginKey)

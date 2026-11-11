@@ -48,6 +48,54 @@ type RetryParam struct {
 	RequestPath  string
 	Retry        *int
 	resetNextTry bool
+	// saturated is the per-request channel-exclusion set (BCD D-3 option A):
+	// channels whose bucket refused this request with the saturation rejection.
+	// Its lifetime is exactly one client request — RetryParam is built fresh
+	// before the relay retry loop — so it never crosses requests and never
+	// writes shared, cached, or package-level state. SetRetry(0),
+	// ResetRetryNextTry, and the auto-group cross-group advance all leave it
+	// intact: saturation does not reset when the retry counter or group does.
+	saturated map[int]struct{}
+}
+
+// ExcludeSaturatedChannel records a channel whose bucket refused this request
+// (the channel:concurrency_exceeded rejection). The retry selection then skips
+// the id, so the weighted-random picker walks the remaining candidates instead
+// of re-picking the saturated channel.
+func (p *RetryParam) ExcludeSaturatedChannel(channelID int) {
+	if p.saturated == nil {
+		p.saturated = make(map[int]struct{}, 1)
+	}
+	p.saturated[channelID] = struct{}{}
+}
+
+// SaturatedExclusions snapshots the excluded channel ids for one selector
+// call: nil when nothing is excluded, so callers keep today's selection
+// behavior byte-for-byte on an empty set.
+func (p *RetryParam) SaturatedExclusions() []int {
+	if len(p.saturated) == 0 {
+		return nil
+	}
+	snapshot := make([]int, 0, len(p.saturated))
+	for channelID := range p.saturated {
+		snapshot = append(snapshot, channelID)
+	}
+	return snapshot
+}
+
+// HasSaturatedChannels reports whether any channel saturated during this
+// request — the "this request has been refused before" predicate the relay
+// layer uses to classify an all-saturated empty selection.
+func (p *RetryParam) HasSaturatedChannels() bool {
+	return len(p.saturated) > 0
+}
+
+// IsSaturatedChannel reports whether the given channel id is already in this
+// request's exclusion set — the relay first-hop branch consults it before
+// re-taking the context-pinned channel.
+func (p *RetryParam) IsSaturatedChannel(channelID int) bool {
+	_, ok := p.saturated[channelID]
+	return ok
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -118,6 +166,10 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 	filters := GetChannelConstraints(param.Ctx).Filters
 	affinityRetryOffset := param.Ctx.GetInt(ginKeyChannelAffinityRetryOffset)
+	// Per-request saturation exclusion (BCD D-3 option A): one snapshot is
+	// handed to every selector call below so both the auto-group legs and the
+	// direct pick skip already-saturated channels within this request.
+	excluded := param.SaturatedExclusions()
 
 	if param.TokenGroup == "auto" {
 		autoGroups := GetRequestAutoGroups(param.Ctx, userGroup)
@@ -153,6 +205,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				param.ModelName,
 				priorityRetry,
 				filters,
+				excluded...,
 			)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
@@ -199,6 +252,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			param.ModelName,
 			max(param.GetRetry()-affinityRetryOffset, 0),
 			filters,
+			excluded...,
 		)
 		if err != nil {
 			return nil, param.TokenGroup, err

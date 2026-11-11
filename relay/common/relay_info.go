@@ -1,3 +1,13 @@
+// FORK-LOCAL-EXTENSION: 2026-10-19 InitChannelMeta preserves mapped model name; remove-when: upstream merges the same preservation logic in (*RelayInfo).InitChannelMeta.
+//
+// InitChannelMeta previously reset both info.ChannelMeta.UpstreamModelName
+// and info.Request.Model back to the origin name on every per-attempt call.
+// The reset was load-bearing only when per-format handlers each called
+// helper.ModelMappedHelper themselves (so the reset set up a clean slate for
+// the next handler's mapping). The controller loop now applies the mapping
+// once per attempt — the reset would erase that mapping before any handler
+// ran, so it is replaced with a conditional preserve.
+
 package common
 
 import (
@@ -279,6 +289,22 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	paramOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelParamOverride)
 	headerOverride := common.GetContextKeyStringMap(c, constant.ContextKeyChannelHeaderOverride)
 	apiType, _ := common.ChannelType2APIType(channelType)
+	// UpstreamModelName is the per-attempt channel-mapped name. The controller
+	// relay loop applies the channel's model_mapping before this method runs,
+	// so the existing info.UpstreamModelName (read via the embedded ChannelMeta
+	// field below) carries the mapped name forward — re-reading it would erase
+	// the mapping. The very first call here has no ChannelMeta yet, so guard
+	// the lookup. Fall back to ContextKeyOriginalModel only when nothing is
+	// set yet (very first hop on a path that bypasses the controller loop).
+	var upstreamForNewMeta string
+	var isModelMapped bool
+	if info.ChannelMeta != nil {
+		upstreamForNewMeta = info.UpstreamModelName
+		isModelMapped = info.IsModelMapped
+	}
+	if upstreamForNewMeta == "" {
+		upstreamForNewMeta = common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+	}
 	channelMeta := &ChannelMeta{
 		ChannelType:          channelType,
 		ChannelId:            common.GetContextKeyInt(c, constant.ContextKeyChannelId),
@@ -292,8 +318,8 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		ChannelCreateTime:    c.GetInt64("channel_create_time"),
 		ParamOverride:        paramOverride,
 		HeadersOverride:      headerOverride,
-		UpstreamModelName:    common.GetContextKeyString(c, constant.ContextKeyOriginalModel),
-		IsModelMapped:        false,
+		UpstreamModelName:    upstreamForNewMeta,
+		IsModelMapped:        isModelMapped,
 		SupportStreamOptions: false,
 	}
 
@@ -348,11 +374,13 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		info.ReasoningConversion = nil
 	}
 
-	// reset some fields based on channel meta
-	// 重置某些字段，例如模型名称等
-	if info.Request != nil {
-		info.Request.SetModelName(info.OriginModelName)
-	}
+	// Model name on the outgoing request is intentionally NOT reset here.
+	// The controller relay loop applies the selected channel's model_mapping
+	// to both info.UpstreamModelName and the request before this method runs,
+	// and rewriting request.Model back to OriginModelName would erase the
+	// mapping for the entire request lifetime — the same reset was load-
+	// bearing only when per-format handlers duplicated ModelMappedHelper, and
+	// the centralized call makes it actively harmful.
 }
 
 func (info *RelayInfo) ToString() string {

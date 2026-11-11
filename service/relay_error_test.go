@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -118,7 +120,7 @@ func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
 	loaded, err := model.GetChannelById(channel.Id, true)
 	require.NoError(t, err)
 	assert.Equal(t, common.ChannelStatusAutoDisabled, loaded.Status)
-	wantReason := "status_code=401, upstream https://***.com/***?token=*** api_key:***"
+	wantReason := "status_code=401, error_code=channel:no_available_key, upstream https://***.com/***?token=*** api_key:***"
 	assert.Equal(t, wantReason, loaded.GetOtherInfo()["status_reason"])
 	assert.Contains(t, notification.Content, wantReason)
 	assert.NotContains(t, notification.Content, "review-token")
@@ -277,4 +279,281 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	other := model.NewLogOther()
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
+}
+
+// 分段耗时落盘：admin_info.timing 带八段耗时与三个当时生效的超时上限；
+// 上下文里没有采集载体时不写 timing 键（不写空 map）。
+func TestRequestTimingReachesLogAdminInfo(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	withoutCarrier := model.NewLogOther()
+	AppendRelayLogAdminInfo(c, nil, withoutCarrier)
+	adminInfo, ok := withoutCarrier.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, adminInfo, "timing",
+		"a request without a timing collector carries no timing record")
+
+	timing := relaycommon.RequestTimingOf(c)
+	timing.SetQueueWait(120 * time.Millisecond)
+	timing.AddChannelSelect(4 * time.Millisecond)
+	timing.AddAttempt()
+	timing.SetUpstreamHeaderWait(1020 * time.Millisecond)
+
+	withCarrier := model.NewLogOther()
+	AppendRelayLogAdminInfo(c, nil, withCarrier)
+	adminInfo, ok = withCarrier.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok)
+	record, ok := adminInfo["timing"].(map[string]any)
+	require.True(t, ok, "a relay request exposes its latency breakdown to administrators")
+
+	for _, key := range []string{
+		"queue_wait_ms",
+		"channel_select_ms",
+		"upstream_header_ms",
+		"upstream_body_ms",
+		"upstream_first_byte_ms",
+		"upstream_stream_ms",
+		"settle_ms",
+		"attempts",
+		"upstream_header_timeout_s",
+		"streaming_timeout_s",
+		"relay_timeout_s",
+	} {
+		assert.Contains(t, record, key)
+	}
+	assert.EqualValues(t, 120, record["queue_wait_ms"])
+	assert.EqualValues(t, 4, record["channel_select_ms"])
+	assert.EqualValues(t, 1020, record["upstream_header_ms"])
+	assert.EqualValues(t, 1, record["attempts"])
+}
+
+// ---------------------------------------------------------------------------
+// Saturation rejection vs channel auto-ban (threat T-02-14-04)
+// ---------------------------------------------------------------------------
+// TestShouldDisableChannelExcludesSaturationRejection pins the auto-ban
+// chokepoint: the channel saturation rejection is a scheduling refusal, not
+// evidence the channel is broken, so it must never be judged disableable —
+// otherwise the busier a channel gets the faster it is auto-disabled
+// (secondary DoS). Real channel fault codes must keep returning true (no
+// regression), and a nil error must stay false.
+func TestShouldDisableChannelExcludesSaturationRejection(t *testing.T) {
+	previous := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previous })
+
+	for _, tc := range []struct {
+		name string
+		err  *types.NewAPIError
+		want bool
+	}{
+		{name: "saturation rejection never disables", err: NewChannelConcurrencyRejection(), want: false},
+		{name: "invalid key still disables", err: types.NewError(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey), want: true},
+		{name: "no available key still disables", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), want: true},
+		{name: "nil error never disables", err: nil, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ShouldDisableChannel(tc.err))
+		})
+	}
+}
+
+// TestShouldDisableChannelCoversBothAutoBanTriggerLines pins BOTH trigger
+// lines named by T-02-14-04 — service/relay_error.go's ProcessChannelError
+// (performs the actual disable) and service/request_policy.go's
+// RecordPolicyFailure (marks health). Both consult the ShouldDisableChannel
+// chokepoint, so the saturation exclusion must hold at each call site.
+func TestShouldDisableChannelCoversBothAutoBanTriggerLines(t *testing.T) {
+	t.Run("RecordPolicyFailure health stays unchanged for saturation", func(t *testing.T) {
+		previous := common.AutomaticDisableChannelEnabled
+		common.AutomaticDisableChannelEnabled = true
+		t.Cleanup(func() { common.AutomaticDisableChannelEnabled = previous })
+
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set("auto_ban", true)
+
+		rejection := NewChannelConcurrencyRejection()
+		decision := DecideRelayRetry(c, rejection, 1)
+		assert.Equal(t, "retry", decision.Action, "the rejection must ride the IsChannelError retry route (BCD D-4)")
+		RecordPolicyFailure(c, 42, rejection, decision)
+		events := RequestPolicy(c).Events()
+		require.NotEmpty(t, events)
+		assert.Equal(t, "unchanged", events[len(events)-1].Health,
+			"a saturation rejection must not mark the channel for disable")
+
+		fault := types.NewError(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey)
+		RecordPolicyFailure(c, 42, fault, DecideRelayRetry(c, fault, 1))
+		events = RequestPolicy(c).Events()
+		require.NotEmpty(t, events)
+		assert.Equal(t, "channel_disable_requested", events[len(events)-1].Health,
+			"real channel faults must still mark the disable (no regression)")
+	})
+
+	t.Run("ProcessChannelError never disables on saturation", func(t *testing.T) {
+		previousDB, previousType := model.DB, common.MainDatabaseType()
+		previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+		previousAutoDisable, previousErrorLog := common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled
+		previousNotifyLimit := constant.NotifyLimitCount
+		t.Cleanup(func() {
+			model.DB = previousDB
+			common.SetMainDatabaseType(previousType)
+			common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis
+			common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled = previousAutoDisable, previousErrorLog
+			constant.NotifyLimitCount = previousNotifyLimit
+		})
+		database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+		require.NoError(t, err)
+		sqlDB, err := database.DB()
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+		require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.User{}))
+		model.DB = database
+		common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+		common.MemoryCacheEnabled, common.RedisEnabled = false, false
+		common.AutomaticDisableChannelEnabled, constant.ErrorLogEnabled = true, false
+		constant.NotifyLimitCount = 10
+		// DisableChannel notifies the root user; a seeded root keeps that path
+		// panic-free (NotifyRootUser dereferences the lookup result).
+		require.NoError(t, database.Create(&model.User{Username: "slot-ban-root", Role: common.RoleRootUser, Status: common.UserStatusEnabled}).Error)
+
+		const saturatedChannelID = 8401
+		const faultedChannelID = 8402
+		require.NoError(t, database.Create(&model.Channel{
+			Id: saturatedChannelID, Name: "slot-saturated", Key: "slot-saturated-key", Type: 1,
+			Status: common.ChannelStatusEnabled, Group: "default", Models: "slot-model",
+		}).Error)
+		require.NoError(t, database.Create(&model.Channel{
+			Id: faultedChannelID, Name: "slot-faulted", Key: "slot-faulted-key", Type: 1,
+			Status: common.ChannelStatusEnabled, Group: "default", Models: "slot-model",
+		}).Error)
+
+		// DisableChannel runs on a gopool goroutine, so observation is async:
+		// poll for the status within a bounded window instead of sleeping once
+		// and hoping (positive control below proves the fixture can disable).
+		waitForDisabled := func(channelID int, window time.Duration) bool {
+			deadline := time.Now().Add(window)
+			for time.Now().Before(deadline) {
+				var ch model.Channel
+				if err := database.First(&ch, channelID).Error; err == nil && ch.Status == common.ChannelStatusAutoDisabled {
+					return true
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			return false
+		}
+
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ProcessChannelError(c, types.ChannelError{ChannelId: saturatedChannelID, ChannelName: "slot-saturated", AutoBan: true},
+			NewChannelConcurrencyRejection(), nil)
+		assert.False(t, waitForDisabled(saturatedChannelID, 1500*time.Millisecond),
+			"a saturation rejection must never auto-disable the channel (T-02-14-04)")
+
+		// Control: the same fixture DOES disable for a real channel fault, so
+		// the guard above cannot pass vacuously.
+		ProcessChannelError(c, types.ChannelError{ChannelId: faultedChannelID, ChannelName: "slot-faulted", AutoBan: true},
+			types.NewErrorWithStatusCode(errors.New("invalid key"), types.ErrorCodeChannelInvalidKey, http.StatusUnauthorized), nil)
+		require.True(t, waitForDisabled(faultedChannelID, 5*time.Second),
+			"control: a real channel fault must still auto-disable through the same trigger line")
+	})
+}
+
+// TestChannelConcurrencyRejectionSignalHygiene re-pins the rejection signal
+// contract at the service layer (the seam 02-15 consumes): dedicated code,
+// status 429, and rendered text that leaks neither the channel:<id> scope
+// literal nor a channel id (CNT-01 hygiene, T-02-14-05).
+func TestChannelConcurrencyRejectionSignalHygiene(t *testing.T) {
+	err := NewChannelConcurrencyRejection()
+	require.True(t, IsChannelConcurrencyRejection(err))
+	assert.Equal(t, ChannelConcurrencyExceededCode, err.GetErrorCode())
+	assert.Equal(t, http.StatusTooManyRequests, err.StatusCode)
+	sanitizer := regexp.MustCompile(`channel:\d+`)
+	for _, rendered := range []string{err.Error(), err.ToOpenAIError().Message} {
+		assert.NotRegexp(t, sanitizer, rendered, "the rejection must not leak the channel scope literal")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RTE-02 (02-18): the "upstream 429 must not terminate after a single channel"
+// grant predicate
+// ---------------------------------------------------------------------------
+
+// TestSingleChannelUpstream429CrossChannelRetryPredicateMatrix pins the four
+// conditions of ShouldGrantUpstream429CrossChannelRetry as a deterministic
+// table: exactly ONE configuration grants (upstream 429 + budget-exhausted
+// stop + exactly one distinct channel tried + no grant used yet), and every
+// near-miss is rejected — two channels already tried, grant already used,
+// each of the request-level/explicit stop reasons the grant must never cover
+// (pinned_channel, strict_session, non_retryable_error — plus the
+// channel_error / retry actions that are not stops at all), the
+// status_not_retryable stop, non-429 statuses, and a nil error. The
+// status_not_retryable row pins the predicate's unit semantics only: that
+// reason is reachable in production only when RetryTimes >= 1 (the budget
+// check at service/relay_error.go DecideRelayRetry runs BEFORE the status
+// check, so under the default RetryTimes=0 a non-channel terminal always
+// carries attempt_budget_exhausted) — it must not be read as "an operator
+// config suppresses the grant on the default path".
+func TestSingleChannelUpstream429CrossChannelRetryPredicateMatrix(t *testing.T) {
+	upstream429 := func(status int) *types.NewAPIError {
+		return types.NewOpenAIError(errors.New("upstream rate limited"), types.ErrorCodeBadResponseStatusCode, status)
+	}
+	budgetStop := &PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}
+
+	for _, tc := range []struct {
+		name          string
+		err           *types.NewAPIError
+		decision      *PolicyDecision
+		distinctTried int
+		priorGrants   int
+		want          bool
+	}{
+		// --- grant group: exactly one configuration passes ---
+		{name: "grant: budget-exhausted stop + upstream 429 + one channel tried + no prior grant",
+			err: upstream429(http.StatusTooManyRequests), decision: budgetStop, distinctTried: 1, priorGrants: 0, want: true},
+
+		// --- reject group ---
+		{name: "reject: two distinct channels already tried",
+			err: upstream429(http.StatusTooManyRequests), decision: budgetStop, distinctTried: 2, priorGrants: 0, want: false},
+		{name: "reject: grant already used (exactly once)",
+			err: upstream429(http.StatusTooManyRequests), decision: budgetStop, distinctTried: 1, priorGrants: 1, want: false},
+		{name: "reject: channel_error decision",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "retry", Reason: "channel_error", Source: "system"},
+			distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: pinned_channel stop is never overridden",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "stop", Reason: "pinned_channel", Source: "channel_constraint"},
+			distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: strict_session stop is never overridden",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "stop", Reason: "strict_session", Source: "session_rule"},
+			distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: non_retryable_error stop is never overridden",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "stop", Reason: "non_retryable_error", Source: "system"},
+			distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: status_not_retryable stop (reachable only with RetryTimes >= 1)",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"},
+			distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: upstream 500 is not an upstream 429",
+			err: upstream429(http.StatusInternalServerError), decision: budgetStop, distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: upstream 400 is not an upstream 429",
+			err: upstream429(http.StatusBadRequest), decision: budgetStop, distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: nil error",
+			err: nil, decision: budgetStop, distinctTried: 1, priorGrants: 0, want: false},
+		{name: "reject: non-stop decision (retry status matched)",
+			err:           upstream429(http.StatusTooManyRequests),
+			decision:      &PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"},
+			distinctTried: 1, priorGrants: 0, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want,
+				ShouldGrantUpstream429CrossChannelRetry(tc.err, tc.decision, tc.distinctTried, tc.priorGrants))
+		})
+	}
+
+	assert.False(t, ShouldGrantUpstream429CrossChannelRetry(nil, nil, 1, 0),
+		"a nil decision must be safe and must never grant")
 }

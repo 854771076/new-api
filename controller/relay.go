@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/concurrency"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -69,11 +72,52 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 	return err
 }
 
+// runChannelSlotAttempt owns the channel-slot lifecycle of ONE relay attempt
+// (BCD D-1): every call is its own inner scope with its own defer release, so
+// the retry loop never carries a slot across iterations (a limit=1 channel must
+// not self-deadlock) and all three exits — success return, error return, panic
+// unwind — free the slot before control leaves this frame.
+//
+// The cap comes from constant.ContextKeyChannelConcurrencyLimit, published by
+// middleware.SetupContextForSelectedChannel on both the first hop
+// (middleware.Distribute) and every retry hop (getChannel), so the value always
+// belongs to the channel selected for THIS attempt. 0 means unlimited while the
+// bucket still counts in-flight holders (D-18).
+//
+// The acquire rides context.Background() (D-06): a client disconnect must never
+// cancel a slot take that is already in flight. With no limiter installed the
+// helper is a no-op, matching ConcurrencyMiddleware's stance.
+func runChannelSlotAttempt(c *gin.Context, channelID int, body func() *types.NewAPIError) *types.NewAPIError {
+	limiter := getConcurrencyLimiter()
+	if limiter == nil {
+		return body()
+	}
+	limit := common.GetContextKeyInt(c, constant.ContextKeyChannelConcurrencyLimit)
+	release, err := limiter.Acquire(context.Background(), concurrency.ChannelScope(channelID), limit)
+	if err != nil {
+		if !errors.Is(err, concurrency.ErrConcurrencyExceeded) {
+			logger.LogError(c, common.LogText("channel concurrency acquire failed (channel #%d): %s", channelID, err.Error()))
+		}
+		// Refusal (or an unexpected backend failure) never enters the attempt
+		// body. The rejection signal carries the "channel:" prefix, so
+		// DecideRelayRetry's IsChannelError branch routes it to a retry for
+		// free (BCD D-4); 02-15 builds the channel-exclusion set and the final
+		// 429 rendering on this seam.
+		return service.NewChannelConcurrencyRejection()
+	}
+	defer release()
+	return body()
+}
+
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
+
+	// 分段耗时采集载体（relay/common.RequestTiming）：与并发准入、流式扫描
+	// 共享同一份，逐段耗时最终落到消费/错误日志的 admin_info.timing。
+	timing := relaycommon.RequestTimingOf(c)
 
 	var (
 		newAPIError *types.NewAPIError
@@ -95,28 +139,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
-			upstreamURLs := common.UpstreamAddresses(c)
-			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
-				strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
-				writeRelayStreamError(c, relayFormat, newAPIError)
-				return
-			}
-			if relayFormat != types.RelayFormatOpenAIRealtime {
-				c.Header("Content-Type", "application/json; charset=utf-8")
-			}
-			switch relayFormat {
-			case types.RelayFormatOpenAIRealtime:
-				helper.WssError(c, ws, newAPIError.ToOpenAIError(upstreamURLs...))
-			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"type":  "error",
-					"error": newAPIError.ToClaudeError(upstreamURLs...),
-				})
-			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"error": newAPIError.ToOpenAIError(upstreamURLs...),
-				})
-			}
+			renderRelayTerminalError(c, relayFormat, ws, newAPIError)
 		}
 	}()
 
@@ -174,18 +197,74 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	// RTE-02 (02-18): per-request state for the "upstream 429 must not
+	// terminate after a single channel" grant — grantUpstream429Retry gates
+	// exactly one extra loop iteration, upstream429Grants counts grants (the
+	// predicate's exactly-once condition), upstream429Fallback keeps the
+	// original upstream 429 so a failed grant re-selection still renders it,
+	// and triedChannels mirrors the use_channel registrations so the grant
+	// condition can see "exactly one distinct channel tried". All four live
+	// on this stack frame: one client request, never shared state.
+	var (
+		grantUpstream429Retry bool
+		upstream429Grants     int
+		upstream429Fallback   *types.NewAPIError
+		triedChannels         = make(map[int]struct{}, 2)
+	)
+
+	for ; retryParam.GetRetry() <= common.RetryTimes || grantUpstream429Retry; retryParam.IncreaseRetry() {
+		// RTE-02: consume the grant flag on the first line of the iteration
+		// it unlocked — the loop condition may be re-entered through the
+		// budget clause later, and consuming here guarantees the grant opens
+		// exactly one iteration (anti-self-spin, double insurance with the
+		// predicate's priorGrants == 0).
+		grantUpstream429Retry = false
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
 		relayInfo.RetryIndex = retryParam.GetRetry()
+		channelSelectStartedAt := time.Now()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
+		// 选渠道耗时按 attempt 累加；首跳复用 distributor 已钉住的渠道时耗时
+		// 接近 0，这是真实值，不做修饰。
+		timing.AddChannelSelect(time.Since(channelSelectStartedAt))
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
+			// RTE-02: a grant re-selection failure (all remaining candidates
+			// excluded, so getChannel classifies the empty selection as the
+			// CNT-01 concurrency rejection or a channel-not-found error) must
+			// not replace the upstream 429 that triggered the grant — the
+			// client contract is the ORIGINAL 429 passthrough. The log above
+			// still records the selection error itself, and getChannel's
+			// empty-selection rule stays untouched for every other request.
+			if upstream429Fallback != nil {
+				newAPIError = upstream429Fallback
+			}
 			break
 		}
+		timing.AddAttempt()
 		service.AppendUsedChannel(c, channel.Id)
+		// RTE-02: register the attempt in the per-request tried set at the
+		// exact position of the use_channel registration, so the grant
+		// predicate reads the same attempt history the retry log records.
+		triedChannels[channel.Id] = struct{}{}
+		// Apply this attempt's channel-level model_mapping to the relayInfo
+		// and the outgoing request. Model mapping depends on the selected
+		// channel (each channel carries its own model_mapping), so this must
+		// run AFTER getChannel sets model_mapping into the gin context and
+		// INSIDE the retry loop — every retry picks a different channel and
+		// may translate the model name differently. Running it once before
+		// the loop would only translate with whichever channel the first
+		// retry happened to pick, leaving later retries sending the client's
+		// raw model name upstream and triggering 404 "model not found" on
+		// channels whose upstream name differs from the client's name.
+		if request != nil {
+			if err := helper.ModelMappedHelper(c, relayInfo, request); err != nil {
+				newAPIError = types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
+				break
+			}
+		}
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
@@ -203,15 +282,49 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
-			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
-			newAPIError = geminiRelayHandler(c, relayInfo)
-		default:
-			newAPIError = relayHandler(c, relayInfo)
+		// BCD D-1: the dispatch runs inside the attempt scope so the channel
+		// slot taken for THIS iteration is released here (success / error /
+		// panic) and never survives into the next iteration.
+		var attemptStartedAt time.Time
+		newAPIError = runChannelSlotAttempt(c, channel.Id, func() *types.NewAPIError {
+			// The health-latency clock starts HERE — inside the attempt body,
+			// i.e. after the slot Acquire succeeded (02-16 queue wait can block
+			// for seconds and must never fold into the sample, or latency and
+			// loadFactor would double-count the same congestion) and before the
+			// upstream request is dispatched.
+			attemptStartedAt = time.Now()
+			switch relayFormat {
+			case types.RelayFormatOpenAIRealtime:
+				return relay.WssHelper(c, relayInfo)
+			case types.RelayFormatClaude:
+				return relay.ClaudeHelper(c, relayInfo)
+			case types.RelayFormatGemini:
+				return geminiRelayHandler(c, relayInfo)
+			default:
+				return relayHandler(c, relayInfo)
+			}
+		})
+
+		// RTE-01 (02-17): record the dispatched attempt for channel routing
+		// health — exactly one sample per attempt that actually ran, with its
+		// wall-clock duration and outcome. The gateway-side saturation
+		// rejection is skipped before the body ever runs (and never sets
+		// attemptStartedAt, so the IsZero guard is a second fence), so a
+		// client-visible 429 can never pollute channel health; the panic path
+		// unwinds past this line and records nothing by design. The
+		// slot/defer/refund/retry semantics above and below are untouched.
+		if !service.IsChannelConcurrencyRejection(newAPIError) && !attemptStartedAt.IsZero() {
+			latencyMs := time.Since(attemptStartedAt).Milliseconds()
+			if relayFormat == types.RelayFormatOpenAIRealtime {
+				// A WS session's whole lifetime (up to hours) is connection
+				// duration, not upstream latency. Record the outcome only:
+				// latencyMs 0 keeps latencyEWMA at 0, which the warm-mean and
+				// latencyFactor guards (latencyEWMA > 0) exclude from the
+				// same-model mean and leave this record's latencyFactor at the
+				// neutral 1.0 — success/failure still feeds successEWMA.
+				latencyMs = 0
+			}
+			model.RecordChannelAttempt(channel.Id, relayInfo.OriginModelName, latencyMs, newAPIError == nil)
 		}
 
 		if newAPIError == nil {
@@ -224,8 +337,37 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.LastError = newAPIError
 
 		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+
+		// RTE-02 (02-18): "upstream 429 must not terminate after a single
+		// channel". When the four-condition predicate holds, rewrite the
+		// stop into ONE cross-channel retry before RecordPolicyFailure, so
+		// the existing policy event channel records the grant
+		// (retry/upstream_429_cross_channel) without a new event field.
+		// Keep the original 429 as the fallback terminal, exclude the
+		// channel that produced it from the next selection through the
+		// 02-15 per-request set (so it is never re-picked and an empty
+		// selection still classifies through getChannel's existing rule),
+		// and arm the grant flag the loop condition consumes exactly once.
+		if service.ShouldGrantUpstream429CrossChannelRetry(newAPIError, &decision, len(triedChannels), upstream429Grants) {
+			upstream429Fallback = newAPIError
+			upstream429Grants++
+			grantUpstream429Retry = true
+			retryParam.ExcludeSaturatedChannel(channel.Id)
+			decision = service.PolicyDecision{Action: "retry", Reason: service.Upstream429CrossChannelReason, Source: "system"}
+		}
+
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+
+		// CHN-02: the saturation refusal of THIS attempt's channel joins the
+		// per-request exclusion set before the next selection, so the retry
+		// walks the remaining candidates instead of re-taking the saturated
+		// channel (BCD D-3 option A). Non-saturation errors never record. The
+		// set lives on retryParam — one per client request — and never reaches
+		// shared state.
+		if service.IsChannelConcurrencyRejection(newAPIError) {
+			retryParam.ExcludeSaturatedChannel(channel.Id)
+		}
 
 		if decision.Action != "retry" {
 			break
@@ -239,6 +381,76 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 }
 
+// renderRelayTerminalError writes the terminal error of one relay request in
+// the envelope of the negotiated relay format. A channel-saturation rejection
+// is normalized HERE — at the client-visible rendering boundary only (BCD
+// D-4): type/code become exactly "concurrency_exceeded" (CNT-01), the message
+// stays the neutral signal wording plus the request-id suffix, no internal
+// "channel:" routing code, scope literal, or channel id crosses the wire, and
+// the HTTP response carries Retry-After read from
+// middleware.ConcurrencyRetryAfterSeconds (single source, never a literal).
+// The internal chain — logs, RecordRequestPolicyTermination,
+// RecordPolicyFailure, ProcessChannelError, DecideRelayRetry, error_code
+// records — keeps seeing the raw channel:-prefixed signal: the IsChannelError
+// retry route and the ShouldDisableChannel auto-ban exemption depend on it, so
+// normalization must never rewrite the error itself, only this rendering.
+// Realtime upgrades its transport before any terminal write, so that format's
+// contract surface is the WS error frame (no HTTP headers are writable there);
+// every other format (default, Gemini, Claude) renders through c.JSON with the
+// signal's own 429 status.
+func renderRelayTerminalError(c *gin.Context, relayFormat types.RelayFormat, ws *websocket.Conn, newAPIError *types.NewAPIError) {
+	// 心跳提交响应头后，最终错误继续通过同一个流返回。
+	if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
+		strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+		writeRelayStreamError(c, relayFormat, newAPIError)
+		return
+	}
+	upstreamURLs := common.UpstreamAddresses(c)
+	// Normalize the client-visible error payload and the Retry-After flag first,
+	// then render once per relay format.
+	var (
+		openaiErr  types.OpenAIError
+		claudeErr  types.ClaudeError
+		retryAfter bool
+	)
+	if service.IsChannelConcurrencyRejection(newAPIError) {
+		concurrency.AddRejection()
+		message := newAPIError.Error()
+		openaiErr = types.OpenAIError{
+			Message: message,
+			Type:    "concurrency_exceeded",
+			Param:   "",
+			Code:    "concurrency_exceeded",
+		}
+		claudeErr = types.ClaudeError{Type: "concurrency_exceeded", Message: message}
+		retryAfter = true
+	} else {
+		openaiErr = newAPIError.ToOpenAIError(upstreamURLs...)
+		claudeErr = newAPIError.ToClaudeError(upstreamURLs...)
+	}
+	if relayFormat != types.RelayFormatOpenAIRealtime {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+	}
+	// Realtime upgrades its transport before any terminal write, so its contract
+	// surface is the WS error frame (no HTTP headers are writable there).
+	if retryAfter && relayFormat != types.RelayFormatOpenAIRealtime {
+		c.Header("Retry-After", strconv.Itoa(middleware.ConcurrencyRetryAfterSeconds))
+	}
+	switch relayFormat {
+	case types.RelayFormatOpenAIRealtime:
+		helper.WssError(c, ws, openaiErr)
+	case types.RelayFormatClaude:
+		c.JSON(newAPIError.StatusCode, gin.H{
+			"type":  "error",
+			"error": claudeErr,
+		})
+	default:
+		c.JSON(newAPIError.StatusCode, gin.H{
+			"error": openaiErr,
+		})
+	}
+}
+
 func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *types.NewAPIError) {
 	// 心跳提交响应头后，最终错误继续通过同一个流返回。
 	status, _ := common.GetContextKeyType[*relaycommon.StreamStatus](c, constant.ContextKeyResponseStreamStatus)
@@ -248,11 +460,28 @@ func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *t
 	}
 	status.MarkFailed(string(apiError.GetErrorCode()), string(apiError.GetErrorType()), apiError.StatusCode)
 	upstreamURLs := common.UpstreamAddresses(c)
+	// The stream is a client-visible rendering boundary too, so the saturation
+	// signal is normalized here exactly like in renderRelayTerminalError: the
+	// internal "channel:" routing code must not reach the client. The internal
+	// error chain keeps the raw signal (status.MarkFailed above and the retry
+	// routing both read it).
+	openaiErr := apiError.ToOpenAIError(upstreamURLs...)
+	claudeErr := apiError.ToClaudeError(upstreamURLs...)
+	if service.IsChannelConcurrencyRejection(apiError) {
+		message := apiError.Error()
+		openaiErr = types.OpenAIError{
+			Message: message,
+			Type:    "concurrency_exceeded",
+			Param:   "",
+			Code:    "concurrency_exceeded",
+		}
+		claudeErr = types.ClaudeError{Type: "concurrency_exceeded", Message: message}
+	}
 	if format == types.RelayFormatClaude {
-		_ = helper.ClaudeData(c, dto.ClaudeResponse{Type: "error", Error: apiError.ToClaudeError(upstreamURLs...)})
+		_ = helper.ClaudeData(c, dto.ClaudeResponse{Type: "error", Error: claudeErr})
 		return
 	}
-	_ = helper.ObjectData(c, gin.H{"error": apiError.ToOpenAIError(upstreamURLs...)})
+	_ = helper.ObjectData(c, gin.H{"error": openaiErr})
 	helper.Done(c)
 }
 
@@ -296,7 +525,12 @@ var upgrader = websocket.Upgrader{
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+	// First hop: use the context-pinned channel unless this request already
+	// recorded a saturation refusal on it (CHN-02, BCD D-3 option A). A
+	// refused attempt never runs InitChannelMeta, so without this gate every
+	// retry would deterministically re-take the same saturated channel and
+	// never reach the selector. An excluded pin falls through to re-select.
+	if info.ChannelMeta == nil && !retryParam.IsSaturatedChannel(c.GetInt("channel_id")) {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -316,6 +550,25 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryGetChannelFailed, map[string]any{"Group": selectGroup, "Model": info.OriginModelName, "Error": err.Error()})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
+		// CHN-02 all-saturated rule (BCD D-4): an empty selection while this
+		// request carries saturation exclusions means every remaining
+		// candidate was refused for concurrency, so the terminal is the
+		// CNT-01 429 rejection — not a misleading "channel does not exist"
+		// error. An EMPTY exclusion set keeps today's error verbatim: a
+		// selection that finds nothing without any prior refusal must never be
+		// misreported as a concurrency 429 (first hop with no channel).
+		//
+		// Known race boundary (02-15 key_links, recorded deliberately — NOT
+		// tightened here): when the candidate pool collapses for a
+		// NON-saturation reason (a channel disabled or removed between
+		// attempts by an admin action or auto-disable), "empty selection +
+		// non-empty exclusions" can also arise from that collapse, so this
+		// 429 classification transiently deviates from CNT-01's "429 only
+		// driven by over-limit". The window is an attempt gap and self-heals
+		// with channel recovery / subsequent requests.
+		if retryParam.HasSaturatedChannels() {
+			return nil, service.NewChannelConcurrencyRejection()
+		}
 		return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryNoAvailableChannel, map[string]any{"Group": selectGroup, "Model": info.OriginModelName})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 
