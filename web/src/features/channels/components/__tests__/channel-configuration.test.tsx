@@ -47,6 +47,10 @@ import {
   CHANNEL_TYPE_SGLANG,
   CHANNEL_TYPE_VLLM,
 } from '../../constants'
+import {
+  CHANNEL_FORM_DEFAULT_VALUES,
+  transformFormDataToCreatePayload,
+} from '../../lib'
 import { channelSchema, type Channel } from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelsProvider } from '../channels-provider'
@@ -2146,6 +2150,94 @@ test('an operator without sensitive write permission can discover saved models a
   expect(put.mock.calls[0]?.[1]).not.toHaveProperty('key')
 })
 
+test('update payload carries concurrency_limit including explicit zero', async () => {
+  editingChannel = channelSchema.parse({
+    ...editingChannel,
+    concurrency_limit: 7,
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+  const input = screen.getByLabelText('Concurrency Limit')
+  expect(input).toHaveValue(7)
+  expect(screen.getByText('0 means unlimited')).toBeVisible()
+  fireEvent.change(input, { target: { value: '0' } })
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as {
+    concurrency_limit?: number | null
+  }
+  expect(payload.concurrency_limit).toBe(0)
+})
+
+test('update payload carries a saved concurrency_limit of 7 back unchanged', async () => {
+  editingChannel = channelSchema.parse({
+    ...editingChannel,
+    concurrency_limit: 7,
+  })
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+  expect(screen.getByLabelText('Concurrency Limit')).toHaveValue(7)
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as {
+    concurrency_limit?: number | null
+  }
+  expect(payload.concurrency_limit).toBe(7)
+})
+
+test.each([null, undefined] as const)(
+  'update payload keeps explicit zero when the channel concurrency_limit is %s',
+  async (saved) => {
+    editingChannel = channelSchema.parse({
+      ...editingChannel,
+      concurrency_limit: saved,
+    })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+    expect(screen.getByLabelText('Concurrency Limit')).toHaveValue(0)
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    const payload = put.mock.calls[0]?.[1] as {
+      concurrency_limit?: number | null
+    }
+    expect(payload.concurrency_limit).toBe(0)
+  }
+)
+
+test('create payload carries the concurrency limit field', () => {
+  const base = {
+    ...CHANNEL_FORM_DEFAULT_VALUES,
+    name: 'New channel',
+    type: 1,
+    models: 'gpt-5',
+    key: 'sk-test',
+    group: ['default'],
+  }
+  expect(
+    transformFormDataToCreatePayload({ ...base, concurrency_limit: 5 }).channel
+      .concurrency_limit
+  ).toBe(5)
+  expect(
+    transformFormDataToCreatePayload({ ...base, concurrency_limit: 0 }).channel
+      .concurrency_limit
+  ).toBeNull()
+})
+
 test.each([
   ['random', 'Random', 'polling', 'Polling'],
   ['polling', 'Polling', 'random', 'Random'],
@@ -3028,4 +3120,208 @@ test('AWS interface selection is disabled without sensitive channel write permis
   expect(
     await screen.findByRole('combobox', { name: 'AWS API' })
   ).toBeDisabled()
+})
+
+test('a mapping added in the routing editor is saved with the channel', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+  await user.type(
+    screen.getByRole('combobox', { name: 'Request Model Name' }),
+    'custom-model'
+  )
+  await user.type(
+    screen.getByRole('combobox', { name: 'Upstream Model Name' }),
+    'upstream-model'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({
+    model_mapping: '{\n  "custom-model": "upstream-model"\n}',
+  })
+})
+
+test('a mapping deleted in the routing editor is removed from the saved channel', async () => {
+  editingChannel.model_mapping = '{"custom-model":"upstream-model"}'
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+  await user.click(screen.getByRole('button', { name: 'Delete mapping' }))
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({ model_mapping: '' })
+})
+
+test('an invalid mapping JSON is reported and blocks saving the channel', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+  await user.click(screen.getByRole('tab', { name: 'JSON' }))
+  const editor = await screen.findByRole('textbox', { name: 'Model Mapping' })
+  fireEvent.input(editor, { target: { value: '{"custom-model": ' } })
+  expect(
+    await screen.findByText('Model mapping must be valid JSON format')
+  ).toBeVisible()
+  expect(
+    screen.getByText(/Model Mapping must be a JSON object like/)
+  ).toBeVisible()
+  expect(screen.getByText('{"gpt-4":"Azure-GPT4"}')).toBeVisible()
+
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  // The form schema owns the reason, so the field reports the same specific
+  // message the editor shows instead of a generic one.
+  expect(
+    await screen.findByText('Model mapping must be valid JSON format', {
+      selector: '[data-slot="form-message"]',
+    })
+  ).toBeVisible()
+  expect(put).not.toHaveBeenCalled()
+})
+
+test.each([
+  ['a missing upstream name', '{"custom-model": ""}'],
+  ['a whitespace-only upstream name', '{"custom-model": "   "}'],
+])(
+  '%s in the mapping JSON is reported and blocks saving the channel',
+  async (_case, mappingJson) => {
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+    await user.click(screen.getByRole('tab', { name: 'JSON' }))
+    const editor = await screen.findByRole('textbox', { name: 'Model Mapping' })
+    fireEvent.input(editor, { target: { value: mappingJson } })
+
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+    expect(
+      await screen.findByText('Upstream model name must not be empty', {
+        selector: '[data-slot="form-message"]',
+      })
+    ).toBeVisible()
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
+test('a mapping whose request name is missing from the models list asks before saving', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+  await user.type(
+    screen.getByRole('combobox', { name: 'Request Model Name' }),
+    'new-alias'
+  )
+  await user.type(
+    screen.getByRole('combobox', { name: 'Upstream Model Name' }),
+    'upstream-model'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  expect(
+    await screen.findByText('Models not in list, may fail to invoke')
+  ).toBeVisible()
+  expect(put).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'Add and submit' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({
+    models: 'custom-model,new-alias',
+    model_mapping: '{\n  "new-alias": "upstream-model"\n}',
+  })
+})
+
+test('a published model without a mapping is saved unchanged without a prompt', async () => {
+  editingChannel.models = 'custom-model,extra-model'
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+
+  await user.click(screen.getByRole('button', { name: 'Add Mapping' }))
+  await user.type(
+    screen.getByRole('combobox', { name: 'Request Model Name' }),
+    'custom-model'
+  )
+  await user.type(
+    screen.getByRole('combobox', { name: 'Upstream Model Name' }),
+    'upstream-model'
+  )
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  expect(put.mock.calls[0]?.[1]).toMatchObject({
+    models: 'custom-model,extra-model',
+    model_mapping: '{\n  "custom-model": "upstream-model"\n}',
+  })
+  expect(
+    screen.queryByText('Models not in list, may fail to invoke')
+  ).not.toBeInTheDocument()
+})
+
+test('pass-through body survives saving the channel and loading it again', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  const view = render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+
+  const toggle = screen.getByRole('switch', { name: 'Pass Through Body' })
+  expect(toggle).not.toBeChecked()
+  await user.click(toggle)
+  await user.click(
+    await screen.findByRole('button', { name: 'Enable passthrough' })
+  )
+  expect(toggle).toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0]?.[1] as { setting: string }
+  expect(JSON.parse(payload.setting)).toMatchObject({
+    pass_through_body_enabled: true,
+  })
+
+  view.unmount()
+  editingChannel = { ...editingChannel, setting: payload.setting }
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  await user.click(screen.getByRole('tab', { name: /Request & Response/ }))
+  await waitFor(() =>
+    expect(
+      screen.getByRole('switch', { name: 'Pass Through Body' })
+    ).toBeChecked()
+  )
 })

@@ -216,6 +216,10 @@ func SetRelayRouter(router *gin.Engine) {
 	relayGeminiRouter.Use(middleware.TokenAuth())
 	relayGeminiRouter.Use(middleware.ModelRequestRateLimit())
 	relayGeminiRouter.Use(middleware.Distribute())
+	// Same concurrency gate as httpRouter (see relayV1Router above): Gemini
+	// relay traffic must count against the token's in-flight cap and 429 when
+	// it is exceeded.
+	relayGeminiRouter.Use(middleware.ConcurrencyMiddleware())
 	{
 		// Gemini API 路径格式: /v1beta/models/{model_name}:{action}
 		relayGeminiRouter.POST("/models/*path", func(c *gin.Context) {

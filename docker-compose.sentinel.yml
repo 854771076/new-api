@@ -1,0 +1,256 @@
+# docker-compose.sentinel.yml
+#
+# Overlay file that switches the new-api stack from single-node Redis to a
+# Redis Sentinel HA cluster:
+#   - 1 master  (redis-master)
+#   - 2 replicas (redis-replica1, redis-replica2)
+#   - 3 sentinels (sentinel-1, sentinel-2, sentinel-3)
+#   - new-api container connects via REDIS_SENTINEL_ADDRS, port 30000 on host.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.sentinel.yml up -d
+# Stop & clean:
+#   docker compose -f docker-compose.yml -f docker-compose.sentinel.yml down -v
+#
+# ⚠️ Change default passwords (REDIS_PASSWORD=123456) before any non-dev use.
+
+services:
+  # Master / replicas form the data plane. Each container is pinned to a
+  # static IPv4 inside the new-api-network so that sentinel.conf can use the
+  # IP literally and bypass Docker DNS — see the comment block in
+  # docker/sentinel/conf/sentinel-*.conf for the scenario-3 root cause.
+  redis-master:
+    image: redis:7-alpine
+    container_name: redis-master
+    restart: always
+    command:
+      - redis-server
+      - --requirepass
+      - "123456"
+      - --masterauth
+      - "123456"
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_master_data:/data
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  redis-replica1:
+    image: redis:7-alpine
+    container_name: redis-replica1
+    restart: always
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - redis-server
+      - --replicaof
+      - 172.28.0.10
+      - "6379"
+      - --requirepass
+      - "123456"
+      - --masterauth
+      - "123456"
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_replica1_data:/data
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.11
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  redis-replica2:
+    image: redis:7-alpine
+    container_name: redis-replica2
+    restart: always
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - redis-server
+      - --replicaof
+      - 172.28.0.10
+      - "6379"
+      - --requirepass
+      - "123456"
+      - --masterauth
+      - "123456"
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis_replica2_data:/data
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.12
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Sentinels monitor the master and elect a new one on failure.
+  # Sentinel rewrites its config at runtime, so we copy the template into
+  # /tmp (writable) and start with that copy. This works around the fact
+  # that on Docker Desktop bind mounts from Windows are read-only to the
+  # container even without ":ro".
+  sentinel-1:
+    image: redis:7-alpine
+    container_name: sentinel-1
+    restart: always
+    user: "0:0"
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+    volumes:
+      - ./docker/sentinel/conf/sentinel-1.conf:/etc/redis/sentinel.conf:ro
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.21
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  sentinel-2:
+    image: redis:7-alpine
+    container_name: sentinel-2
+    restart: always
+    user: "0:0"
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+    volumes:
+      - ./docker/sentinel/conf/sentinel-2.conf:/etc/redis/sentinel.conf:ro
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.22
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  sentinel-3:
+    image: redis:7-alpine
+    container_name: sentinel-3
+    restart: always
+    user: "0:0"
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+    volumes:
+      - ./docker/sentinel/conf/sentinel-3.conf:/etc/redis/sentinel.conf:ro
+    networks:
+      new-api-network:
+        ipv4_address: 172.28.0.23
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "26379", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # Sentinel overlay keeps the original `redis` service defined in
+  # docker-compose.yml around for reference / fallback, but disables it
+  # via profiles so only the Sentinel data plane is actually started.
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: always
+    profiles: ["disabled"]
+    networks:
+      - new-api-network
+
+  # Override the new-api service definition to swap REDIS_* env vars and
+  # depend on sentinels instead of the single-node Redis. Because the
+  # original docker-compose.yml's new-api previously referenced `redis` in
+  # depends_on, the upstream file has been edited to drop that edge so
+  # this overlay owns the dependency graph entirely.
+  #
+  # `build:` is required so the local code changes (REDIS_SENTINEL_* env
+  # handling in common/redis.go) actually land in the running container.
+  # Without it, the upstream `calciumion/new-api:latest` image — which does
+  # not know about our sentinel branch — would silently fall back to
+  # REDIS_CONN_STRING behavior.
+  new-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.sentinel
+    image: new-api:local-sentinel
+    container_name: new-api
+    restart: always
+    command: --log-dir /app/logs
+    ports:
+      - "30000:3000"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+    environment:
+      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
+      - REDIS_PASSWORD=123456
+      - REDIS_SENTINEL_MODE=true
+      - REDIS_SENTINEL_ADDRS=sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
+      - REDIS_SENTINEL_MASTER_NAME=mymaster
+      - REDIS_CONN_STRING=redis://:123456@redis-master:6379
+      - TZ=Asia/Shanghai
+      - ERROR_LOG_ENABLED=true
+      - BATCH_UPDATE_ENABLED=true
+      - NODE_NAME=new-api-node-sentinel-1
+    depends_on:
+      postgres:
+        condition: service_started
+      redis-master:
+        condition: service_healthy
+      redis-replica1:
+        condition: service_healthy
+      redis-replica2:
+        condition: service_healthy
+      sentinel-1:
+        condition: service_healthy
+      sentinel-2:
+        condition: service_healthy
+      sentinel-3:
+        condition: service_healthy
+    networks:
+      - new-api-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status | grep -o '\"success\":\\s*true' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  redis_master_data:
+  redis_replica1_data:
+  redis_replica2_data:
+
+networks:
+  new-api-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

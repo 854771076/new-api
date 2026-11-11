@@ -10,6 +10,13 @@ const (
 	ContextKeyOriginalModel    ContextKey = "original_model"
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
 
+	// ContextKeyRequestTiming carries the per-request latency breakdown
+	// collector (relay/common.RequestTiming). The collector is shared across
+	// goroutines — the concurrency gate measures the queue wait first, the
+	// stream scanner measures the last upstream segment last — so the gin
+	// context is the only common channel between them.
+	ContextKeyRequestTiming ContextKey = "request_timing"
+
 	/* token related keys */
 	ContextKeyTokenUnlimited         ContextKey = "token_unlimited_quota"
 	ContextKeyTokenKey               ContextKey = "token_key"
@@ -39,6 +46,12 @@ const (
 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
+	// ContextKeyChannelConcurrencyLimit carries the selected channel's in-flight
+	// cap (Channel.GetConcurrencyLimit(), 0 = unlimited) so the relay layer can
+	// read it per attempt. It is published by SetupContextForSelectedChannel on
+	// both hops: the first hop (middleware.Distribute) and every retry hop
+	// (controller.getChannel).
+	ContextKeyChannelConcurrencyLimit ContextKey = "channel_concurrency_limit"
 
 	// ContextKeyUpstreamRequestOrigin is the scheme and host of the last upstream
 	// request, which differs from the base URL for absolute Advanced Custom routes
@@ -50,14 +63,15 @@ const (
 	ContextKeyAutoGroupRetryIndex ContextKey = "auto_group_retry_index"
 
 	/* user related keys */
-	ContextKeyUserId      ContextKey = "id"
-	ContextKeyUserSetting ContextKey = "user_setting"
-	ContextKeyUserQuota   ContextKey = "user_quota"
-	ContextKeyUserStatus  ContextKey = "user_status"
-	ContextKeyUserEmail   ContextKey = "user_email"
-	ContextKeyUserGroup   ContextKey = "user_group"
-	ContextKeyUsingGroup  ContextKey = "group"
-	ContextKeyUserName    ContextKey = "username"
+	ContextKeyUserId               ContextKey = "id"
+	ContextKeyUserSetting          ContextKey = "user_setting"
+	ContextKeyUserQuota            ContextKey = "user_quota"
+	ContextKeyUserConcurrencyLimit ContextKey = "user_concurrency_limit"
+	ContextKeyUserStatus           ContextKey = "user_status"
+	ContextKeyUserEmail            ContextKey = "user_email"
+	ContextKeyUserGroup            ContextKey = "user_group"
+	ContextKeyUsingGroup           ContextKey = "group"
+	ContextKeyUserName             ContextKey = "username"
 
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
 

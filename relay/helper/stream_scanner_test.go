@@ -15,6 +15,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -582,6 +583,8 @@ func TestStreamScannerHandler_StreamStatus_Timeout(t *testing.T) {
 	require.NotNil(t, info.StreamStatus)
 	assert.Equal(t, relaycommon.StreamEndReasonTimeout, info.StreamStatus.EndReason)
 	assert.False(t, info.StreamStatus.IsNormalEnd())
+	assert.Equal(t, string(types.ErrorCodeUpstreamIdleTimeout), info.StreamStatus.ErrorCode(),
+		"the gateway idle timeout carries its own code, so it can be told apart from an upstream disconnect")
 }
 
 func TestStreamScannerHandler_StreamStatus_SoftErrors(t *testing.T) {

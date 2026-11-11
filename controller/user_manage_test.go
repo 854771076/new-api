@@ -724,3 +724,72 @@ func TestUpdateUserSettingKeepsWhatTheRequestLeavesOut(t *testing.T) {
 		})
 	}
 }
+
+func performSelfUpdateRequest(t *testing.T, userID int, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/user/self", strings.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("id", userID)
+	c.Set("role", common.RoleCommonUser)
+	UpdateSelf(c)
+	return recorder
+}
+
+// TestUpdateSelfRejectsConcurrencyLimit pins the T-02-03 admission control: a
+// self-service request smuggling concurrency_limit never reaches users rows —
+// the cleanUser whitelist in UpdateSelf does not carry the field.
+func TestUpdateSelfRejectsConcurrencyLimit(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	user := model.User{
+		Username: "self-limit-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	recorder := performSelfUpdateRequest(t, user.Id,
+		fmt.Sprintf(`{"username":%q,"display_name":"renamed","concurrency_limit":99}`, user.Username))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"success":true`)
+
+	var stored model.User
+	require.NoError(t, db.First(&stored, user.Id).Error)
+	assert.Equal(t, 0, stored.ConcurrencyLimit, "self-service update must not persist concurrency_limit")
+	assert.Equal(t, "renamed", stored.DisplayName, "legitimate self-service fields still update")
+}
+
+// TestUpdateSelfGetSelfOmitsConcurrencyLimit pins the visibility half of
+// T-02-03: GetSelf (self DTO) never exposes concurrency_limit, while GetUser
+// (admin DTO) does.
+func TestUpdateSelfGetSelfOmitsConcurrencyLimit(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, authz.Init(db))
+	user := model.User{
+		Username: "self-visibility-user", Password: "password", Role: common.RoleCommonUser,
+		Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, ConcurrencyLimit: 5,
+	}
+	require.NoError(t, db.Create(&user).Error)
+
+	gin.SetMode(gin.TestMode)
+	selfRecorder := httptest.NewRecorder()
+	selfContext, _ := gin.CreateTestContext(selfRecorder)
+	selfContext.Request = httptest.NewRequest(http.MethodGet, "/api/user/self", nil)
+	selfContext.Set("id", user.Id)
+	selfContext.Set("role", common.RoleCommonUser)
+	GetSelf(selfContext)
+	require.Equal(t, http.StatusOK, selfRecorder.Code)
+	assert.NotContains(t, selfRecorder.Body.String(), "concurrency_limit",
+		"self DTO must not expose the admin-managed concurrency limit")
+
+	adminRecorder := httptest.NewRecorder()
+	adminContext, _ := gin.CreateTestContext(adminRecorder)
+	adminContext.Request = httptest.NewRequest(http.MethodGet, "/api/user/"+strconv.Itoa(user.Id), nil)
+	adminContext.Params = gin.Params{{Key: "id", Value: strconv.Itoa(user.Id)}}
+	adminContext.Set("role", common.RoleRootUser)
+	GetUser(adminContext)
+	require.Equal(t, http.StatusOK, adminRecorder.Code)
+	assert.Contains(t, adminRecorder.Body.String(), `"concurrency_limit":5`,
+		"admin DTO must expose the concurrency limit")
+}

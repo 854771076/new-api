@@ -265,6 +265,9 @@ export function StatCard(props: StatCardProps) {
             'text-muted-foreground/60 line-clamp-1 text-[11px] sm:text-xs',
             props.compactMobile && 'hidden sm:block'
           )}
+          // Clamped to one line so a refresh can never reflow the card;
+          // the title attribute keeps the full text reachable.
+          title={props.description}
         >
           {props.description}
         </p>
@@ -281,6 +284,7 @@ export function StatCard(props: StatCardProps) {
             'text-muted-foreground/60 line-clamp-1 text-[11px] leading-relaxed sm:text-xs',
             props.compactMobile && 'hidden sm:block'
           )}
+          title={props.description}
         >
           {props.description}
         </p>

@@ -32,11 +32,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return types.NewError(fmt.Errorf("failed to copy request to GeminiChatRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 
-	// model mapped 模型映射
-	err = helper.ModelMappedHelper(c, info, request)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
-	}
+	// model_mapping is applied by controller.Relay() inside the retry loop
+	// (right after getChannel sets model_mapping for the selected channel),
+	// so per-format handlers no longer call ModelMappedHelper here.
 	if err := helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
 		return newConvertRequestFailedError(c, info, err)
 	}
@@ -194,10 +192,9 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 		}
 	}
 
-	err = helper.ModelMappedHelper(c, info, req)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
-	}
+	// model_mapping is applied by controller.Relay() inside the retry loop
+	// (right after getChannel sets model_mapping for the selected channel),
+	// so per-format handlers no longer call ModelMappedHelper here.
 	if err := helper.ApplyReasoningModelSuffix(c, info, req); err != nil {
 		return newConvertRequestFailedError(c, info, err)
 	}

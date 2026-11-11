@@ -98,6 +98,25 @@ function getDuplicateSources(rows: MappingRow[]): string[] {
   return [...duplicates]
 }
 
+/**
+ * Request models whose upstream name is blank. The relay ignores such entries,
+ * so they are surfaced instead of being saved as mappings that never apply.
+ */
+function getMissingUpstreamSources(
+  rows: { from: string; to: string }[]
+): string[] {
+  const missing = new Set<string>()
+
+  for (const row of rows) {
+    const source = row.from.trim()
+    if (source && !row.to.trim()) {
+      missing.add(source)
+    }
+  }
+
+  return [...missing]
+}
+
 export function ModelMappingEditor(props: ModelMappingEditorProps) {
   const { t } = useTranslation()
   const inputsId = useId()
@@ -188,7 +207,16 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
         )
         return [...mapped, ...drafts]
       })
-      setJsonError(null)
+      const missingUpstream = getMissingUpstreamSources(
+        entries.map(([from, to]) => ({ from, to: String(to) }))
+      )
+      setJsonError(
+        missingUpstream.length > 0
+          ? t('Missing upstream model name for: {{models}}', {
+              models: missingUpstream.join(', '),
+            })
+          : null
+      )
       return true
     } catch {
       setJsonError(t('Model mapping must be valid JSON format'))
@@ -289,7 +317,14 @@ export function ModelMappingEditor(props: ModelMappingEditorProps) {
     }
 
     const json = convertRowsToJson(updatedRows)
-    setJsonError(null)
+    const missingUpstream = getMissingUpstreamSources(updatedRows)
+    setJsonError(
+      missingUpstream.length > 0
+        ? t('Missing upstream model name for: {{models}}', {
+            models: missingUpstream.join(', '),
+          })
+        : null
+    )
     setJsonValue(json)
     lastEmittedRef.current = json
     props.onChange(json)

@@ -114,6 +114,37 @@ export interface ToolSurchargeItem {
   price: number
 }
 
+/**
+ * Per-request latency breakdown written by the backend into
+ * `other.admin_info.timing` (admin-only). The field names mirror the backend
+ * snapshot keys one-to-one, so a missing key means "this segment was not
+ * measured" rather than "zero".
+ */
+export interface RequestTimingInfo {
+  /** Waited in the gateway's bounded concurrency queue before getting a slot. */
+  queue_wait_ms?: number
+  /** Time spent selecting a channel, summed over every attempt. */
+  channel_select_ms?: number
+  /** Wait for the upstream response headers (last attempt wins). */
+  upstream_header_ms?: number
+  /** Read the upstream response body. Non-streaming requests only. */
+  upstream_body_ms?: number
+  /** Upstream response headers → first upstream byte. Streaming requests only. */
+  upstream_first_byte_ms?: number
+  /** First upstream byte → stream end. Streaming requests only. */
+  upstream_stream_ms?: number
+  /** Settlement duration. */
+  settle_ms?: number
+  /** Number of channel selection attempts. */
+  attempts?: number
+  /** Upstream response header timeout in effect, in seconds (0 = no limit). */
+  upstream_header_timeout_s?: number
+  /** Streaming idle timeout in effect, in seconds. */
+  streaming_timeout_s?: number
+  /** Overall relay timeout in effect, in seconds (0 = no limit). */
+  relay_timeout_s?: number
+}
+
 export interface LogOtherData {
   admin_info?: {
     request_policy?: PolicyEvent[]
@@ -144,8 +175,16 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    // Per-request latency breakdown (admin only): queue wait, channel
+    // selection, upstream header wait, upstream first byte, upstream stream
+    // and settlement, plus the upstream timeouts in effect.
+    timing?: RequestTimingInfo
     // Reject / intercept reason (admin only)
     reject_reason?: string
+    // Operator-facing reason of an upstream transport failure, e.g.
+    // "connection refused by upstream". It never carries credentials or
+    // upstream payloads. Admin-only (nested under admin_info).
+    upstream_error_reason?: string
     task_plugin?: TaskPluginInfo
   }
   root_info?: {
@@ -178,6 +217,10 @@ export interface LogOtherData {
   login_method?: string
   user_agent?: string
   request_path?: string
+  // Fine-grained error code of a failed request, e.g. "upstream_timeout".
+  error_code?: string
+  error_type?: string
+  status_code?: number
   request_conversion?: string[]
   ws?: boolean
   audio?: boolean
@@ -251,6 +294,11 @@ export interface LogOtherData {
   stream_status?: {
     status?: string
     end_reason?: string
+    // The fine-grained error code of the stream, for example
+    // "upstream_idle_timeout" when the upstream went silent. The backend
+    // writes it into the consume log only; a streaming failure never
+    // produces an error log row, so this is the only place it shows up.
+    error_code?: string
     error_count?: number
     end_error?: string
     errors?: string[]

@@ -344,6 +344,20 @@ func migrateDB() error {
 	if err := migrateOptionPrimaryKey(DB); err != nil {
 		common.SysError(common.LogText("failed to migrate options primary key: %s", err.Error()))
 	}
+	// Same contract for the user axis: existing users tables get
+	// concurrency_limit here, before AutoMigrate(&User{}) below builds it on
+	// fresh databases; the HasColumn guard keeps both paths zero-DDL on the
+	// second startup (USR-02).
+	if err := migrateUserConcurrencyLimit(); err != nil {
+		return err
+	}
+	// Same contract for the channel axis (CHN-01): existing channels tables get
+	// concurrency_limit here, before AutoMigrate(&Channel{}) below builds it on
+	// fresh databases; the HasColumn guard keeps both paths zero-DDL on the
+	// second startup.
+	if err := migrateChannelConcurrencyLimit(); err != nil {
+		return err
+	}
 
 	err := DB.AutoMigrate(
 		&Channel{},
@@ -662,17 +676,73 @@ func migrateTokenConcurrencyLimits() error {
 	return nil
 }
 
-func addTokenConcurrencyColumn(columnName, sqliteDef string) error {
-	if DB.Migrator().HasColumn(&Token{}, columnName) {
+// migrateUserConcurrencyLimit idempotently adds the user-level concurrency
+// limit column to the users table on every supported dialect. Safe to run on
+// every startup: each branch checks HasColumn first (USR-02, three-database
+// migration idempotency).
+func migrateUserConcurrencyLimit() error {
+	if !DB.Migrator().HasTable("users") {
 		return nil
+	}
+	return addConcurrencyColumn(&User{}, "users", "concurrency_limit", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// migrateChannelConcurrencyLimit idempotently adds the channel-level
+// concurrency limit column to the channels table on every supported dialect.
+// Safe to run on every startup: the shared helper checks HasColumn first
+// (CHN-01, three-database migration idempotency; one-line mirror of
+// migrateUserConcurrencyLimit above).
+func migrateChannelConcurrencyLimit() error {
+	if !DB.Migrator().HasTable("channels") {
+		return nil
+	}
+	return addConcurrencyColumn(&Channel{}, "channels", "concurrency_limit", "INTEGER NOT NULL DEFAULT 0")
+}
+
+func addTokenConcurrencyColumn(columnName, sqliteDef string) error {
+	return addConcurrencyColumn(&Token{}, "tokens", columnName, sqliteDef)
+}
+
+func addConcurrencyColumn(modelValue any, tableName, columnName, sqliteDef string) error {
+	if DB.Migrator().HasColumn(modelValue, columnName) {
+		return nil
+	}
+	// FORK-LOCAL-EXTENSION: 2026-09-24 concurrency_limit SQLSTATE 42601 + MySQL TEXT DEFAULT rejection; remove-when: upstream issue resolved
+	//
+	// sqliteDef is treated as a complete column definition (used verbatim on
+	// SQLite). On MySQL/PostgreSQL we previously appended " DEFAULT NULL" so
+	// that callers passing a bare type ended up with a nullable column — but
+	// all call sites of this helper pass a definition that already includes
+	// "NOT NULL DEFAULT ..." (see migrateTokenConcurrencyLimits and
+	// migrateUserConcurrencyLimit above), so the append produced SQL with two
+	// DEFAULT clauses and PostgreSQL rejected it with SQLSTATE 42601 ("multiple
+	// default values specified for column").
+	//
+	// Preserve the original nullable-fallback only when the caller has not
+	// already constrained the column.
+	upper := strings.ToUpper(sqliteDef)
+	alreadyConstrained := strings.Contains(upper, "NOT NULL") || strings.Contains(upper, "DEFAULT")
+	nullableSuffix := ""
+	if !alreadyConstrained {
+		nullableSuffix = " DEFAULT NULL"
+	}
+	// MySQL 8 strict-mode rejects explicit DEFAULT on TEXT/BLOB columns
+	// ("BLOB, TEXT, GEOMETRY or JSON column '...' can't have a default value",
+	// Err 1101). GORM's fresh-schema AutoMigrate produces TEXT NOT NULL with
+	// an implicit default on MySQL; match that by stripping the trailing
+	// DEFAULT clause from the caller-provided definition for MySQL + TEXT.
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) && strings.Contains(upper, "TEXT") {
+		if i := strings.LastIndex(upper, "DEFAULT"); i > 0 {
+			sqliteDef = strings.TrimSpace(sqliteDef[:i])
+		}
 	}
 	switch {
 	case common.UsingMainDatabase(common.DatabaseTypeSQLite):
-		return DB.Exec(fmt.Sprintf("ALTER TABLE tokens ADD COLUMN %s %s", columnName, sqliteDef)).Error
+		return DB.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, sqliteDef)).Error
 	case common.UsingMainDatabase(common.DatabaseTypeMySQL):
-		return DB.Exec(fmt.Sprintf("ALTER TABLE tokens ADD COLUMN %s %s DEFAULT NULL", columnName, sqliteDef)).Error
+		return DB.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s%s", tableName, columnName, sqliteDef, nullableSuffix)).Error
 	case common.UsingMainDatabase(common.DatabaseTypePostgreSQL):
-		return DB.Exec(fmt.Sprintf(`ALTER TABLE tokens ADD COLUMN %s %s DEFAULT NULL`, columnName, sqliteDef)).Error
+		return DB.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s%s`, tableName, columnName, sqliteDef, nullableSuffix)).Error
 	default:
 		return fmt.Errorf("unsupported database dialect for concurrency migration")
 	}

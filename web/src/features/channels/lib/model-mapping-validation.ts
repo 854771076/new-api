@@ -161,40 +161,6 @@ export function findMissingModelsInMapping(
 }
 
 /**
- * Validate model mapping JSON format
- */
-export function validateModelMappingJson(modelMapping: string): {
-  valid: boolean
-  error?: string
-} {
-  if (!modelMapping || modelMapping.trim() === '') {
-    return { valid: true }
-  }
-
-  try {
-    const parsed = JSON.parse(modelMapping)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {
-        valid: false,
-        error: 'Model mapping must be a valid JSON object',
-      }
-    }
-    if (Object.values(parsed).some((value) => typeof value !== 'string')) {
-      return {
-        valid: false,
-        error: 'Model mapping values must be strings',
-      }
-    }
-    return { valid: true }
-  } catch {
-    return {
-      valid: false,
-      error: 'Model mapping must be valid JSON format',
-    }
-  }
-}
-
-/**
  * Get redirect models that are also in the models list
  * (These should be removed from models list to keep /v1/models clean)
  */

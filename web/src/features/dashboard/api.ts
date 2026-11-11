@@ -40,6 +40,7 @@ export async function getUserQuotaDates(
     end_timestamp: number
     default_time?: string
     username?: string
+    token_key?: string
   },
   isAdmin = false
 ) {
@@ -72,6 +73,7 @@ export async function getFlowQuotaDates(
     end_timestamp: number
     default_time?: string
     username?: string
+    token_key?: string
   },
   isAdmin = false
 ) {
@@ -81,6 +83,32 @@ export async function getFlowQuotaDates(
     data?: FlowQuotaDataItem[]
     message?: string
   }>(endpoint, { params })
+  return res.data
+}
+
+// Dashboard 筛选弹窗用的 token key autocomplete。
+// 后端返回 distinct token_key 列表，附 token_name / user_name / usage / token_used / deleted 字段，
+// 由前端 i18n 模板拼装友好 label。
+// start_timestamp / end_timestamp（秒）非缺省时，usage / token_used 只统计该时间窗口。
+export async function getTokenKeys(params: {
+  keyword?: string
+  limit?: number
+  start_timestamp?: number
+  end_timestamp?: number
+}) {
+  const res = await api.get<{
+    success: boolean
+    data: {
+      label: string
+      value: string
+      token_name?: string
+      user_name?: string
+      usage?: number
+      token_used?: number
+      deleted?: boolean
+    }[]
+    message?: string
+  }>('/api/data/token-keys', { params })
   return res.data
 }
 

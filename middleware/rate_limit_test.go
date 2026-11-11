@@ -218,11 +218,17 @@ func TestRedisFailurePolicies(t *testing.T) {
 		c.Status(http.StatusNoContent)
 	})
 
+	// 2026-10-13 contract update (observed during UAT test 6): a Redis outage
+	// fail-opens to the process-local window (D-08/D-12 philosophy) instead of
+	// escalating every rate-limited call to a 500 — the fail-closed 500 kept
+	// the admin concurrency page from reading degraded status for the whole
+	// outage window. First in-quota requests pass; the quota stays enforced
+	// (pinned by TestGlobalAPIRateLimitFailsOpenToMemoryWhenRedisDown).
 	ipResponse := performRateLimitRequest(router, "/ip", "192.0.2.60:12345")
-	assert.Equal(t, http.StatusInternalServerError, ipResponse.Code)
+	assert.Equal(t, http.StatusNoContent, ipResponse.Code)
 	assert.Empty(t, ipResponse.Body.String())
 	userResponse := performRateLimitRequest(router, "/user", "192.0.2.61:12345")
-	assert.Equal(t, http.StatusInternalServerError, userResponse.Code)
+	assert.Equal(t, http.StatusNoContent, userResponse.Code)
 	assert.Empty(t, userResponse.Body.String())
 	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/email", "192.0.2.62:12345").Code)
 }

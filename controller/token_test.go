@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
@@ -1013,5 +1014,599 @@ func verifyAPITokenAudit(t *testing.T) {
 		var count int64
 		require.NoError(t, model.DB.Model(&model.Token{}).Where("name = ?", "audit-down").Count(&count).Error)
 		assert.EqualValues(t, 1, count)
+	})
+}
+
+type tokenConcurrencyLimitsView struct {
+	ConcurrencyLimit        int    `json:"concurrency_limit"`
+	ConcurrencyLimitByModel string `json:"concurrency_limit_by_model"`
+}
+
+func TestAddTokenPersistsConcurrencyLimits(t *testing.T) {
+	t.Run("admin create persists full CSV concurrency limits", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		body := map[string]any{
+			"name":                       "conc-create-full",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"group":                      "default",
+			"concurrency_limit":          2,
+			"concurrency_limit_by_model": "gpt-fast=1,gpt-4o=3",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var created model.Token
+		require.NoError(t, db.Where("name = ?", "conc-create-full").First(&created).Error)
+		assert.Equal(t, 2, created.ConcurrencyLimit)
+		assert.Equal(t, "gpt-fast=1,gpt-4o=3", created.ConcurrencyLimitByModel)
+	})
+
+	t.Run("admin create persists single-entry CSV concurrency limit", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		body := map[string]any{
+			"name":                       "conc-create-single",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"group":                      "default",
+			"concurrency_limit":          1,
+			"concurrency_limit_by_model": "gpt-fast=1",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var created model.Token
+		require.NoError(t, db.Where("name = ?", "conc-create-single").First(&created).Error)
+		assert.Equal(t, 1, created.ConcurrencyLimit)
+		assert.Equal(t, "gpt-fast=1", created.ConcurrencyLimitByModel)
+	})
+}
+
+func TestUpdateTokenPersistsConcurrencyLimits(t *testing.T) {
+	t.Run("admin update persists explicit values and echoes them in the response", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedToken(t, db, 1, "conc-update", "concupdatekey0001")
+		body := map[string]any{
+			"id":                         token.Id,
+			"name":                       "conc-update",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"model_limits_enabled":       false,
+			"model_limits":               "",
+			"group":                      "default",
+			"cross_group_retry":          false,
+			"concurrency_limit":          2,
+			"concurrency_limit_by_model": "gpt-fast=1",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var updated model.Token
+		require.NoError(t, db.First(&updated, "id = ?", token.Id).Error)
+		assert.Equal(t, 2, updated.ConcurrencyLimit)
+		assert.Equal(t, "gpt-fast=1", updated.ConcurrencyLimitByModel)
+
+		var echoed tokenConcurrencyLimitsView
+		require.NoError(t, common.Unmarshal(response.Data, &echoed))
+		assert.Equal(t, 2, echoed.ConcurrencyLimit)
+		assert.Equal(t, "gpt-fast=1", echoed.ConcurrencyLimitByModel)
+
+		getCtx, getRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		// The readback must come from an admin requester: response visibility of
+		// the concurrency keys is role-gated (TUI-03), so role=common would strip
+		// them by contract.
+		getCtx.Set("role", common.RoleAdminUser)
+		getCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(getCtx)
+		getResponse := decodeAPIResponse(t, getRecorder)
+		require.True(t, getResponse.Success, getResponse.Message)
+		var readback tokenConcurrencyLimitsView
+		require.NoError(t, common.Unmarshal(getResponse.Data, &readback))
+		assert.Equal(t, 2, readback.ConcurrencyLimit)
+		assert.Equal(t, "gpt-fast=1", readback.ConcurrencyLimitByModel)
+
+		auditParams, ok := common.GetContextKeyType[model.AuditFields](ctx, constant.ContextKeyTokenAuditParams)
+		require.True(t, ok)
+		changedFields, ok := auditParams["changed_fields"].([]string)
+		require.True(t, ok)
+		assert.Contains(t, changedFields, "concurrency_limit")
+		assert.Contains(t, changedFields, "concurrency_limit_by_model")
+	})
+
+	t.Run("admin update explicit zero clears persisted limits", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedToken(t, db, 1, "conc-clear", "concclearkey00001")
+		require.NoError(t, db.Model(token).Updates(map[string]any{
+			"concurrency_limit":          3,
+			"concurrency_limit_by_model": "gpt-4o=3",
+		}).Error)
+		body := map[string]any{
+			"id":                         token.Id,
+			"name":                       "conc-clear",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"model_limits_enabled":       false,
+			"model_limits":               "",
+			"group":                      "default",
+			"cross_group_retry":          false,
+			"concurrency_limit":          0,
+			"concurrency_limit_by_model": "",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var updated model.Token
+		require.NoError(t, db.First(&updated, "id = ?", token.Id).Error)
+		assert.Equal(t, 0, updated.ConcurrencyLimit)
+		assert.Empty(t, updated.ConcurrencyLimitByModel)
+	})
+}
+
+func TestUpdateTokenConcurrencyLimitsPreservedWhenOmitted(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	token := seedToken(t, db, 1, "conc-omitted", "concomittedkey0001")
+	require.NoError(t, db.Model(token).Updates(map[string]any{
+		"concurrency_limit":          3,
+		"concurrency_limit_by_model": "gpt-4o=3",
+	}).Error)
+	// drawer-shaped update payload (web/src/features/keys/lib/api-key-form.ts):
+	// the two concurrency keys are absent, which must not clear the admin caps.
+	body := map[string]any{
+		"id":                   token.Id,
+		"name":                 "conc-omitted-renamed",
+		"expired_time":         -1,
+		"remain_quota":         100,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    false,
+	}
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	ctx.Set("role", common.RoleAdminUser)
+	UpdateToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	require.True(t, response.Success, response.Message)
+
+	var updated model.Token
+	require.NoError(t, db.First(&updated, "id = ?", token.Id).Error)
+	assert.Equal(t, 3, updated.ConcurrencyLimit, "omitted concurrency_limit must not silently clear the admin cap")
+	assert.Equal(t, "gpt-4o=3", updated.ConcurrencyLimitByModel, "omitted concurrency_limit_by_model must not silently clear the admin caps")
+}
+
+// seedTokenWithConcurrencyLimits creates a token and presets its stored
+// concurrency caps so response-visibility tests can tell "key stripped" apart
+// from "key present with zero values" (0 means unlimited).
+func seedTokenWithConcurrencyLimits(t *testing.T, db *gorm.DB, userID int, name string, rawKey string, limit int, byModel string) *model.Token {
+	t.Helper()
+
+	token := seedToken(t, db, userID, name, rawKey)
+	require.NoError(t, db.Model(token).Updates(map[string]any{
+		"concurrency_limit":          limit,
+		"concurrency_limit_by_model": byModel,
+	}).Error)
+	return token
+}
+
+// TestTokenConcurrencyLimitsHiddenFromNonAdminResponses pins the TUI-03 API
+// face: a non-admin requester must never see the two concurrency keys in any
+// token API response — the keys must be absent from the JSON object, not
+// rendered as 0 (0 means "unlimited", so a zeroed key would both mislead and
+// leak the field name).
+func TestTokenConcurrencyLimitsHiddenFromNonAdminResponses(t *testing.T) {
+	t.Run("GetToken omits both concurrency keys for non-admin requester", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedTokenWithConcurrencyLimits(t, db, 1, "hidden-detail", "hiddendetailkey01", 3, "gpt-4o=3")
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var data map[string]any
+		require.NoError(t, common.Unmarshal(response.Data, &data))
+		require.NotContains(t, data, "concurrency_limit")
+		require.NotContains(t, data, "concurrency_limit_by_model")
+	})
+
+	t.Run("GetAllTokens list items omit both concurrency keys for non-admin requester", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		seedTokenWithConcurrencyLimits(t, db, 1, "hidden-list", "hiddenlistkey0001", 3, "gpt-4o=3")
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/?p=1&size=10", nil, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		GetAllTokens(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var page struct {
+			Items []map[string]any `json:"items"`
+		}
+		require.NoError(t, common.Unmarshal(response.Data, &page))
+		require.Len(t, page.Items, 1)
+		require.NotContains(t, page.Items[0], "concurrency_limit")
+		require.NotContains(t, page.Items[0], "concurrency_limit_by_model")
+	})
+
+	t.Run("UpdateToken echo omits both concurrency keys for non-admin requester", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedTokenWithConcurrencyLimits(t, db, 1, "hidden-echo", "hiddenechokey0001", 3, "gpt-4o=3")
+		body := map[string]any{
+			"id":                   token.Id,
+			"name":                 "hidden-echo-renamed",
+			"expired_time":         -1,
+			"remain_quota":         100,
+			"unlimited_quota":      true,
+			"model_limits_enabled": false,
+			"model_limits":         "",
+			"group":                "default",
+			"cross_group_retry":    false,
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var data map[string]any
+		require.NoError(t, common.Unmarshal(response.Data, &data))
+		require.NotContains(t, data, "concurrency_limit")
+		require.NotContains(t, data, "concurrency_limit_by_model")
+	})
+}
+
+// TestTokenConcurrencyLimitsVisibleToAdminResponses pins the admin half of the
+// same contract: role >= admin responses still carry both keys, an explicit 0
+// renders as key-present value-0 (the pointer shadow field must not let
+// omitempty swallow it).
+func TestTokenConcurrencyLimitsVisibleToAdminResponses(t *testing.T) {
+	t.Run("admin GetToken carries stored concurrency values", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedTokenWithConcurrencyLimits(t, db, 1, "admin-detail", "admindetailkey01", 3, "gpt-4o=3")
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var data map[string]any
+		require.NoError(t, common.Unmarshal(response.Data, &data))
+		require.Contains(t, data, "concurrency_limit")
+		require.Contains(t, data, "concurrency_limit_by_model")
+		assert.EqualValues(t, 3, data["concurrency_limit"])
+		assert.EqualValues(t, "gpt-4o=3", data["concurrency_limit_by_model"])
+	})
+
+	t.Run("admin explicit zero keeps concurrency_limit key present with value 0", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedToken(t, db, 1, "admin-zero", "adminzerolimitkey1")
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(token.Id), nil, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		ctx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(token.Id)}}
+		GetToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		var data map[string]any
+		require.NoError(t, common.Unmarshal(response.Data, &data))
+		require.Contains(t, data, "concurrency_limit")
+		assert.EqualValues(t, 0, data["concurrency_limit"])
+	})
+}
+
+func TestTokenConcurrencyLimitsRequireAdmin(t *testing.T) {
+	t.Run("non-admin create ignores concurrency limit payload", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		body := map[string]any{
+			"name":                       "conc-nonadmin-create",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"group":                      "default",
+			"concurrency_limit":          5,
+			"concurrency_limit_by_model": "gpt-fast=2",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var created model.Token
+		require.NoError(t, db.Where("name = ?", "conc-nonadmin-create").First(&created).Error)
+		assert.Equal(t, 0, created.ConcurrencyLimit)
+		assert.Empty(t, created.ConcurrencyLimitByModel)
+	})
+
+	t.Run("non-admin update preserves admin-set concurrency limits", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedToken(t, db, 1, "conc-nonadmin-update", "concnonadminkey001")
+		require.NoError(t, db.Model(token).Updates(map[string]any{
+			"concurrency_limit":          3,
+			"concurrency_limit_by_model": "gpt-4o=3",
+		}).Error)
+		body := map[string]any{
+			"id":                         token.Id,
+			"name":                       "conc-nonadmin-update",
+			"expired_time":               -1,
+			"remain_quota":               100,
+			"unlimited_quota":            true,
+			"model_limits_enabled":       false,
+			"model_limits":               "",
+			"group":                      "default",
+			"cross_group_retry":          false,
+			"concurrency_limit":          7,
+			"concurrency_limit_by_model": "gpt-fast=9",
+		}
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var updated model.Token
+		require.NoError(t, db.First(&updated, "id = ?", token.Id).Error)
+		assert.Equal(t, 3, updated.ConcurrencyLimit, "non-admin PUT must not overwrite the admin cap")
+		assert.Equal(t, "gpt-4o=3", updated.ConcurrencyLimitByModel, "non-admin PUT must not overwrite the admin per-model caps")
+	})
+}
+
+// tokenConcurrencyWriteBody builds a drawer-shaped POST body plus the two
+// concurrency write-boundary fields under test.
+func tokenConcurrencyWriteBody(name string, extra map[string]any) map[string]any {
+	body := map[string]any{
+		"name":            name,
+		"expired_time":    -1,
+		"remain_quota":    100,
+		"unlimited_quota": true,
+		"group":           "default",
+	}
+	for key, value := range extra {
+		body[key] = value
+	}
+	return body
+}
+
+// tokenConcurrencyDefects are the CSV defect classes the write boundary must
+// reject with an explicit error naming the raw entry and the reason code
+// (empty_model is unreachable through the tokenizer — see token_limits.go).
+var tokenConcurrencyDefects = []struct {
+	raw    string
+	reason string
+}{
+	{raw: "bad", reason: "missing_separator"},
+	{raw: "gpt-4o=x", reason: "invalid_limit"},
+	{raw: "gpt-4o=0", reason: "non_positive_limit"},
+}
+
+// TestAddTokenRejectsInvalidConcurrencyLimits pins the TUI-02 write-boundary
+// policy on POST: an explicit negative concurrency_limit or any malformed
+// per-model CSV entry yields success:false naming the entry and reason code
+// without persisting a row (02-REVIEW IN-10 Fix; no silent normalization),
+// while 0=unlimited and tolerant inputs (trailing comma) still persist.
+func TestAddTokenRejectsInvalidConcurrencyLimits(t *testing.T) {
+	t.Run("negative concurrency_limit is rejected without persisting", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		body := tokenConcurrencyWriteBody("conc-add-negative", map[string]any{"concurrency_limit": -1})
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.False(t, response.Success)
+		assert.Contains(t, response.Message, "concurrency_limit")
+		assert.Contains(t, response.Message, "-1")
+
+		var count int64
+		require.NoError(t, db.Model(&model.Token{}).Where("name = ?", "conc-add-negative").Count(&count).Error)
+		assert.Zero(t, count, "rejected create must not persist a row")
+	})
+
+	for _, defect := range tokenConcurrencyDefects {
+		t.Run("malformed CSV entry "+defect.raw+" is rejected without persisting", func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			body := tokenConcurrencyWriteBody("conc-add-"+defect.reason, map[string]any{
+				"concurrency_limit":          3,
+				"concurrency_limit_by_model": defect.raw,
+			})
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+			ctx.Set("role", common.RoleAdminUser)
+			AddToken(ctx)
+
+			response := decodeAPIResponse(t, recorder)
+			require.False(t, response.Success)
+			assert.Contains(t, response.Message, defect.raw, "error must name the offending entry")
+			assert.Contains(t, response.Message, defect.reason, "error must name the reason code")
+
+			var count int64
+			require.NoError(t, db.Model(&model.Token{}).Where("name = ?", "conc-add-"+defect.reason).Count(&count).Error)
+			assert.Zero(t, count, "rejected create must not persist a row")
+		})
+	}
+
+	t.Run("explicit zero and trailing-comma CSV are accepted and persisted verbatim", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		body := tokenConcurrencyWriteBody("conc-add-accepts", map[string]any{
+			"concurrency_limit":          0,
+			"concurrency_limit_by_model": "gpt-4o=3,",
+		})
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		AddToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var created model.Token
+		require.NoError(t, db.Where("name = ?", "conc-add-accepts").First(&created).Error)
+		assert.Equal(t, 0, created.ConcurrencyLimit)
+		assert.Equal(t, "gpt-4o=3,", created.ConcurrencyLimitByModel)
+	})
+}
+
+// TestUpdateTokenRejectsInvalidConcurrencyLimits pins the same write-boundary
+// policy on PUT: rejected payloads keep the stored caps untouched, non-admin
+// malformed payloads stay silently ignored (02-06 contract — validation must
+// not widen the rejection surface), and accepted inputs persist verbatim.
+func TestUpdateTokenRejectsInvalidConcurrencyLimits(t *testing.T) {
+	seedWithCaps := func(t *testing.T, db *gorm.DB, name string, rawKey string) *model.Token {
+		t.Helper()
+		token := seedToken(t, db, 1, name, rawKey)
+		require.NoError(t, db.Model(token).Updates(map[string]any{
+			"concurrency_limit":          3,
+			"concurrency_limit_by_model": "gpt-4o=3",
+		}).Error)
+		return token
+	}
+	updateBody := func(id int, name string, extra map[string]any) map[string]any {
+		body := map[string]any{
+			"id":                   id,
+			"name":                 name,
+			"expired_time":         -1,
+			"remain_quota":         100,
+			"unlimited_quota":      true,
+			"model_limits_enabled": false,
+			"model_limits":         "",
+			"group":                "default",
+			"cross_group_retry":    false,
+		}
+		for key, value := range extra {
+			body[key] = value
+		}
+		return body
+	}
+	requireCapsUntouched := func(t *testing.T, db *gorm.DB, token *model.Token) {
+		t.Helper()
+		var stored model.Token
+		require.NoError(t, db.First(&stored, "id = ?", token.Id).Error)
+		assert.Equal(t, 3, stored.ConcurrencyLimit, "rejected update must not modify the stored cap")
+		assert.Equal(t, "gpt-4o=3", stored.ConcurrencyLimitByModel, "rejected update must not modify the stored per-model caps")
+	}
+
+	t.Run("negative concurrency_limit is rejected and stored caps stay untouched", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedWithCaps(t, db, "conc-upd-negative", "concupdnegative01")
+		body := updateBody(token.Id, "conc-upd-negative", map[string]any{"concurrency_limit": -1})
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.False(t, response.Success)
+		assert.Contains(t, response.Message, "concurrency_limit")
+		assert.Contains(t, response.Message, "-1")
+		requireCapsUntouched(t, db, token)
+	})
+
+	for _, defect := range tokenConcurrencyDefects {
+		t.Run("malformed CSV entry "+defect.raw+" is rejected and stored caps stay untouched", func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			token := seedWithCaps(t, db, "conc-upd-"+defect.reason, "concupd"+defect.reason[:4]+"01")
+			body := updateBody(token.Id, "conc-upd-"+defect.reason, map[string]any{
+				"concurrency_limit":          3,
+				"concurrency_limit_by_model": defect.raw,
+			})
+
+			ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+			ctx.Set("role", common.RoleAdminUser)
+			UpdateToken(ctx)
+
+			response := decodeAPIResponse(t, recorder)
+			require.False(t, response.Success)
+			assert.Contains(t, response.Message, defect.raw, "error must name the offending entry")
+			assert.Contains(t, response.Message, defect.reason, "error must name the reason code")
+			requireCapsUntouched(t, db, token)
+		})
+	}
+
+	t.Run("non-admin malformed payload stays silently ignored", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedWithCaps(t, db, "conc-upd-nonadmin", "concupdnonadmin1")
+		body := updateBody(token.Id, "conc-upd-nonadmin", map[string]any{
+			"concurrency_limit":          -1,
+			"concurrency_limit_by_model": "bad",
+		})
+
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleCommonUser)
+		UpdateToken(ctx)
+
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+		requireCapsUntouched(t, db, token)
+	})
+
+	t.Run("trailing-comma CSV persists verbatim and explicit zero clears", func(t *testing.T) {
+		db := setupTokenControllerTestDB(t)
+		token := seedWithCaps(t, db, "conc-upd-accepts", "concupdaccepts01")
+
+		body := updateBody(token.Id, "conc-upd-accepts", map[string]any{
+			"concurrency_limit":          3,
+			"concurrency_limit_by_model": "gpt-4o=3,",
+		})
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateToken(ctx)
+		response := decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		var stored model.Token
+		require.NoError(t, db.First(&stored, "id = ?", token.Id).Error)
+		assert.Equal(t, 3, stored.ConcurrencyLimit)
+		assert.Equal(t, "gpt-4o=3,", stored.ConcurrencyLimitByModel)
+
+		body = updateBody(token.Id, "conc-upd-accepts", map[string]any{
+			"concurrency_limit":          0,
+			"concurrency_limit_by_model": "",
+		})
+		ctx, recorder = newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateToken(ctx)
+		response = decodeAPIResponse(t, recorder)
+		require.True(t, response.Success, response.Message)
+
+		require.NoError(t, db.First(&stored, "id = ?", token.Id).Error)
+		assert.Equal(t, 0, stored.ConcurrencyLimit, "explicit 0 must remain accepted as unlimited")
+		assert.Empty(t, stored.ConcurrencyLimitByModel)
 	})
 }

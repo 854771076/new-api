@@ -320,13 +320,28 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 	}
 }
 
+// newClientAPIRequest builds the outbound upstream request for a client relay
+// bound to the client request context: when the client disconnects,
+// c.Request.Context() is canceled and the in-flight upstream call aborts
+// immediately instead of holding its concurrency slot until the upstream
+// responds on its own. http.NewRequestWithContext derives the same
+// snapshot-based GetBody as http.NewRequest for *bytes.Reader / *bytes.Buffer /
+// *strings.Reader bodies, so transport-level retries keep replaying the full
+// body.
+func newClientAPIRequest(c *gin.Context, fullRequestURL string, requestBody io.Reader) (*http.Request, error) {
+	if c == nil || c.Request == nil {
+		return nil, errors.New("client request is missing")
+	}
+	return http.NewRequestWithContext(c.Request.Context(), c.Request.Method, fullRequestURL, requestBody)
+}
+
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := newClientAPIRequest(c, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -354,7 +369,7 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
-	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
+	req, err := newClientAPIRequest(c, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
 	}
@@ -454,6 +469,18 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+// maskedUpstreamError presents a fixed client-facing message for an upstream
+// transport failure while keeping the original error in the chain, so
+// errors.Is/As still see the cause (for example a context.Canceled from a
+// disconnected client).
+type maskedUpstreamError struct {
+	message string
+	cause   error
+}
+
+func (e maskedUpstreamError) Error() string { return e.message }
+func (e maskedUpstreamError) Unwrap() error { return e.cause }
+
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
@@ -486,10 +513,39 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	}
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
+	// 上游响应头等待：从发起 Do 到收到响应头（含连接失败与响应头超时的耗时）。
+	// 响应头到达的时刻同时是"上游首包"的计时起点，两段因此互不重叠。
+	timing := common.RequestTimingOf(c)
+	upstreamSentAt := time.Now()
 	resp, err := relayClient.Do(req)
+	upstreamHeaderAt := time.Now()
+	timing.SetUpstreamHeaderWait(upstreamHeaderAt.Sub(upstreamSentAt))
+	if err == nil && resp != nil {
+		timing.MarkUpstreamHeaderReceived(upstreamHeaderAt)
+	}
 	if err != nil {
 		logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		// Mask the upstream error message toward clients exactly as before
+		// ("upstream error: do request failed") but keep the cause chain so a
+		// client-disconnect cancellation surfaces as context.Canceled through
+		// *types.NewAPIError.Unwrap. ErrOptionWithHideErrMsg cannot be used
+		// here: it replaces the wrapped error and would sever that chain.
+		//
+		// The error code and the operator-facing reason are the diagnostic
+		// part: the code says which transport failure happened (a refused
+		// connection, a DNS or TLS failure, an upstream that hung up) and the
+		// reason says how long it took. The reason is admin-only and never
+		// reaches the client response.
+		failure, ok := classifyHTTP2UpstreamFailure(err)
+		if !ok {
+			failure = types.ClassifyUpstreamError(err)
+		}
+		failure = failure.WithElapsed(time.Since(upstreamSentAt))
+		return nil, types.NewError(
+			maskedUpstreamError{message: "upstream error: do request failed", cause: err},
+			failure.Code,
+			types.ErrOptionWithAdminReason(failure.Reason),
+		)
 	}
 	if resp == nil {
 		return nil, errors.New("resp is nil")

@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/concurrency"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -37,11 +38,26 @@ type tokenRequest struct {
 	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
 	// 指针区分“未传”和显式 false：新建时未传即开启，更新时未传则保留原值。
 	AllowUserQuotaQuery *bool `json:"allow_user_quota_query"`
+	// Pointer shadow fields for payload presence detection: nil means the key
+	// was omitted (keep the stored value), non-nil means an explicit value
+	// (0 / "" included). The outer fields shadow model.Token's fields for JSON
+	// binding, so request.Token never receives these two keys.
+	ConcurrencyLimit        *int    `json:"concurrency_limit"`
+	ConcurrencyLimitByModel *string `json:"concurrency_limit_by_model"`
 }
 
 type tokenResponse struct {
 	*model.Token
 	AutoGroups []string `json:"auto_groups"`
+	// Pointer shadow fields for response visibility control (output-side mirror
+	// of the tokenRequest input-side shadow fields): encoding/json prefers the
+	// shallower field, so these outer fields replace the embedded model.Token
+	// values. Non-admin fill leaves them nil -> omitempty drops the keys
+	// entirely; admin fills them (a pointer to 0 still renders "0"). Never
+	// zero-out to strip: 0 means "unlimited", so a rendered 0 would both
+	// mislead and leak the field name (TUI-03 key-absence contract).
+	ConcurrencyLimit        *int    `json:"concurrency_limit,omitempty"`
+	ConcurrencyLimitByModel *string `json:"concurrency_limit_by_model,omitempty"`
 }
 
 func maxTokenQuota() int {
@@ -54,7 +70,7 @@ func maxTokenQuota() int {
 	return quota
 }
 
-func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
+func buildMaskedTokenResponse(token *model.Token, isAdmin bool) *tokenResponse {
 	if token == nil {
 		return nil
 	}
@@ -68,13 +84,18 @@ func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	if len(autoGroups) == 0 {
 		autoGroups = nil
 	}
-	return &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups}
+	response := &tokenResponse{Token: &maskedToken, AutoGroups: autoGroups}
+	if isAdmin {
+		response.ConcurrencyLimit = &maskedToken.ConcurrencyLimit
+		response.ConcurrencyLimitByModel = &maskedToken.ConcurrencyLimitByModel
+	}
+	return response
 }
 
-func buildMaskedTokenResponses(tokens []*model.Token) []*tokenResponse {
+func buildMaskedTokenResponses(tokens []*model.Token, isAdmin bool) []*tokenResponse {
 	maskedTokens := make([]*tokenResponse, 0, len(tokens))
 	for _, token := range tokens {
-		maskedTokens = append(maskedTokens, buildMaskedTokenResponse(token))
+		maskedTokens = append(maskedTokens, buildMaskedTokenResponse(token, isAdmin))
 	}
 	return maskedTokens
 }
@@ -129,6 +150,42 @@ func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) boo
 	return true
 }
 
+// applyAdminConcurrencyLimits validates and applies the admin-only concurrency
+// limit fields from the request onto the token being written. Concurrency limits
+// are admin-only (v0.2): non-admin payloads never write them. Explicitly
+// submitted values (non-nil) must first pass the write-boundary validation
+// (02-REVIEW IN-10): negative caps and malformed CSV entries are rejected with a
+// clear error before anything is persisted — never silently normalized.
+// Validation applies only to keys the request actually sent; omitted keys leave
+// the token's stored values untouched. Returns false if a validation error was
+// written to the response, so the caller must return.
+func applyAdminConcurrencyLimits(c *gin.Context, request *tokenRequest, token *model.Token) bool {
+	if c.GetInt("role") < common.RoleAdminUser {
+		return true
+	}
+	if request.ConcurrencyLimit != nil || request.ConcurrencyLimitByModel != nil {
+		globalLimit := 0
+		if request.ConcurrencyLimit != nil {
+			globalLimit = *request.ConcurrencyLimit
+		}
+		byModelCSV := ""
+		if request.ConcurrencyLimitByModel != nil {
+			byModelCSV = *request.ConcurrencyLimitByModel
+		}
+		if err := concurrency.ValidateConcurrencyLimits(globalLimit, byModelCSV); err != nil {
+			common.ApiError(c, err)
+			return false
+		}
+	}
+	if request.ConcurrencyLimit != nil {
+		token.ConcurrencyLimit = *request.ConcurrencyLimit
+	}
+	if request.ConcurrencyLimitByModel != nil {
+		token.ConcurrencyLimitByModel = *request.ConcurrencyLimitByModel
+	}
+	return true
+}
+
 func GetAllTokens(c *gin.Context) {
 	userId := c.GetInt("id")
 	pageInfo := common.GetPageQuery(c)
@@ -139,7 +196,7 @@ func GetAllTokens(c *gin.Context) {
 	}
 	total, _ := model.CountUserTokens(userId)
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(buildMaskedTokenResponses(tokens, c.GetInt("role") >= common.RoleAdminUser))
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -156,7 +213,7 @@ func SearchTokens(c *gin.Context) {
 		return
 	}
 	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(buildMaskedTokenResponses(tokens))
+	pageInfo.SetItems(buildMaskedTokenResponses(tokens, c.GetInt("role") >= common.RoleAdminUser))
 	common.ApiSuccess(c, pageInfo)
 }
 
@@ -172,7 +229,7 @@ func GetToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	common.ApiSuccess(c, buildMaskedTokenResponse(token))
+	common.ApiSuccess(c, buildMaskedTokenResponse(token, c.GetInt("role") >= common.RoleAdminUser))
 }
 
 func GetTokenAutoGroups(c *gin.Context) {
@@ -364,6 +421,11 @@ func AddToken(c *gin.Context) {
 		AutoGroups:         token.AutoGroups,
 	}
 	cleanToken.AllowUserQuotaQuery = request.AllowUserQuotaQuery == nil || *request.AllowUserQuotaQuery
+	// Concurrency limits are admin-only; non-admin payloads are ignored entirely,
+	// so a fresh token lands at 0 / "". See applyAdminConcurrencyLimits.
+	if !applyAdminConcurrencyLimits(c, &request, &cleanToken) {
+		return
+	}
 	err = cleanToken.Insert()
 	if err != nil {
 		common.ApiError(c, err)
@@ -469,6 +531,12 @@ func UpdateToken(c *gin.Context) {
 				return
 			}
 		}
+		// Concurrency limits are admin-only; omitted keys keep the stored values
+		// (Update() rewrites every selected column, so a copied zero would
+		// silently clear an admin-set DoS cap). See applyAdminConcurrencyLimits.
+		if !applyAdminConcurrencyLimits(c, &request, cleanToken) {
+			return
+		}
 	}
 	err = cleanToken.Update()
 	if err != nil {
@@ -496,6 +564,8 @@ func UpdateToken(c *gin.Context) {
 			{"group", previous.Group != cleanToken.Group},
 			{"cross_group_retry", previous.CrossGroupRetry != cleanToken.CrossGroupRetry},
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},
+			{"concurrency_limit", previous.ConcurrencyLimit != cleanToken.ConcurrencyLimit},
+			{"concurrency_limit_by_model", previous.ConcurrencyLimitByModel != cleanToken.ConcurrencyLimitByModel},
 		} {
 			if field.changed {
 				changedFields = append(changedFields, field.name)
@@ -507,7 +577,7 @@ func UpdateToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    buildMaskedTokenResponse(cleanToken),
+		"data":    buildMaskedTokenResponse(cleanToken, c.GetInt("role") >= common.RoleAdminUser),
 	})
 }
 

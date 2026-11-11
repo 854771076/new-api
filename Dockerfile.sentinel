@@ -1,0 +1,70 @@
+# Dockerfile.sentinel
+#
+# Lightweight build that produces the new-api binary with the local
+# common/redis.go sentinel changes baked in. Also builds the web bundle so
+# that //go:embed web/dist in main.go has real content (otherwise
+# http://localhost:30000/ renders a blank page because the embedded
+# index.html is just an empty placeholder file).
+#
+# Strategy: use bun to install + build the React frontend while routing
+# npmjs.org requests through npmmirror.com — this avoids the upstream
+# "@hugeicons/core-free-icons" integrity check failure that hits when
+# using --frozen-lockfile against registry.npmjs.org.
+
+# Stage 1: build the web bundle.
+FROM oven/bun:1 AS webbuilder
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+WORKDIR /build/web
+
+# Tell bun to use the npmmirror registry instead of npmjs. This both avoids
+# the integrity failure and dramatically improves throughput inside the
+# sandbox network.
+ENV NPM_CONFIG_REGISTRY=${NPM_REGISTRY}
+
+COPY web/package.json web/bun.lock ./
+# Drop --frozen-lockfile so bun can refresh any stale integrity entries
+# for packages whose upstream tarballs have been republished.
+RUN bun install
+
+COPY ./web ./
+COPY ./VERSION /build/VERSION
+RUN DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
+
+# Stage 2: build the Go binary. relaykit/go.mod is included so the local
+# replace directive resolves.
+FROM golang:1.26.1-alpine AS gobuilder
+ENV GO111MODULE=on CGO_ENABLED=0 GOWORK=off
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ENV GOOS=${TARGETOS} GOARCH=${TARGETARCH}
+ENV GOEXPERIMENT=greenteagc
+# Sandboxed network cannot reach proxy.golang.org directly; route through
+# goproxy.cn which mirrors the same module index.
+ENV GOPROXY=https://goproxy.cn,direct
+
+WORKDIR /build
+
+ADD go.mod go.sum ./
+# relaykit is a local submodule referenced via replace; its go.mod must be
+# present for go mod download to resolve the main module graph.
+ADD relaykit/go.mod ./relaykit/go.mod
+RUN go mod download
+
+COPY . .
+COPY --from=webbuilder /build/web/dist ./web/dist
+RUN go build -ldflags "-s -w" -o new-api
+
+# Stage 3: runtime image — debian-slim with ca-certificates + tzdata, matching
+# the upstream runtime for compatibility (no entrypoint change).
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
+
+COPY --from=gobuilder /build/new-api /new-api
+COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
+EXPOSE 3000
+WORKDIR /data
+ENTRYPOINT ["/new-api"]

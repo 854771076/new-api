@@ -5,6 +5,8 @@ import (
 	"context"
 	"embed"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -31,6 +33,7 @@ import (
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/service/concurrency"
 	_ "github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
@@ -46,6 +49,19 @@ var buildFS embed.FS
 
 //go:embed web/dist/index.html
 var indexPage []byte
+
+// concurrencyLimiter keeps the process-wide limiter so main()'s shutdown
+// sequence can close it after srv.Shutdown drains (D-19): RedisLimiter's
+// Close bulk-cleans this node's leftover leases and pending releases;
+// MemoryLimiter has no Close and is skipped (nil/other types type-assert
+// to ok=false).
+var concurrencyLimiter concurrency.Limiter
+
+// concurrencyHistory samples the limiter into a daily JSONL file (7-day
+// retention) so load fluctuations stay inspectable after the admin page's
+// 5-minute in-memory window scrolls past. Stopped in the shutdown sequence
+// right after the limiter closes.
+var concurrencyHistory *concurrency.HistoryRecorder
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
@@ -102,6 +118,18 @@ func main() {
 			}()
 			model.InitChannelCache()
 		}()
+
+		// The ability table is the routing index, so an enabled channel whose
+		// rows went missing (swallowed UpdateAbilities error, direct SQL) would
+		// never route again. FixAbility is the truncate-and-rebuild tool and is
+		// only reached from the panic branch above, which the nil-map guard makes
+		// unreachable — repair incrementally instead.
+		if repaired, failed, repairErr := model.EnsureChannelAbilities(); repairErr != nil {
+			common.SysError(fmt.Sprintf("EnsureChannelAbilities failed: %v", repairErr))
+		} else if repaired > 0 || failed > 0 {
+			common.SysLog(fmt.Sprintf("EnsureChannelAbilities repaired %d channel(s), %d failed", repaired, failed))
+			model.InitChannelCache()
+		}
 
 		go model.SyncChannelCache(common.SyncFrequency)
 	}
@@ -231,6 +259,16 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(common.LogText("server forced to shutdown: %v", err))
 	}
+	// D-19: graceful-shutdown bulk cleanup — the server has drained, so
+	// batch-ZREM whatever leases this node still holds (held registry +
+	// pending releases) before the process exits. Direction-safe: it only
+	// clears local residue (fewer counts, never more); an unreachable Redis
+	// just WARNs and the lease TTL reclaims the rest. MemoryLimiter has no
+	// Close, so it is skipped.
+	if closer, ok := concurrencyLimiter.(io.Closer); ok {
+		closer.Close()
+	}
+	concurrencyHistory.Stop()
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
@@ -311,6 +349,7 @@ func InitResources() error {
 		common.FatalLog(common.LogText("failed to initialize authorization: %s", err.Error()))
 		return err
 	}
+
 	if common.PasswordLoginEncryptionEnabled {
 		if err = model.InitPasswordEncryption(); err != nil {
 			common.FatalLog(common.LogText("failed to initialize password encryption: %s", err.Error()))
@@ -342,6 +381,52 @@ func InitResources() error {
 	if err != nil {
 		return err
 	}
+
+	// O-1/D-12: install the concurrency limiter AFTER Redis init so the
+	// choice reflects the real Redis state. RedisEnabled=true selects the
+	// shared RedisLimiter — including when the endpoint was unreachable at
+	// startup: the limiter fails open per request until Redis recovers and
+	// then counts against the shared cap again (self-heal; falling back to
+	// MemoryLimiter there would silently make limits per-node ×N, and
+	// exiting would turn a degradable dependency into a startup hard
+	// dependency). RedisEnabled=false (REDIS_CONN_STRING unset) keeps the
+	// in-process MemoryLimiter single-node semantics (RED-04). Both consumers
+	// are wired from this one instance.
+	var limiter concurrency.Limiter
+	if common.RedisEnabled {
+		limiter = concurrency.NewRedisLimiter(common.RDB, "conc:")
+	} else {
+		limiter = concurrency.NewMemoryLimiter()
+	}
+	concurrencyLimiter = limiter
+	middleware.SetConcurrencyLimiter(middleware.WrapConcurrencyLimiter(limiter))
+	controller.SetConcurrencyLimiter(limiter)
+	// RTE-01 (02-17): feed the channel-axis in-flight counts into the
+	// dynamic effective-weight routing. Semantics: channel:<id> in-flight
+	// holders observed through the SAME limiter the 02-14 slot enforcement
+	// counts against — cross-node when Redis is enabled, single-node on the
+	// MemoryLimiter — so there is no second, forgeable counter. A snapshot
+	// failure returns nil and the load term fails open (multiplier keeps
+	// the EWMA-only value); model never imports service/concurrency, the
+	// dependency direction stays main→model.
+	model.SetChannelLoadProvider(func() map[int]int {
+		rows, snapshotErr := limiter.Snapshot(context.Background())
+		if snapshotErr != nil {
+			return nil
+		}
+		counts := make(map[int]int)
+		for _, row := range rows {
+			if row.Kind == "channel" {
+				counts[row.SubjectID] = row.Current
+			}
+		}
+		return counts
+	})
+	// Daily JSONL load history under the log dir (7-day retention); its
+	// Start is safe here even when LogDir is unwritable because recording
+	// fails soft without touching the limiter path.
+	concurrencyHistory = concurrency.NewHistoryRecorder(limiter, *common.LogDir, 0)
+	concurrencyHistory.Start()
 
 	perfmetrics.Init()
 

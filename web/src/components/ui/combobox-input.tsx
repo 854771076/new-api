@@ -91,7 +91,8 @@ export function ComboboxInput({
     () => options.find((option) => option.value === value),
     [options, value]
   )
-  const displayValue = open ? searchValue : (selectedOption?.label ?? value)
+  const displayValue =
+    open && searchValue !== '' ? searchValue : (selectedOption?.label ?? value)
 
   const filteredOptions = React.useMemo(() => {
     if (!searchChanged || !searchValue.trim()) return options
@@ -138,19 +139,75 @@ export function ComboboxInput({
     if (!input) return
     const container =
       input.closest<HTMLElement>('[role="dialog"]') ?? document.body
+    // 弹层是 position:fixed 的视口坐标层。容器（对话框）有 overflow 裁剪且
+    // 内容可滚动：向下空间不足时向上翻转，且打开期间持续跟随输入框位移，
+    // 否则弹层会落到对话框/视口之外，DOM 存在但屏幕上不可见。
+    const popupGap = 4
+    const popupMaxHeight = 208
     const measure = () => {
       const rect = input.getBoundingClientRect()
-      setDropdown({
-        container,
-        top: rect.bottom + 4,
-        left: rect.left,
-        width: rect.width,
-      })
+      const containerRect =
+        container === document.body ? null : container.getBoundingClientRect()
+      const minTop = containerRect ? containerRect.top + popupGap : 0
+      const maxBottom = containerRect
+        ? containerRect.bottom - popupGap
+        : window.innerHeight - popupGap
+      const spaceBelow = maxBottom - rect.bottom - popupGap
+      const spaceAbove = rect.top - popupGap - minTop
+      const placeBelow =
+        spaceBelow >= popupMaxHeight || spaceBelow >= spaceAbove
+      let top = placeBelow
+        ? rect.bottom + popupGap
+        : rect.top - popupGap - popupMaxHeight
+      top = Math.max(top, minTop)
+      top = Math.min(top, maxBottom - popupMaxHeight)
+      top = Math.min(top, window.innerHeight - popupMaxHeight - popupGap)
+      // 弹层 DOM 挂载在容器内；容器若成为 fixed 的包含块（transform/contain 等），
+      // style 坐标是容器局部坐标，与上面的视口坐标差一个包含块偏移（实测对话框
+      // 偏移137px，弹层落到框外被裁）。用「实际渲染位置 - 当前 style 值」测出
+      // 偏移并换算，偏移恒定时逐帧幂等收敛；无布局环境（jsdom）下 rect 全为 0，
+      // 跳过换算以保持视口坐标语义。
+      let left = rect.left
+      const node = dropdownRef.current
+      if (node && node.isConnected) {
+        const actual = node.getBoundingClientRect()
+        const hasLayout =
+          actual.width !== 0 ||
+          actual.height !== 0 ||
+          actual.top !== 0 ||
+          actual.left !== 0
+        if (hasLayout) {
+          const currentTop = Number.parseFloat(node.style.top)
+          if (Number.isFinite(currentTop)) {
+            top -= actual.top - currentTop
+          }
+          const currentLeft = Number.parseFloat(node.style.left)
+          if (Number.isFinite(currentLeft)) {
+            left -= actual.left - currentLeft
+          }
+        }
+      }
+      const next = { container, top, left, width: rect.width }
+      setDropdown((prev) =>
+        prev &&
+        prev.top === next.top &&
+        prev.left === next.left &&
+        prev.width === next.width &&
+        prev.container === next.container
+          ? prev
+          : next
+      )
     }
     measure()
+    // rAF 持续跟随：容器内滚动/动画不一定派发 scroll 事件到 window
+    let followId = requestAnimationFrame(function follow() {
+      measure()
+      followId = requestAnimationFrame(follow)
+    })
     window.addEventListener('scroll', measure, true)
     window.addEventListener('resize', measure)
     return () => {
+      cancelAnimationFrame(followId)
       window.removeEventListener('scroll', measure, true)
       window.removeEventListener('resize', measure)
     }
@@ -251,6 +308,14 @@ export function ComboboxInput({
           const nextValue = e.target.value
           setSearchValue(nextValue)
           setSearchChanged(true)
+          // allowCustomValue consumers (log group filter, billing timezone,
+          // model mapping rows, custom icon keys, dashboard token key) treat
+          // the parent value as a draft that mirrors the keystrokes: they
+          // commit on blur, on Search, or on their own validation, so the
+          // typed text must reach onValueChange as it is typed. The
+          // displayValue fallback below keeps the selected label visible
+          // while the dropdown opens without search text, which is what
+          // stops the input from looking "stuck" on reopen.
           if (allowCustomValue) {
             onValueChange(nextValue)
           }

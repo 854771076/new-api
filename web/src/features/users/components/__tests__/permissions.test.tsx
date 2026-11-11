@@ -24,6 +24,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { transformFormDataToPayload, USER_FORM_DEFAULT_VALUES } from '../../lib'
 import type { User } from '../../types'
 import { UsersMutateDrawer } from '../users-mutate-drawer'
 import { UsersProvider } from '../users-provider'
@@ -43,7 +44,12 @@ const label = "View other accounts' audit logs"
 const description =
   'View audit records from user and admin roles. Root records are always excluded.'
 
-function renderPermissions(viewerRole: number, allowed?: boolean) {
+function renderPermissions(
+  viewerRole: number,
+  allowed?: boolean,
+  targetRole: number = target.role
+) {
+  const row: User = { ...target, role: targetRole }
   useAuthStore
     .getState()
     .auth.setUser({ id: 1, username: 'operator', role: viewerRole })
@@ -91,7 +97,7 @@ function renderPermissions(viewerRole: number, allowed?: boolean) {
       data: {
         success: true,
         data: {
-          ...target,
+          ...row,
           admin_permissions:
             allowed === undefined ? {} : { audit: { read: allowed } },
         },
@@ -107,7 +113,7 @@ function renderPermissions(viewerRole: number, allowed?: boolean) {
         <UsersMutateDrawer
           open
           onOpenChange={() => undefined}
-          currentRow={target}
+          currentRow={row}
         />
       </UsersProvider>
     </QueryClientProvider>
@@ -194,4 +200,64 @@ it('admin cannot edit the audit permission even when the catalog is available', 
   renderPermissions(10)
   await screen.findByDisplayValue('Managed admin')
   expect(screen.queryByRole('button', { name: label })).not.toBeInTheDocument()
+})
+
+it('admin editor sees Concurrency Limit when editing a common target', async () => {
+  renderPermissions(10, undefined, 1)
+  await screen.findByDisplayValue('Managed admin')
+  expect(screen.getByLabelText('Concurrency Limit')).toBeVisible()
+})
+
+it('admin editor sees Concurrency Limit when editing an admin target', async () => {
+  renderPermissions(10, undefined, 10)
+  await screen.findByDisplayValue('Managed admin')
+  expect(screen.getByLabelText('Concurrency Limit')).toBeVisible()
+})
+
+it('non-admin editor does not render Concurrency Limit', async () => {
+  renderPermissions(1, undefined, 10)
+  await screen.findByDisplayValue('Managed admin')
+  expect(screen.queryByLabelText('Concurrency Limit')).not.toBeInTheDocument()
+})
+
+it('update payload carries concurrency_limit when the form value is set', () => {
+  const payload = transformFormDataToPayload(
+    {
+      ...USER_FORM_DEFAULT_VALUES,
+      username: 'managed-admin',
+      concurrency_limit: 3,
+    },
+    target.id
+  )
+  expect(payload.concurrency_limit).toBe(3)
+})
+
+it('update payload keeps an explicit 0 instead of dropping the unlimited value', () => {
+  const payload = transformFormDataToPayload(
+    {
+      ...USER_FORM_DEFAULT_VALUES,
+      username: 'managed-admin',
+      concurrency_limit: 0,
+    },
+    target.id
+  )
+  expect(payload.concurrency_limit).toBe(0)
+})
+
+it('saving the drawer sends concurrency_limit in the update payload', async () => {
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  renderPermissions(10, undefined, 1)
+  await screen.findByDisplayValue('Managed admin')
+  const input = await screen.findByLabelText('Concurrency Limit')
+  await userEvent.clear(input)
+  await userEvent.type(input, '3')
+  await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith(
+      '/api/user/',
+      expect.objectContaining({ id: 2, concurrency_limit: 3 })
+    )
+  )
 })

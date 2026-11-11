@@ -116,8 +116,13 @@ func redisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, mark st
 	)
 	if err != nil {
 		logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (mark=%s): %v", mark, err))
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		// Fail open to the process-local window (D-08/D-12 philosophy): a
+		// Redis outage must not escalate every rate-limited API call into a
+		// 500 — the per-IP quota stays enforced locally while the backend
+		// recovers. Observed for real on 2026-10-13: the fail-closed 500 kept
+		// the admin concurrency page from reading degraded status for the
+		// whole outage window.
+		memoryRateLimiter(c, maxRequestNum, duration, mark)
 		return
 	}
 	if !allowed {
@@ -146,13 +151,14 @@ func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
 }
 
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
+	// It's safe to call multi times. Initialised on both branches: the Redis
+	// path also needs the in-memory window ready for its outage fallback.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
 			redisRateLimiter(c, maxRequestNum, duration, mark)
 		}
 	}
-	// It's safe to call multi times.
-	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
 		memoryRateLimiter(c, maxRequestNum, duration, mark)
 	}
@@ -217,6 +223,9 @@ func UploadRateLimit() func(c *gin.Context) {
 // instead of client IP, making it resistant to proxy rotation attacks.
 // Must be used AFTER authentication middleware (UserAuth).
 func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
+	// It's safe to call multi times. Initialised on both branches: the Redis
+	// path also needs the in-memory window ready for its outage fallback.
+	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
 			userID := c.GetInt("id")
@@ -228,8 +237,6 @@ func userRateLimitFactory(maxRequestNum int, duration int64, mark string) func(c
 			userRedisRateLimiter(c, maxRequestNum, duration, redisUserRateLimitKey(mark, userID))
 		}
 	}
-	// It's safe to call multi times.
-	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
 		userID := c.GetInt("id")
 		if userID == 0 {
@@ -251,8 +258,12 @@ func userRedisRateLimiter(c *gin.Context, maxRequestNum int, duration int64, key
 	allowed, _, ttlSeconds, err := redisFixedWindowTake(c.Request.Context(), key, maxRequestNum, duration)
 	if err != nil {
 		logger.LogError(c.Request.Context(), common.LogText("rate limit check failed (key=%s): %v", key, err))
-		c.Status(http.StatusInternalServerError)
-		c.Abort()
+		// Same fail-open contract as redisRateLimiter: fall back to the
+		// process-local window keyed by the same string instead of 500-ing
+		// every authenticated endpoint during a Redis outage.
+		if !inMemoryRateLimiter.Request(key, maxRequestNum, duration) {
+			writeRateLimited(c, duration)
+		}
 		return
 	}
 	if !allowed {

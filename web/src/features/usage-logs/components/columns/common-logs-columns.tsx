@@ -806,6 +806,9 @@ export function useCommonLogsColumns(
               completionTokens={log.completion_tokens}
               frtMs={other?.frt}
               isStream={log.is_stream}
+              // The backend already strips admin_info for non-admins; gate on
+              // isAdmin too so the breakdown never leaks if that changes.
+              timing={isAdmin ? other?.admin_info?.timing : undefined}
             />
           )
         },

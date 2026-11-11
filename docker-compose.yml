@@ -16,12 +16,12 @@ version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
-    image: calciumion/new-api:latest
+    image: new-api:local
     container_name: new-api
     restart: always
     command: --log-dir /app/logs
     ports:
-      - "3000:3000"
+      - "30000:3000"
     volumes:
       - ./data:/data
       - ./logs:/app/logs
@@ -54,7 +54,6 @@ services:
 #      - UMAMI_SCRIPT_URL=https://analytics.umami.is/script.js  # Umami 脚本 URL，默认为官方地址 (Umami Script URL, defaults to official URL)
 
     depends_on:
-      - redis
       - postgres
 #      - mysql  # Uncomment if using MySQL
 #      - clickhouse  # Uncomment if using ClickHouse for LOG_SQL_DSN
@@ -73,6 +72,11 @@ services:
     command: ["redis-server", "--requirepass", "123456"]  # ⚠️ IMPORTANT: Change this password in production!
     networks:
       - new-api-network
+    profiles: ["disabled"]
+    # Disabled by default — the new-api service now connects to Redis via
+    # Sentinel (see docker-compose.sentinel.yml). To re-enable single-node
+    # Redis, use scripts/start-single.ps1, which uses
+    # docker-compose.single.yml.
 
   postgres:
     image: postgres:15

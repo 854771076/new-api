@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -828,12 +829,27 @@ func (releasedAuditLog) TableName() string { return "logs" }
 
 // External tests create a new database per case on a loopback-only disposable
 // instance. They never drop databases or tables supplied through an environment variable.
+// closeAuditTestDBOnCleanup releases the database pool before TempDir teardown.
+// On Windows an open handle keeps audit.db locked, so t.TempDir RemoveAll fails
+// with "being used by another process"; closing is idempotent and a no-op on
+// platforms without mandatory file locking.
+func closeAuditTestDBOnCleanup(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	t.Cleanup(func() {
+		connection, err := db.DB()
+		if err == nil {
+			_ = connection.Close()
+		}
+	})
+}
+
 func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 	t.Helper()
 	if kind == "sqlite" {
 		path := t.TempDir() + "/audit.db"
 		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
 		require.NoError(t, err)
+		closeAuditTestDBOnCleanup(t, db)
 		return db, path
 	}
 	require.NotEmpty(t, dsn)
@@ -1074,10 +1090,22 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 						require.NoError(t, db.Create(&releasedAuditUser{Username: "released-owner", Password: "placeholder", AccessToken: &legacy, AffCode: "released-aff", Quota: 1234}).Error)
 						require.NoError(t, db.Create(&releasedAuditLog{UserId: 1, Type: model.LogTypeLogin, Content: "historical login", CreatedAt: 100, RequestId: "legacy-request"}).Error)
 					}
+					// Each InitDB call opens a fresh pool over the same database;
+					// keep every handle so the superseded ones are closed before
+					// TempDir teardown instead of leaking the SQLite file lock.
+					var reopenedPools []*sql.DB
 					for range 2 {
 						require.NoError(t, model.InitDB())
 						require.NoError(t, model.InitLogDB())
+						if connection, err := model.DB.DB(); err == nil {
+							reopenedPools = append(reopenedPools, connection)
+						}
 					}
+					t.Cleanup(func() {
+						for _, connection := range reopenedPools {
+							_ = connection.Close()
+						}
+					})
 					if !upgrade {
 						require.NoError(t, db.Create(&model.User{Username: "fresh-owner", Password: "placeholder", AffCode: "fresh-aff"}).Error)
 					}

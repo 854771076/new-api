@@ -23,6 +23,7 @@ import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 
 import { DEFAULT_GROUP } from '../constants'
 import type { ApiKey, ApiKeyFormData } from '../types'
+import { parseConcurrencyLimitByModel } from './concurrency-limit-by-model'
 
 // ============================================================================
 // Form Schema
@@ -45,9 +46,27 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
       auto_groups_mode: z.enum(['inherit', 'custom']),
       auto_groups: z.array(z.string()),
       cross_group_retry: z.boolean().optional(),
+      concurrency_limit: z.number().min(0).optional(),
+      concurrency_limit_by_model: z.string().optional(),
       tokenCount: z.number().min(1).optional(),
     })
     .superRefine((data, ctx) => {
+      // Per-model CSV gate (TUI-02 UI main gate): any defect segment blocks
+      // saving before the payload is built — the user sees the parsed preview
+      // with raw entry + reason instead of the server silently dropping it.
+      if (data.concurrency_limit_by_model) {
+        const { defects } = parseConcurrencyLimitByModel(
+          data.concurrency_limit_by_model
+        )
+        if (defects.length > 0) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['concurrency_limit_by_model'],
+            message: t('Fix invalid entries before saving'),
+          })
+        }
+      }
+
       if (data.group === 'auto') {
         if (
           data.auto_groups_mode === 'custom' &&
@@ -116,6 +135,8 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   auto_groups_mode: 'inherit',
   auto_groups: [],
   cross_group_retry: true,
+  concurrency_limit: 0,
+  concurrency_limit_by_model: '',
   tokenCount: 1,
 }
 
@@ -160,6 +181,15 @@ export function transformFormDataToPayload(
         ? data.auto_groups
         : [],
     cross_group_retry: data.group === 'auto' ? !!data.cross_group_retry : false,
+    // `?? 0` keeps an explicit "unlimited" (0) on the payload instead of
+    // dropping it — the backend admin-only block persists explicit zero and
+    // preserves stored values only when the key is omitted, so always send it.
+    concurrency_limit: data.concurrency_limit ?? 0,
+    // Explicit CSV on every payload: '' clears the stored per-model caps while
+    // an omitted key would preserve them (the backend only writes keys the
+    // admin actually sent), so a cleared field can never be silently kept —
+    // and a backfilled value is never silently dropped.
+    concurrency_limit_by_model: data.concurrency_limit_by_model ?? '',
   }
 }
 
@@ -195,6 +225,12 @@ export function transformApiKeyToFormDefaults(
     auto_groups_mode: autoGroupsMode,
     auto_groups: autoGroups,
     cross_group_retry: !!apiKey.cross_group_retry,
+    // Backfill the stored cap so reopening the drawer never silently zeroes an
+    // existing limit on the next save (`?? 0` for tokens without the field).
+    concurrency_limit: apiKey.concurrency_limit ?? 0,
+    // Same round-trip contract for the per-model CSV: missing field becomes '',
+    // a stored CSV is backfilled verbatim so saving never clears it silently.
+    concurrency_limit_by_model: apiKey.concurrency_limit_by_model ?? '',
     tokenCount: 1,
   }
 }

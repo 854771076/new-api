@@ -24,6 +24,7 @@ import {
   splitBillingExprAndRequestRules,
   type ParsedTier,
 } from '@/features/pricing/lib/billing-expr'
+import { formatUseTime } from '@/lib/format'
 import { translateServerText } from '@/lib/server-error-message'
 
 import type { UsageLog } from '../data/schema'
@@ -187,6 +188,43 @@ export function getReasoningEffortVariant(
     default:
       return 'grey'
   }
+}
+
+/**
+ * Format one latency segment. Sub-second segments stay in milliseconds (the
+ * backend measures in whole milliseconds), longer ones switch to the shared
+ * duration formatter so a 17 minute wait reads as "17m 0s" instead of
+ * "1020000ms".
+ */
+export function formatTimingDuration(
+  ms: number,
+  millisecondUnit: string
+): string {
+  if (ms < 1000) return `${ms}${millisecondUnit}`
+  return formatUseTime(ms / 1000)
+}
+
+/**
+ * Format one latency segment for the detail dialog. A segment that was never
+ * measured renders as a placeholder instead of "0ms": the list view hides
+ * zero-valued segments entirely, and the dialog must not turn "not measured"
+ * into a measured zero.
+ */
+export function formatTimingSegment(
+  ms: number | undefined,
+  millisecondUnit: string
+): string {
+  if (ms == null || ms <= 0) return '—'
+  return formatTimingDuration(ms, millisecondUnit)
+}
+
+/**
+ * Format an upstream timeout that was in effect for the request. 0 means the
+ * timeout is disabled, which is rendered as "no limit" rather than "0s".
+ */
+export function formatTimingTimeout(seconds: number | undefined): string {
+  if (seconds == null || seconds <= 0) return '—'
+  return formatUseTime(seconds)
 }
 
 /**

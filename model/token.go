@@ -26,13 +26,16 @@ type Token struct {
 	ModelLimits        string `json:"model_limits" gorm:"type:text"`
 	ConcurrencyLimit   int    `json:"concurrency_limit" gorm:"default:0"`
 	// CSV: "model=limit,model=limit"
-	ConcurrencyLimitByModel string         `json:"-" gorm:"type:text"`
-	AllowIps                *string        `json:"allow_ips" gorm:"default:''"`
-	UsedQuota               int            `json:"used_quota" gorm:"default:0"` // used quota
-	Group                   string         `json:"group" gorm:"default:''"`
-	CrossGroupRetry         bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
-	AutoGroups              string         `json:"-" gorm:"type:text"`
-	DeletedAt               gorm.DeletedAt `gorm:"index"`
+	ConcurrencyLimitByModel string `json:"-" gorm:"type:text"`
+	// 哈希解码专用，不入库（镜像 UserBase.CacheSchema）：缺失旧哈希的并发字段
+	// 会被静默解码为 0=不限流，读取门据此回源 DB 重灌。
+	CacheSchema     int            `json:"-" gorm:"-"`
+	AllowIps        *string        `json:"allow_ips" gorm:"default:''"`
+	UsedQuota       int            `json:"used_quota" gorm:"default:0"` // used quota
+	Group           string         `json:"group" gorm:"default:''"`
+	CrossGroupRetry bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
+	AutoGroups      string         `json:"-" gorm:"type:text"`
+	DeletedAt       gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool   `json:"allow_user_quota_query"`
 	CacheExpiresAt      int64  `json:"-" gorm:"-"`

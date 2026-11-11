@@ -140,6 +140,22 @@ var QuotaRemindThreshold = 1000
 // use quota_setting.pre_consume_multiplier and the estimated input cost.
 var PreConsumedQuota = 500
 
+// RetryTimes is the per-request upstream attempt budget. The default 0 is a
+// deliberate choice, not an oversight (RTE-03 ruling, 02-18 evaluation):
+// the budget is global across EVERY error class — AutomaticRetryStatusCodeRanges
+// covers 1xx/3xx/401-407/409-499/500-503/505-523/525-599 — so raising it flips
+// retry semantics, upstream call cost and tail latency for all of them at once;
+// model/option.go only overrides this default when the DB actually stores a
+// "RetryTimes" key, so changing the default would silently change behavior for
+// every keyless deployment on upgrade. Operators who want retries set the
+// production entry (system settings → request policy → "Maximum retries",
+// retry_times); the recommended ≥1 applies where a second attempt genuinely
+// helps — channel-saturation self-rescue on top of the 02-15 exclusion set and
+// budgeted 429 natural channel switching. The RTE-02 bottom-line guarantee
+// (an upstream 429 never terminates a single-channel request after one hop)
+// does NOT depend on this setting: it is carried by the dedicated upstream-429
+// cross-channel rule at the default 0 (see service/relay_error.go
+// ShouldGrantUpstream429CrossChannelRetry).
 var RetryTimes = 0
 
 //var RootUserEmail = ""

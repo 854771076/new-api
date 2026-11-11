@@ -169,6 +169,11 @@ export function UsersMutateDrawer({
   const selectedRole = form.watch('role')
   const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
   const targetIsAdmin = (selectedRole ?? currentRow?.role ?? 0) >= ROLE.ADMIN
+  // Presentation-only gate for the concurrency cap: it depends on the EDITOR's
+  // role alone, never on the target's role, so an admin can cap any user
+  // (including a common one). Server-side enforcement (AdminAuth + the
+  // EditWithTx update map, 02-03) is the actual security boundary.
+  const canEditConcurrencyLimit = (currentUser?.role ?? 0) >= ROLE.ADMIN
 
   const onSubmit = async (data: UserFormValues) => {
     if (!isUpdate || data.password) {
@@ -496,6 +501,33 @@ export function UsersMutateDrawer({
                       </FormItem>
                     )}
                   />
+
+                  {canEditConcurrencyLimit && (
+                    <FormField
+                      control={form.control}
+                      name='concurrency_limit'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Concurrency Limit')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              {...field}
+                              type='number'
+                              min={0}
+                              placeholder={t('0 means unlimited')}
+                              onChange={(event) =>
+                                field.onChange(Number(event.target.value) || 0)
+                              }
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t('0 means unlimited')}
+                          </FormDescription>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  )}
                 </SideDrawerSection>
               )}
 
