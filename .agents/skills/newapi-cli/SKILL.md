@@ -4,8 +4,8 @@ description: >-
   Operate a running new-api instance from the terminal with the bundled
   `newapi-cli` admin tool. Use when the user asks to log in to a new-api
   server, inspect or manage users, channels, API tokens, logs, server
-  options, subscription plans, or app products, create an API key for an
-  agent, script admin API calls, or
+  options, subscription plans, app products, or OAuth apps, create an API
+  key for an agent, script admin API calls, or
   maintain a new-api deployment without the web dashboard. Also use when a
   task mentions `newapi-cli`, `/cli/authorize`, `~/.newapi-cli/config.json`,
   or a `nap_` personal access token.
@@ -23,7 +23,7 @@ library and `spf13/cobra`.
 - npm: `npm install -g @aswless_854771076/newapi-cli` installs the matching
   binary from the package's GitHub release on Windows, macOS, and Linux.
   Installing it as a project dependency also copies the bundled `newapi-cli`
-  and `new-api-oauth-integration` skills to `.agents/skills/` in that project.
+  and `new-api-app-framework` skills to `.agents/skills/` in that project.
 - From source: `go build -o newapi-cli ./cmd/newapi-cli` on macOS/Linux; on
   Windows the output is `newapi-cli.exe`.
 - PATH (macOS/Linux): if the npm global prefix is not on `PATH`, locate it with
@@ -79,8 +79,11 @@ fails with HTTP 403, code `ACCESS_TOKEN_SCOPE_DENIED`, exit code 2 — re-run
 | `option get` | `option:read` |
 | `option update` | `option:write` |
 | `plan list`, `product list`, `product orders` | `billing:read` |
-| `product update <id>` | `billing:read`, `billing:write` |
+| `plan create` | `billing:write` |
+| `plan update <id>`, `product update <id>` | `billing:read`, `billing:write` |
 | `product create`, `product enable`, `product disable`, `product complete-order` | `billing:write` |
+| `oauth-app list`, `oauth-app get <id>` | `option:read` |
+| `oauth-app create`, `oauth-app update <id>`, `oauth-app delete <id>` | `option:write` |
 | `api ...` | the scope of the target endpoint |
 | `auth status` | none (local config only) |
 
@@ -101,12 +104,17 @@ token  list [--p 1] [--page-size 20] | get <id> | create --name <name> [flags]
 log    list [--p 1] [--page-size 20] [--type <n>]
 option get <key> | update <key>=<value>
 plan   list [--p 1] [--page-size 20] [--app-id <id>]
+        | create --title <title> [flags]
+        | update <id> [flags]
 product list [--app-id <id>] [--p 1] [--page-size 20]
         | create --app-id <id> --name <name> --price <amount> --quota <n> [flags]
         | update <id> [flags]
         | enable <id> | disable <id>
         | orders [--app-id <id>] [--user-id <id>] [--p 1] [--page-size 20]
         | complete-order <trade_no>
+oauth-app list | get <id> | create [flags] | update <id> [flags] | delete <id>
+version
+self-update [--run]
 api    <METHOD> </path> [--data '<json>' | --data @file.json]
 ```
 
@@ -133,6 +141,9 @@ the platform-wide view; pass it to read that app's data.
 ```bash
 newapi-cli user list --app-id 3                 # adds app_quota / app_used_quota
 newapi-cli plan list --app-id 3
+newapi-cli plan create --app-id 3 --title "Starter" --price 9.99 --total-amount 100000 \
+  --duration-unit month --duration-value 1 --quota-reset-period monthly
+newapi-cli plan update 12 --price 12.99 --enabled=false
 newapi-cli product list --app-id 3
 newapi-cli product create --app-id 3 --name "Starter" --price 9.99 --quota 100000 \
   --description "Starter pack" --currency USD --max-purchase-per-user 1
@@ -140,6 +151,17 @@ newapi-cli product update 12 --price 12.99 --enabled=false
 newapi-cli product disable 12
 newapi-cli product orders --app-id 3 --user-id 42
 newapi-cli product complete-order APO123         # write: credits the app wallet
+
+# OAuth apps (外部 Web app)
+newapi-cli oauth-app list
+newapi-cli oauth-app get 7
+newapi-cli oauth-app create --name "My App" \
+  --redirect-uris https://app.example.com/callback \
+  --post-logout-redirect-uris https://app.example.com/logout \
+  --scopes openid,profile,email,api:read,api:write --public-client
+newapi-cli oauth-app update 7 --redirect-uris https://app.example.com/callback,https://new.example.com/callback
+newapi-cli oauth-app update 7 --status 2
+newapi-cli oauth-app delete 7
 ```
 
 `product create` flags:
@@ -150,18 +172,60 @@ newapi-cli product complete-order APO123         # write: credits the app wallet
   `--max-purchase-per-user` (0 means unlimited), `--enabled` (default `true`),
   `--stripe-price-id`, `--creem-product-id`, `--waffo-pancake-product-id`.
 
+`plan create` flags:
+
+- `--title` (required), `--app-id` (default `0` = platform-wide), `--price`
+  (`price_amount`), `--currency` (default `USD`), `--duration-unit`
+  (default `month`; `year|month|day|hour|custom`), `--duration-value`
+  (default `1`), `--custom-seconds`, `--enabled` (default `true`),
+  `--sort-order`, `--allow-balance-pay` (default `true`),
+  `--allow-wallet-overflow` (default `true`), `--stripe-price-id`,
+  `--creem-product-id`, `--waffo-pancake-product-id`,
+  `--max-purchase-per-user` (0 means unlimited), `--upgrade-group`,
+  `--downgrade-group`, `--total-amount` (quota units, 0 means unlimited),
+  `--quota-reset-period` (default `never`; `never|daily|weekly|monthly|custom`),
+  `--quota-reset-custom-seconds`.
+
+`oauth-app create` flags:
+
+- `--name` (required), `--redirect-uris` (required, comma-separated),
+  `--scopes` (required, comma-separated).
+- `--post-logout-redirect-uris` (comma-separated), `--public-client` (bool,
+  no client secret), `--logo-url`, `--supabase-project-ref`,
+  `--waffo-pancake-return-url`. `oauth-app create` always yields an enabled
+  app; `--status` exists only on `oauth-app update` (`1` enabled, `2`
+  disabled).
+
 Notes:
 
 - `product update` reads the current product with `GET /api/app-products/<id>`,
   overlays the flags you pass, then `PUT`s the complete object. Fields you do
   not pass keep their current value, so `product update 12 --price 12.99`
   changes only the price.
+- `plan update` and `oauth-app update` follow the same read-modify-write
+  pattern. `plan update` reads the current record from the plan list (the
+  admin API has no per-plan GET), overlays the passed flags, then `PUT`s the
+  complete `{"plan": {...}}` object. `oauth-app update` reads with
+  `GET /api/oauth-apps/<id>` then `PUT`s the full object.
 - `plan list` returns every plan; the admin plans endpoint accepts the
   pagination flags but does not limit the result.
 - `product orders` filters by app and user only; the endpoint has no product
   filter.
-- Negative `--app-id`, `--price`, `--quota`, or `--max-purchase-per-user` and
-  a missing required flag return `usage_error` (exit 3).
+- Negative `--app-id`, `--price`, `--quota`, `--max-purchase-per-user`, or
+  `--total-amount`, an empty `--title`/`--name`, and a missing required flag
+  return `usage_error` (exit 3).
+
+## Version and self-update
+
+```bash
+newapi-cli version              # prints the version, then checks npm for updates
+newapi-cli self-update          # prints the command without running it
+newapi-cli self-update --run    # runs npm install -g @aswless_854771076/newapi-cli@latest
+```
+
+`version` is non-fatal: a failed or unreachable registry lookup is silently
+skipped. `self-update` refreshes the binary and the bundled `newapi-cli` skill
+(server default and skill version ship with the npm package).
 
 ## Output
 
@@ -185,9 +249,10 @@ Notes:
 
 ## Escape hatch: `api`
 
-Use `api` for endpoints without a dedicated subcommand. This is **the only
-supported way to manage OAuth apps** — there is no `oauth-apps create`
-subcommand in the current CLI.
+Use `api` for endpoints without a dedicated subcommand. OAuth apps now have a
+dedicated `oauth-app` subcommand (see above), which is preferred over the raw
+`api` calls below; the raw form remains for scripting and for fields the
+subcommand does not expose (for example `ai_model_whitelist`).
 
 ```bash
 newapi-cli api GET /api/user/self

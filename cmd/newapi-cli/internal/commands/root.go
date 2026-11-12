@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/buildinfo"
 	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/client"
 	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/config"
 	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/output"
@@ -42,9 +43,11 @@ func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "newapi-cli",
 		Short:         "Admin CLI for a new-api server",
+		Version:       buildinfo.Version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
+	root.SetVersionTemplate("{{.Name}} version {{.Version}}\n")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "config profile (env "+config.EnvProfile+")")
 	root.PersistentFlags().BoolVar(&flagPretty, "pretty", false, "human-readable output instead of JSON")
 	root.AddCommand(
@@ -56,7 +59,10 @@ func NewRootCmd() *cobra.Command {
 		newOptionCmd(),
 		newPlanCmd(),
 		newProductCmd(),
+		newOAuthAppCmd(),
 		newAPICmd(),
+		newVersionCmd(),
+		newSelfUpdateCmd(),
 	)
 	return root
 }

@@ -1,0 +1,10 @@
+node_modules
+.next
+.vercel
+.env*
+*.log
+*.tsbuildinfo
+/supabase/
+/scripts/
+**/__tests__
+**/*.test.*
