@@ -587,11 +587,18 @@ test('empty or failed model catalog never fabricates a model; Studio selections 
     assert.equal(studio.calls.filter((url) => !url.pathname.endsWith('/ai_models')).every((url) => url.searchParams.get('client_id') === 'eq.app-fixture'), true);
     const { page } = await openProfile();
     try {
+      // StudioClient 现在通过客户端 fetch 分页加载素材，需拦截列表 API 返回 fixture 项。
+      await page.route('**/api/characters**', (route) => route.fulfill({ json: { ok: true, data: [{ id: character.id, name: character.name, signedUrl: '/api/media/media-user/character.png' }], total: 1, page: 1, pageSize: 20 } }));
+      await page.route('**/api/outfits**', (route) => route.fulfill({ json: { ok: true, data: [{ id: 'outfit-1', name: '测试服装', signedUrl: '/api/media/media-user/outfit.png', source: 'official', parseStatus: 'ready' }], total: 1, page: 1, pageSize: 20 } }));
+      await page.route('**/api/poses**', (route) => route.fulfill({ json: { ok: true, data: [{ id: 'pose-1', name: '测试姿势', signedUrl: '/api/media/media-official/pose.png' }], total: 1, page: 1, pageSize: 20 } }));
       await page.evaluate((props) => window.mountStudio(props), client.props);
       await page.getByRole('button', { name: character.name, exact: true }).click();
+      await page.getByRole('button', { name: '下一步', exact: true }).click();
       await page.getByRole('button', { name: '测试服装', exact: true }).click();
+      await page.getByRole('button', { name: '下一步', exact: true }).click();
       await page.getByRole('button', { name: '测试姿势', exact: true }).click();
-      assert.equal(await page.getByRole('button', { name: '开始生成', exact: true }).isDisabled(), true);
+      await page.getByRole('button', { name: '下一步', exact: true }).click();
+      assert.equal(await page.getByRole('button', { name: '确认生成', exact: true }).isDisabled(), true);
       assert.equal(await page.getByLabel('模型', { exact: true }).locator('option[value="gpt-image-1"]').count(), 0);
     } finally { await page.close(); }
   }

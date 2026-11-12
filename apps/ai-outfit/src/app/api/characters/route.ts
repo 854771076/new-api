@@ -7,6 +7,7 @@ import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { config } from '@/lib/config';
 import { gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
+import { clampLimit, clampPage, mediaUrl } from '@/lib/list-api';
 
 export const runtime = 'nodejs';
 const MAX_SIZE = 4 * 1024 * 1024;
@@ -18,16 +19,29 @@ const metadataSchema = z.object({
 const patchSchema = metadataSchema.partial().strict().refine(body => Object.keys(body).length > 0);
 const idSchema = z.string().uuid();
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'UNAUTHENTICATED' }, { status: 401 });
 
-  const { data, error } = await supabase.from('characters').select('*')
+  const sp = req.nextUrl.searchParams;
+  const page = clampPage(sp.get('page'));
+  const limit = clampLimit(sp.get('limit'));
+  const from = (page - 1) * limit;
+
+  const { data, count, error } = await supabase.from('characters')
+    .select('id, name, image_path, cover_path, bucket', { count: 'exact' })
     .eq('client_id', config.gatewayClientId).eq('user_id', user.id)
-    .order('created_at', { ascending: false }).order('id');
+    .order('created_at', { ascending: false }).order('id')
+    .range(from, from + limit - 1);
   if (error) return NextResponse.json({ error: 'DB_ERROR', message: '读取人物失败，请稍后重试' }, { status: 503 });
-  return NextResponse.json({ ok: true, data });
+
+  const items = (data ?? []).map((c) => ({
+    id: c.id,
+    name: c.name ?? '未命名',
+    signedUrl: mediaUrl(c.bucket ?? 'media-user', c.cover_path?.trim() || c.image_path),
+  }));
+  return NextResponse.json({ ok: true, data: items, total: count ?? 0, page, pageSize: limit });
 }
 
 export async function POST(req: NextRequest) {

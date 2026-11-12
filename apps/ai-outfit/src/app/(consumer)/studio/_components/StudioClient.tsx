@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { MediaCard } from '@/components/MediaCard';
 import { CharacterUploader } from '@/components/CharacterUploader';
 import { GarmentUploader } from '@/components/GarmentUploader';
 import { QUOTA_PER_UNIT } from '@/lib/constants';
+import { LIST_PAGE_SIZE } from '@/lib/list-api';
 import { Sparkles, Upload, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
 
 type Item = { id: string; name: string; subtitle?: string; signedUrl?: string | null };
@@ -46,9 +47,6 @@ const ADVANCE_INTERVAL_MS = 1500;
 const MAX_ADVANCE_ATTEMPTS = 30;
 
 type Props = {
-  characters: Item[];
-  outfits: OutfitItem[];
-  poses: Item[];
   outfitCats: string[];
   poseSystems: string[];
   poseAngles: string[];
@@ -56,7 +54,6 @@ type Props = {
   initialOutfitCat: string;
   initialPoseQ: string;
   initialPoseSys: string;
-  initialPoseCat: string;
   initialPoseAngle: string;
   models: ModelOption[];
 };
@@ -106,7 +103,7 @@ function formatCredits(value: number): string {
 }
 
 // 平台超时/网关异常可能返回非 JSON（HTML/空响应），直接 res.json() 会抛 SyntaxError 并吞掉提示。
-type Envelope = { success?: boolean; message?: string; data?: unknown };
+type Envelope = { success?: boolean; ok?: boolean; message?: string; data?: unknown; total?: number };
 async function readEnvelope(res: Response): Promise<Envelope> {
   const text = await res.text();
   if (!text) return {};
@@ -125,8 +122,105 @@ function failureMessage(res: Response, fallback: string): string {
   return fallback;
 }
 
+type ListResult<T> = { items: T[]; total: number };
+
+async function fetchListPage<T>(
+  path: string,
+  search: URLSearchParams,
+  signal: AbortSignal,
+  onUnauthorized: () => void,
+): Promise<ListResult<T>> {
+  const res = await fetch(`${path}?${search.toString()}`, { signal });
+  if (res.status === 401) {
+    onUnauthorized();
+    throw new DOMException('Aborted', 'AbortError');
+  }
+  const data: Envelope = await readEnvelope(res);
+  if (!res.ok || data.ok !== true) {
+    throw new Error(typeof data.message === 'string' && data.message ? data.message : '加载失败，请稍后重试');
+  }
+  return {
+    items: Array.isArray(data.data) ? (data.data as T[]) : [],
+    total: typeof data.total === 'number' ? data.total : 0,
+  };
+}
+
+type LoadPage<T> = (page: number, signal: AbortSignal) => Promise<ListResult<T>>;
+
+function usePagedList<T>(load: LoadPage<T>) {
+  const [page, setPage] = useState(1);
+  const [prevLoad, setPrevLoad] = useState(() => load);
+  // 筛选条件变化（load 身份变化）时重置回第一页，避免停留在越界页。
+  if (prevLoad !== load) {
+    setPrevLoad(load);
+    setPage(1);
+  }
+  const [reloadKey, setReloadKey] = useState(0);
+  const [items, setItems] = useState<T[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    setLoading(true);
+    setError(null);
+    load(page, controller.signal)
+      .then((r) => {
+        if (!active) return;
+        setItems(r.items);
+        setTotal(r.total);
+      })
+      .catch((e: unknown) => {
+        if (!active) return;
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [load, page, reloadKey]);
+
+  const totalPages = Math.max(1, Math.ceil(total / LIST_PAGE_SIZE));
+  const reload = () => {
+    setPage(1);
+    setReloadKey((k) => k + 1);
+  };
+
+  return { items, total, totalPages, page, setPage, loading, error, reload };
+}
+
+function Pager({
+  page, totalPages, total, onPage,
+}: { page: number; totalPages: number; total: number; onPage: (p: number) => void }) {
+  if (totalPages <= 1) return null;
+  const firstPage = Math.min(Math.max(1, page - 3), Math.max(1, totalPages - 6));
+  return (
+    <nav aria-label="分页" className="flex flex-wrap justify-center gap-1">
+      <button type="button" className="btn btn-sm btn-outline" disabled={page <= 1} onClick={() => onPage(page - 1)}>上一页</button>
+      {Array.from({ length: Math.min(7, totalPages) }, (_, i) => firstPage + i).map((p) => (
+        <button
+          key={p}
+          type="button"
+          aria-current={p === page ? 'page' : undefined}
+          className={`btn btn-sm ${p === page ? 'btn-primary' : 'btn-outline'}`}
+          onClick={() => onPage(p)}
+        >
+          {p}
+        </button>
+      ))}
+      <button type="button" className="btn btn-sm btn-outline" disabled={page >= totalPages} onClick={() => onPage(page + 1)}>下一页</button>
+      <span className="self-center px-2 text-sm">第 {page} / {totalPages} 页 · 共 {total} 个</span>
+    </nav>
+  );
+}
+
 export function StudioClient({
-  characters, outfits, poses,
   outfitCats, poseSystems, poseAngles,
   initialOutfitQ, initialOutfitCat,
   initialPoseQ, initialPoseSys, initialPoseAngle,
@@ -137,9 +231,12 @@ export function StudioClient({
   const [step, setStep] = useState(1);
   const [maxStep, setMaxStep] = useState(1);
 
-  const [charId, setCharId] = useState<string | null>(null);
-  const [outfitIds, setOutfitIds] = useState<string[]>([]);
-  const [poseId, setPoseId] = useState<string | null>(null);
+  const [selectedCharacter, setSelectedCharacter] = useState<Item | null>(null);
+  const [selectedOutfits, setSelectedOutfits] = useState<OutfitItem[]>([]);
+  const [selectedPose, setSelectedPose] = useState<Item | null>(null);
+  const charId = selectedCharacter?.id ?? null;
+  const outfitIds = selectedOutfits.map((o) => o.id);
+  const poseId = selectedPose?.id ?? null;
   const defaultModel = models.find((m) => m.is_default) ?? models[0] ?? null;
   const [modelId, setModelId] = useState(defaultModel?.model_id ?? '');
   const [size, setSize] = useState(defaultSizeOf(defaultModel?.default_size));
@@ -170,6 +267,36 @@ export function StudioClient({
   // 同一向导会话内保持稳定，重试也复用同一幂等键，避免重复下单
   const [idempotencyKey] = useState(() => crypto.randomUUID());
 
+  const handleUnauthorized = useCallback(() => {
+    router.replace('/login?error=session_expired');
+  }, [router]);
+
+  const loadCharacters = useCallback((page: number, signal: AbortSignal) => {
+    const search = new URLSearchParams({ page: String(page), limit: String(LIST_PAGE_SIZE) });
+    return fetchListPage<Item>('/api/characters', search, signal, handleUnauthorized);
+  }, [handleUnauthorized]);
+
+  const loadOutfits = useCallback((page: number, signal: AbortSignal) => {
+    const search = new URLSearchParams({ page: String(page), limit: String(LIST_PAGE_SIZE) });
+    if (outfitTab === 'official') search.set('source', 'official');
+    else if (outfitTab === 'mine') search.set('source', 'user');
+    if (outfitCat) search.set('category', outfitCat);
+    if (outfitQ.trim()) search.set('q', outfitQ.trim());
+    return fetchListPage<OutfitItem>('/api/outfits', search, signal, handleUnauthorized);
+  }, [outfitTab, outfitCat, outfitQ, handleUnauthorized]);
+
+  const loadPoses = useCallback((page: number, signal: AbortSignal) => {
+    const search = new URLSearchParams({ page: String(page), limit: String(LIST_PAGE_SIZE) });
+    if (poseSys) search.set('system', poseSys);
+    if (poseAngle) search.set('angle', poseAngle);
+    if (poseQ.trim()) search.set('q', poseQ.trim());
+    return fetchListPage<Item>('/api/poses', search, signal, handleUnauthorized);
+  }, [poseSys, poseAngle, poseQ, handleUnauthorized]);
+
+  const characters = usePagedList<Item>(loadCharacters);
+  const outfits = usePagedList<OutfitItem>(loadOutfits);
+  const poses = usePagedList<Item>(loadPoses);
+
   useEffect(() => {
     if (charUploadOpen) charDialog.current?.showModal();
     else charDialog.current?.close();
@@ -180,9 +307,6 @@ export function StudioClient({
     else garmentDialog.current?.close();
   }, [garmentUploadOpen]);
 
-  const selectedCharacter = characters.find((c) => c.id === charId) ?? null;
-  const selectedPose = poses.find((p) => p.id === poseId) ?? null;
-  const selectedOutfits = outfits.filter((o) => outfitIds.includes(o.id));
   const selectedModel = models.find((m) => m.model_id === modelId) ?? null;
 
   const qualityOptions = useMemo(() => {
@@ -192,35 +316,11 @@ export function StudioClient({
     return opts;
   }, [selectedModel]);
 
-  const filteredOutfits = useMemo(() => {
-    const q = outfitQ.trim().toLowerCase();
-    return outfits.filter((o) => {
-      if (outfitTab === 'official' && o.source !== 'official') return false;
-      if (outfitTab === 'mine' && o.source !== 'user') return false;
-      if (outfitCat && o.subtitle !== outfitCat) return false;
-      if (q) {
-        const hay = `${o.name} ${o.subtitle ?? ''}`.toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [outfits, outfitTab, outfitCat, outfitQ]);
-
-  const filteredPoses = useMemo(() => {
-    const q = poseQ.trim().toLowerCase();
-    return poses.filter((p) => {
-      if (poseSys && !p.subtitle?.includes(poseSys)) return false;
-      if (poseAngle && !p.subtitle?.includes(poseAngle)) return false;
-      if (q && !`${p.name} ${p.subtitle ?? ''}`.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [poses, poseSys, poseAngle, poseQ]);
-
-  const toggleOutfit = (id: string) => {
-    setOutfitIds((prev) => {
-      if (prev.includes(id)) return prev.filter((x) => x !== id);
+  const toggleOutfit = (item: OutfitItem) => {
+    setSelectedOutfits((prev) => {
+      if (prev.some((o) => o.id === item.id)) return prev.filter((o) => o.id !== item.id);
       if (prev.length >= MAX_OUTFITS) return prev;
-      return [...prev, id];
+      return [...prev, item];
     });
   };
 
@@ -395,7 +495,7 @@ export function StudioClient({
           <div className="card-body gap-5 p-4 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 id="step-1-title" className="card-title text-xl"><span className="badge badge-primary">1</span>选择人物</h2>
-              <span className="badge badge-outline">{characters.length} 个</span>
+              <span className="badge badge-outline">{characters.total} 个</span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" className="btn btn-outline min-h-11 gap-2" onClick={() => setCharUploadOpen(true)}>
@@ -403,13 +503,20 @@ export function StudioClient({
               </button>
               <Link href="/characters" className="btn btn-ghost min-h-11 gap-1">去人物库 <ChevronRight size={16} aria-hidden="true" /></Link>
             </div>
-            {characters.length > 0 ? (
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
-                {characters.map((c) => (
-                  <MediaCard key={c.id} title={c.name} signedUrl={c.signedUrl} variant="tile"
-                    selected={charId === c.id} onSelect={() => setCharId(c.id === charId ? null : c.id)} />
-                ))}
-              </div>
+            {characters.loading && characters.items.length === 0 ? (
+              <div className="flex justify-center py-8"><span className="loading loading-spinner loading-lg" aria-hidden="true" /><span className="sr-only">加载中</span></div>
+            ) : characters.error ? (
+              <div role="alert" className="alert alert-error alert-soft"><span className="min-w-0 wrap-anywhere">{characters.error}</span></div>
+            ) : characters.items.length > 0 ? (
+              <>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
+                  {characters.items.map((c) => (
+                    <MediaCard key={c.id} title={c.name} signedUrl={c.signedUrl} variant="tile"
+                      selected={selectedCharacter?.id === c.id} onSelect={() => setSelectedCharacter(c.id === selectedCharacter?.id ? null : c)} />
+                  ))}
+                </div>
+                <Pager page={characters.page} totalPages={characters.totalPages} total={characters.total} onPage={characters.setPage} />
+              </>
             ) : (
               <div className="card card-border border-dashed bg-base-200 text-base-content">
                 <div className="card-body items-center gap-3 py-8 text-center">
@@ -477,22 +584,29 @@ export function StudioClient({
               </div>
             ) : null}
 
-            {filteredOutfits.length > 0 ? (
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
-                {filteredOutfits.map((o) => (
-                  <MediaCard
-                    key={o.id}
-                    title={o.name}
-                    subtitle={o.subtitle}
-                    signedUrl={o.signedUrl}
-                    variant="tile"
-                    badge={o.source === 'user' ? '我的' : '官方'}
-                    selected={outfitIds.includes(o.id)}
-                    disabled={outfitIds.length >= MAX_OUTFITS && !outfitIds.includes(o.id)}
-                    onSelect={() => toggleOutfit(o.id)}
-                  />
-                ))}
-              </div>
+            {outfits.loading && outfits.items.length === 0 ? (
+              <div className="flex justify-center py-8"><span className="loading loading-spinner loading-lg" aria-hidden="true" /><span className="sr-only">加载中</span></div>
+            ) : outfits.error ? (
+              <div role="alert" className="alert alert-error alert-soft"><span className="min-w-0 wrap-anywhere">{outfits.error}</span></div>
+            ) : outfits.items.length > 0 ? (
+              <>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
+                  {outfits.items.map((o) => (
+                    <MediaCard
+                      key={o.id}
+                      title={o.name}
+                      subtitle={o.subtitle}
+                      signedUrl={o.signedUrl}
+                      variant="tile"
+                      badge={o.source === 'user' ? '我的' : '官方'}
+                      selected={outfitIds.includes(o.id)}
+                      disabled={outfitIds.length >= MAX_OUTFITS && !outfitIds.includes(o.id)}
+                      onSelect={() => toggleOutfit(o)}
+                    />
+                  ))}
+                </div>
+                <Pager page={outfits.page} totalPages={outfits.totalPages} total={outfits.total} onPage={outfits.setPage} />
+              </>
             ) : (
               <div className="card card-border border-dashed bg-base-200 text-base-content">
                 <div className="card-body items-center gap-3 py-8 text-center">
@@ -526,7 +640,7 @@ export function StudioClient({
           <div className="card-body gap-5 p-4 sm:p-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 id="step-3-title" className="card-title text-xl"><span className="badge badge-primary">3</span>选择姿势</h2>
-              <span className="badge badge-outline">{poses.length} 个</span>
+              <span className="badge badge-outline">{poses.total} 个</span>
             </div>
             <label className="input min-w-0 gap-2">
               <Search size={18} className="shrink-0 text-base-content/70" aria-hidden="true" />
@@ -552,13 +666,20 @@ export function StudioClient({
                 ))}
               </div>
             ) : null}
-            {filteredPoses.length > 0 ? (
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
-                {filteredPoses.map((p) => (
-                  <MediaCard key={p.id} title={p.name} subtitle={p.subtitle} signedUrl={p.signedUrl} variant="tile"
-                    selected={poseId === p.id} onSelect={() => setPoseId(p.id === poseId ? null : p.id)} />
-                ))}
-              </div>
+            {poses.loading && poses.items.length === 0 ? (
+              <div className="flex justify-center py-8"><span className="loading loading-spinner loading-lg" aria-hidden="true" /><span className="sr-only">加载中</span></div>
+            ) : poses.error ? (
+              <div role="alert" className="alert alert-error alert-soft"><span className="min-w-0 wrap-anywhere">{poses.error}</span></div>
+            ) : poses.items.length > 0 ? (
+              <>
+                <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 xl:grid-cols-4">
+                  {poses.items.map((p) => (
+                    <MediaCard key={p.id} title={p.name} subtitle={p.subtitle} signedUrl={p.signedUrl} variant="tile"
+                      selected={selectedPose?.id === p.id} onSelect={() => setSelectedPose(p.id === selectedPose?.id ? null : p)} />
+                  ))}
+                </div>
+                <Pager page={poses.page} totalPages={poses.totalPages} total={poses.total} onPage={poses.setPage} />
+              </>
             ) : (
               <div className="card card-border border-dashed bg-base-200 text-base-content">
                 <div className="card-body items-center gap-3 py-8 text-center">
@@ -706,7 +827,7 @@ export function StudioClient({
             <button type="button" className="btn btn-ghost btn-square" aria-label="关闭上传" onClick={() => setCharUploadOpen(false)}><X size={20} aria-hidden="true" /></button>
           </div>
           {charUploadOpen ? (
-            <CharacterUploader onClose={() => setCharUploadOpen(false)} onUploaded={() => { setCharUploadOpen(false); router.refresh(); }} />
+            <CharacterUploader onClose={() => setCharUploadOpen(false)} onUploaded={() => { setCharUploadOpen(false); characters.reload(); }} />
           ) : null}
         </div>
         <form method="dialog" className="modal-backdrop"><button type="submit" aria-label="关闭">关闭</button></form>
@@ -721,7 +842,7 @@ export function StudioClient({
           {garmentUploadOpen ? (
             <GarmentUploader
               onClose={() => setGarmentUploadOpen(false)}
-              onUploaded={() => { setGarmentUploadOpen(false); setOutfitTab('mine'); router.refresh(); }}
+              onUploaded={() => { setGarmentUploadOpen(false); setOutfitTab('mine'); outfits.reload(); }}
             />
           ) : null}
         </div>
