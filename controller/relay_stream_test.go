@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/concurrency"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -297,6 +298,86 @@ func TestRelayStreamErrorAfterKeepAlive(t *testing.T) {
 			} else {
 				require.Contains(t, recorder.Body.String(), "data: [DONE]")
 			}
+		})
+	}
+}
+
+// TestRelayStreamSaturationRejectionNormalizesAndCounts pins the streaming
+// terminal path of a channel-saturation rejection — the branch taken when the
+// keep-alive already committed the SSE response headers, so the error can only
+// travel inside the open stream. The streamed error frame must carry the
+// neutral CNT-01 envelope (type/code exactly "concurrency_exceeded", the fixed
+// saturation wording plus the request-id suffix) and must never leak the
+// internal "channel:" routing prefix, the upstream address or the selected
+// channel's identity. The server-side shed counter must advance by exactly one,
+// so the 429 reconciliation identity (client 429s ≡ Δ server rejections) also
+// holds for the streaming sub-case — the SSE branch used to skip the counter
+// entirely.
+func TestRelayStreamSaturationRejectionNormalizesAndCounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const requestID = "sse-saturation-req"
+	const channelID = 987654
+	wantMessage := common.MessageWithRequestId(service.NewChannelConcurrencyRejection().Error(), requestID)
+	newSignal := func() *types.NewAPIError {
+		err := service.NewChannelConcurrencyRejection()
+		err.SetMessage(common.MessageWithRequestId(err.Error(), requestID))
+		return err
+	}
+
+	for _, format := range []types.RelayFormat{types.RelayFormatOpenAI, types.RelayFormatClaude} {
+		t.Run(string(format), func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/stream", nil)
+			// The keep-alive ping commits the SSE headers — that is what routes
+			// the terminal error into the streaming branch instead of c.JSON.
+			helper.SetEventStreamHeaders(c)
+			require.NoError(t, helper.PingData(c))
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://provider.example")
+			common.SetContextKey(c, constant.ContextKeyUpstreamRequestOrigin, "https://provider.example")
+			common.SetContextKey(c, constant.ContextKeyChannelId, channelID)
+
+			rejectionsBefore := concurrency.RejectionCount()
+			renderRelayTerminalError(c, format, nil, newSignal())
+
+			body := recorder.Body.String()
+			require.NotContains(t, body, "channel:",
+				"the streamed frame must not leak the internal routing prefix")
+			require.NotContains(t, body, "provider.example",
+				"the streamed frame must not leak the upstream address")
+			require.NotContains(t, body, strconv.Itoa(channelID),
+				"the streamed frame must not leak the selected channel id")
+			require.Contains(t, body, "concurrency_exceeded",
+				"the streamed saturation frame must carry the neutral CNT-01 envelope")
+
+			var errObj map[string]any
+			for _, line := range strings.Split(body, "\n") {
+				payload, ok := strings.CutPrefix(line, "data: ")
+				if !ok || !strings.Contains(payload, `"error"`) {
+					continue
+				}
+				var frame map[string]any
+				require.NoError(t, common.Unmarshal([]byte(payload), &frame),
+					"the streamed frame must be JSON: %s", payload)
+				errObj, ok = frame["error"].(map[string]any)
+				require.True(t, ok, "the streamed frame must carry an error object: %s", payload)
+				break
+			}
+			require.NotNil(t, errObj, "the stream must carry the saturation error frame")
+			require.Equal(t, "concurrency_exceeded", errObj["type"],
+				"the streamed frame must use the neutral type, never the channel:-prefixed routing code")
+			require.Equal(t, wantMessage, errObj["message"],
+				"the streamed frame must carry the fixed saturation wording plus the request id, nothing else")
+			if format == types.RelayFormatClaude {
+				require.Contains(t, body, "event: error\n")
+			} else {
+				require.Equal(t, "concurrency_exceeded", errObj["code"],
+					"the streamed frame must use the neutral code, never the channel:-prefixed routing code")
+				require.Contains(t, body, "data: [DONE]")
+			}
+
+			require.Equal(t, rejectionsBefore+1, concurrency.RejectionCount(),
+				"a saturation rejection rendered on the streaming path must count exactly one shed request")
 		})
 	}
 }

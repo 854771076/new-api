@@ -398,7 +398,24 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 // contract surface is the WS error frame (no HTTP headers are writable there);
 // every other format (default, Gemini, Claude) renders through c.JSON with the
 // signal's own 429 status.
+//
+// Every rendering surface (JSON, already-committed SSE, Realtime WS) bumps the
+// shed counter exactly once for a saturation rejection, because each of them
+// is one client-visible 429 and the counter must reconcile with the client-
+// side 429 count.
 func renderRelayTerminalError(c *gin.Context, relayFormat types.RelayFormat, ws *websocket.Conn, newAPIError *types.NewAPIError) {
+	// A channel-saturation rejection is ONE client-visible 429 whichever
+	// rendering surface answers it, so the shed counter is bumped BEFORE the
+	// streaming early return below: that branch used to skip it, so a
+	// saturation that hit after the keep-alive had already committed the SSE
+	// headers never reached the server-side counter and broke the 429
+	// reconciliation identity (client 429s ≡ Δ server rejections). The bump
+	// happens exactly once per terminal render — the JSON branch below no
+	// longer bumps again.
+	saturated := service.IsChannelConcurrencyRejection(newAPIError)
+	if saturated {
+		concurrency.AddRejection()
+	}
 	// 心跳提交响应头后，最终错误继续通过同一个流返回。
 	if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
 		strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
@@ -413,8 +430,7 @@ func renderRelayTerminalError(c *gin.Context, relayFormat types.RelayFormat, ws 
 		claudeErr  types.ClaudeError
 		retryAfter bool
 	)
-	if service.IsChannelConcurrencyRejection(newAPIError) {
-		concurrency.AddRejection()
+	if saturated {
 		message := newAPIError.Error()
 		openaiErr = types.OpenAIError{
 			Message: message,

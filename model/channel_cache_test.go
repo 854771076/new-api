@@ -201,6 +201,39 @@ func TestGetRandomSatisfiedChannel_AllTiersExcludedReturnsNil(t *testing.T) {
 	assert.Nil(t, chosen, "excluding every candidate must return nil")
 }
 
+// TestGetRandomSatisfiedChannel_AllZeroWeightsKeepTheTierReachable pins the
+// all-zero-weight degradation branch of the picker: when every candidate's
+// static weight is 0 the tier total is 0, so the picker smooths the tier to
+// equal weights (each candidate contributes the same smoothing adjustment)
+// instead of drawing against a zero total. Without that rule the random draw
+// is always 0 and every request lands on the SAME candidate — the
+// load-balancing degeneration reported in
+// concurrency-test/REPORT-LOADBALANCE.md. The observable contract is that the
+// selection still returns a channel and stays spread over the whole tier.
+func TestGetRandomSatisfiedChannel_AllZeroWeightsKeepTheTierReachable(t *testing.T) {
+	truncateTables(t)
+	withMemoryCache(t, true)
+	seedPriorityChannels(t, [3]int{106001, 106002, 106003}, [3]int64{100, 100, 100}, [3]uint{0, 0, 0})
+
+	rand.Seed(1)
+
+	counts := map[int]int{106001: 0, 106002: 0, 106003: 0}
+	const draws = 300
+	for range draws {
+		chosen, err := GetRandomSatisfiedChannel("default", priorityTestModel, 0, nil)
+		require.NoError(t, err)
+		require.NotNil(t, chosen, "an all-zero-weight tier must still select a channel")
+		counts[chosen.Id]++
+	}
+	// Equal smoothing means every candidate keeps a share of the draw; a
+	// degenerate picker hands every draw to one candidate and starves the
+	// other two.
+	for id, count := range counts {
+		assert.Greater(t, count, draws/10,
+			"channel %d must keep a share of the draw under the equal-weight smoothing", id)
+	}
+}
+
 // TestGetChannel_DBPath_PriorityRetryStepsThroughAllTiers mirrors the cache
 // regression for the !MemoryCacheEnabled DB fallback path: same priority-tier
 // skipping must not happen there either. The two paths must stay in sync.
