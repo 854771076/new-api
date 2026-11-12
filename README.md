@@ -150,7 +150,7 @@ Accounts, channels, plugin installation states, usage, prices, and costs shown b
 | Anthropic Messages | `POST /v1/messages` |
 | Gemini | `POST /v1beta/models/{model}:generateContent`, `POST /v1beta/models/{model}:streamGenerateContent` |
 | Realtime / Responses WebSocket | `GET /v1/realtime`, `GET /v1/responses` (WebSocket upgrade) |
-| Images / audio | `/v1/images/generations`, `/v1/images/edits`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations` |
+| Images / audio | `/v1/images/generations`, `/v1/images/edits`, `/v1/audio/speech`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/voice/clone`, `/v1/audio/voice/design`, `/v1/audio/music` |
 | Embeddings / rerank | `POST /v1/embeddings`, `POST /v1/rerank` |
 | Task plugins | `POST /v1/tasks/{pluginKey}`, `GET /v1/tasks/{taskId}`, plus routes declared by each plugin |
 

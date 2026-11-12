@@ -20,6 +20,7 @@ import {
   CHANNEL_TYPES,
   CHANNEL_TYPE_VLLM,
   CHANNEL_TYPE_SGLANG,
+  CHANNEL_TYPE_APIMART,
 } from '../constants'
 
 // ============================================================================
@@ -68,6 +69,11 @@ export const CHANNEL_TYPE_CONFIGS: Record<number, ChannelTypeConfig> = {
       key: 'vLLM API key, or EMPTY if authentication is disabled',
       models: 'Models fetched from upstream /v1/models',
     },
+  },
+  [CHANNEL_TYPE_APIMART]: {
+    id: CHANNEL_TYPE_APIMART,
+    name: CHANNEL_TYPES[CHANNEL_TYPE_APIMART],
+    icon: 'Replicate',
   },
   1: {
     id: 1,

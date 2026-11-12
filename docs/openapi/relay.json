@@ -1791,6 +1791,384 @@
         ]
       }
     },
+    "/v1/audio/voice/clone": {
+      "post": {
+        "summary": "克隆音色",
+        "deprecated": false,
+        "description": "用上传的音频样本克隆音色。只有 MiniMax 渠道支持该端点。voice_id 由调用方生成并在 voice 字段中传入，上游的克隆响应不回传它，响应会原样带回请求里的值。",
+        "operationId": "createVoiceClone",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "合成使用的模型",
+                    "example": "speech-02-hd"
+                  },
+                  "voice": {
+                    "type": "string",
+                    "description": "要创建的音色 id，由调用方生成",
+                    "example": "my_voice"
+                  },
+                  "input": {
+                    "type": "string",
+                    "description": "待合成文本，最多 1000 字符。给了 metadata.text 或 metadata.text_file_id 时可省略",
+                    "example": "你好，这是克隆出来的音色。"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "description": "厂商自定义字段",
+                    "properties": {
+                      "file_id": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "上传的样本音频 id，克隆必填",
+                        "example": 1234567890
+                      },
+                      "text": {
+                        "type": "string",
+                        "description": "待合成文本，最多 1000 字符，input 为空时使用",
+                        "example": "你好，这是克隆出来的音色。"
+                      },
+                      "text_file_id": {
+                        "type": "integer",
+                        "format": "int64",
+                        "description": "上传的文本文件 id，作为待合成文本",
+                        "example": 9876543210
+                      },
+                      "text_validation": {
+                        "type": "string",
+                        "description": "文本校验提示，最多 200 字符",
+                        "example": ""
+                      },
+                      "accuracy": {
+                        "type": "number",
+                        "format": "float",
+                        "description": "克隆精度，取值 0 到 1 之间",
+                        "example": 0.9
+                      },
+                      "clone_prompt": {
+                        "type": "object",
+                        "description": "克隆的补充提示，不能替代 metadata.file_id",
+                        "properties": {
+                          "prompt_audio": {
+                            "description": "提示音频的 id，数字或字符串都行，原样转发给上游",
+                            "example": 1234567890
+                          },
+                          "prompt_text": {
+                            "type": "string",
+                            "description": "克隆的提示文本",
+                            "example": ""
+                          }
+                        }
+                      }
+                    },
+                    "required": [
+                      "file_id"
+                    ]
+                  }
+                },
+                "required": [
+                  "model",
+                  "voice"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "克隆成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "voice_id": {
+                      "type": "string",
+                      "description": "请求里的音色 id，原样带回",
+                      "example": "my_voice"
+                    },
+                    "demo_audio": {
+                      "type": "string",
+                      "description": "上游给的试听音频地址，在响应顶层",
+                      "example": ""
+                    },
+                    "input_sensitive": {
+                      "type": "object",
+                      "description": "上游的输入敏感度信息",
+                      "properties": {
+                        "type": {
+                          "type": "integer",
+                          "description": "敏感度等级，上游给的是数字",
+                          "example": 0
+                        }
+                      }
+                    },
+                    "extra_info": {
+                      "type": "object",
+                      "properties": {
+                        "audio_length": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 0
+                        },
+                        "audio_sample_rate": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 44100
+                        },
+                        "audio_size": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 0
+                        },
+                        "bitrate": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 128000
+                        },
+                        "word_count": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 0
+                        },
+                        "usage_characters": {
+                          "type": "integer",
+                          "format": "int64",
+                          "description": "本次合成计费的字符数",
+                          "example": 0
+                        }
+                      }
+                    },
+                    "base_resp": {
+                      "type": "object",
+                      "description": "上游的状态，status_code 为 0 表示成功",
+                      "properties": {
+                        "status_code": {
+                          "type": "integer",
+                          "format": "int64",
+                          "example": 0
+                        },
+                        "status_msg": {
+                          "type": "string",
+                          "example": "success"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {}
+          }
+        }
+      }
+    },
+    "/v1/audio/voice/design": {
+      "post": {
+        "summary": "设计音色",
+        "deprecated": false,
+        "description": "用一段声音描述设计新音色，并返回一段试听音频。只有 MiniMax 渠道支持该端点。试听音频以 base64 放在响应里，编码固定为 mp3。",
+        "operationId": "createVoiceDesign",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "设计使用的模型",
+                    "example": "speech-02-hd"
+                  },
+                  "voice": {
+                    "type": "string",
+                    "description": "要创建的音色 id，由调用方生成",
+                    "example": "my_voice"
+                  },
+                  "input": {
+                    "type": "string",
+                    "description": "描述音色的声音提示，必填",
+                    "example": "一个温柔的女声"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "description": "厂商自定义字段",
+                    "properties": {
+                      "preview_text": {
+                        "type": "string",
+                        "description": "试听音频要朗读的文本，最多 500 字符，必填",
+                        "example": "你好，这是试听。"
+                      }
+                    },
+                    "required": [
+                      "preview_text"
+                    ]
+                  }
+                },
+                "required": [
+                  "model",
+                  "input"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "设计成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "voice_id": {
+                      "type": "string",
+                      "description": "设计出的音色 id",
+                      "example": "my_voice"
+                    },
+                    "trial_audio_base64": {
+                      "type": "string",
+                      "description": "试听音频的 base64",
+                      "example": ""
+                    },
+                    "audio_format": {
+                      "type": "string",
+                      "description": "试听音频的编码",
+                      "example": "mp3"
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {}
+          }
+        }
+      }
+    },
+    "/v1/audio/music": {
+      "post": {
+        "summary": "生成音乐",
+        "deprecated": false,
+        "description": "用一段提示或一段歌词生成音乐。只有 MiniMax 渠道支持该端点。响应直接是音频字节。",
+        "operationId": "createMusic",
+        "tags": [
+          "OpenAI音频(Audio)"
+        ],
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "生成使用的模型",
+                    "example": "music-3.0"
+                  },
+                  "input": {
+                    "type": "string",
+                    "description": "描述音乐风格的提示词",
+                    "example": "一首轻快的爵士乐"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "description": "厂商自定义字段",
+                    "properties": {
+                      "lyrics": {
+                        "type": "string",
+                        "description": "歌词",
+                        "example": ""
+                      },
+                      "output_format": {
+                        "type": "string",
+                        "description": "上游返回的音频载荷格式，默认 hex。网关解码后按音频的真实编码回传",
+                        "enum": [
+                          "hex",
+                          "mp3",
+                          "url"
+                        ],
+                        "example": "hex"
+                      },
+                      "is_instrumental": {
+                        "type": "boolean",
+                        "description": "是否纯音乐，不要人声",
+                        "example": false
+                      },
+                      "lyrics_optimizer": {
+                        "type": "boolean",
+                        "description": "是否让上游优化歌词",
+                        "example": false
+                      },
+                      "aigc_watermark": {
+                        "type": "boolean",
+                        "description": "是否加 AI 生成水印",
+                        "example": false
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "生成成功",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/flac": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/aac": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {}
+          },
+          "302": {
+            "description": "上游给了音频地址时直接跳转",
+            "headers": {}
+          }
+        }
+      }
+    },
     "/v1/rerank": {
       "post": {
         "summary": "文档重排序",

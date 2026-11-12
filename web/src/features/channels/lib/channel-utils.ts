@@ -21,6 +21,7 @@ import { formatTimestampToDate } from '@/lib/format'
 
 import {
   CHANNEL_STATUS_CONFIG,
+  CHANNEL_TYPE_APIMART,
   CHANNEL_TYPES,
   MULTI_KEY_STATUS_CONFIG,
   RESPONSE_TIME_CONFIG,
@@ -106,6 +107,7 @@ export function getChannelTypeIcon(type: number): string {
     55: 'OpenAI', // Sora
     54: 'Doubao', // Doubao
     56: 'Replicate', // Replicate
+    [CHANNEL_TYPE_APIMART]: 'Replicate', // APIMart
 
     // Tools & Platforms
     37: 'Dify', // Dify
