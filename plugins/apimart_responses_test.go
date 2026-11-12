@@ -2,6 +2,7 @@ package plugins_test
 
 import (
 	"regexp"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -464,6 +465,113 @@ func TestApimartArtifactProxy(t *testing.T) {
 		assert.Equal(t, "https://cdn.example/b.mp4", descriptor["url"])
 		assert.Equal(t, "GET", descriptor["method"])
 		assert.Equal(t, true, descriptor["credentialless"])
+	})
+}
+
+// The text the Responses protocol renders for the video of a finished task.
+func apimartResponsesVideoText(t *testing.T, plugin *jsplugin.LoadedPlugin, artifacts map[string]any) string {
+	t.Helper()
+	value, err := apimartCall(t, plugin, "protocols", []string{"openai_responses", "renderFinal"}, map[string]any{
+		"requestBody": map[string]any{"model": "seedance-1.0-pro"},
+		"artifacts":   artifacts,
+	}, map[string]any{"task_id": "task_public", "status": "SUCCESS"})
+	require.NoError(t, err)
+	decoded := decodePluginValue(t, value)
+	output, ok := decoded["output"].([]any)
+	require.True(t, ok)
+	require.Len(t, output, 1)
+	item, ok := output[0].(map[string]any)
+	require.True(t, ok)
+	content, ok := item["content"].([]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	part, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	text, ok := part["text"].(string)
+	require.True(t, ok)
+	return text
+}
+
+// The Responses output links the first video of a task, so the artifact
+// positions are read as numbers: the text order puts video-10 before video-2.
+func TestApimartArtifactOrder(t *testing.T) {
+	plugin := newApimartPlugin(t)
+
+	t.Run("links the first position of a task with many artifacts", func(t *testing.T) {
+		artifacts := map[string]any{}
+		for position := 0; position < 12; position++ {
+			key := "video-" + strconv.Itoa(position)
+			artifacts[key] = map[string]any{
+				"key":  key,
+				"type": "video",
+				"url":  "https://gateway.example/artifacts/" + key + "/content",
+			}
+		}
+		text := apimartResponsesVideoText(t, plugin, artifacts)
+		assert.Contains(t, text, "artifacts/video-0/content")
+		assert.NotContains(t, text, "artifacts/video-10/content")
+	})
+
+	t.Run("reads the positions in numeric order", func(t *testing.T) {
+		text := apimartResponsesVideoText(t, plugin, map[string]any{
+			"video-2":  map[string]any{"key": "video-2", "type": "video", "url": "https://gateway.example/artifacts/video-2/content"},
+			"video-10": map[string]any{"key": "video-10", "type": "video", "url": "https://gateway.example/artifacts/video-10/content"},
+		})
+		assert.Contains(t, text, "artifacts/video-2/content")
+		assert.NotContains(t, text, "artifacts/video-10/content")
+	})
+}
+
+// The upstream body of a multipart APIMart request.
+func apimartMultipartUpstream(t *testing.T, plugin *jsplugin.LoadedPlugin, fields map[string][]string) map[string]any {
+	t.Helper()
+	value, err := apimartCall(t, plugin, "protocols", []string{"openai_video", "decodeRequest"}, map[string]any{
+		"model": "seedance-1.0-pro",
+		"body":  map[string]any{"kind": "multipart", "fields": fields, "files": []any{}},
+	})
+	require.NoError(t, err)
+	decoded := decodePluginValue(t, value)
+	requestBody, ok := decoded["requestBody"].(map[string]any)
+	require.True(t, ok)
+
+	descriptor, err := apimartCall(t, plugin, "buildSubmitRequest", nil, map[string]any{
+		"baseUrl": "https://api.apimart.ai", "apiKey": "key", "model": "seedance-1.0-pro",
+		"upstreamModel": "seedance-1.0-pro", "requestBody": requestBody,
+	})
+	require.NoError(t, err)
+	sent := decodePluginValue(t, descriptor)
+	upstream, ok := sent["body"].(map[string]any)
+	require.True(t, ok)
+	return upstream
+}
+
+// A multipart form holds text only, so the fields that carry a structure or a
+// switch are decoded before they reach the upstream body.
+func TestApimartMultipartRequest(t *testing.T) {
+	plugin := newApimartPlugin(t)
+
+	t.Run("keeps the vendor fields of the metadata", func(t *testing.T) {
+		upstream := apimartMultipartUpstream(t, plugin, map[string][]string{
+			"prompt":       {"a cat walks on the beach"},
+			"duration":     {"8"},
+			"metadata":     {`{"mode":"pro","aspect_ratio":"16:9"}`},
+			"multi_prompt": {`[{"index":1,"prompt":"first shot","duration":4},{"index":2,"prompt":"second shot","duration":4}]`},
+		})
+		assert.Equal(t, "pro", upstream["mode"])
+		assert.Equal(t, "16:9", upstream["aspect_ratio"])
+		assert.Equal(t, []any{
+			map[string]any{"index": float64(1), "prompt": "first shot", "duration": float64(4)},
+			map[string]any{"index": float64(2), "prompt": "second shot", "duration": float64(4)},
+		}, upstream["multi_prompt"])
+	})
+
+	t.Run("sends a switch of the form as the boolean it stands for", func(t *testing.T) {
+		upstream := apimartMultipartUpstream(t, plugin, map[string][]string{
+			"prompt":    {"a cat walks on the beach"},
+			"duration":  {"8"},
+			"watermark": {"false"},
+		})
+		assert.Equal(t, false, upstream["watermark"])
 	})
 }
 

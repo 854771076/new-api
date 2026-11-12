@@ -272,7 +272,18 @@ function artifactIndex(key) {
 // The gateway's own address of a finished video.
 function artifactURL(ctx) {
   const artifacts = plainObject(ctx && ctx.artifacts) || {};
-  const keys = Object.keys(artifacts).sort();
+  // The artifact keys are positions, so they are read in numeric order: the
+  // text order puts video-10 before video-2.
+  const keys = Object.keys(artifacts).sort(function (left, right) {
+    const leftIndex = artifactIndex(left);
+    const rightIndex = artifactIndex(right);
+    if (leftIndex === rightIndex) return 0;
+    // A key that is not a position belongs after the positions, so it never
+    // moves a video out of its place.
+    if (leftIndex < 0) return 1;
+    if (rightIndex < 0) return -1;
+    return leftIndex - rightIndex;
+  });
   for (const key of keys) {
     const item = plainObject(artifacts[key]);
     if (item && item.type === "video" && trimmed(item.url)) return trimmed(item.url);
@@ -513,6 +524,36 @@ export function buildContentRequest(ctx) {
   return { url: url, method: ctx.clientRequest.method, credentialless: true };
 }
 
+// The multipart fields that carry a structure: a multipart form only holds
+// text, so these travel as JSON.
+const MULTIPART_JSON_FIELDS = ["metadata", "image_urls", "multi_prompt", "element_list"];
+// The multipart fields that are switches: a multipart form only holds text, so
+// these travel as the words true and false.
+const MULTIPART_SWITCH_FIELDS = ["watermark", "audio", "multi_shot"];
+
+// The value of one multipart field, in the type the upstream API takes.
+function multipartField(name, value) {
+  if (MULTIPART_JSON_FIELDS.includes(name)) {
+    let decoded;
+    try {
+      decoded = JSON.parse(value);
+    } catch (e) {
+      throw new Error(name + " must be valid JSON");
+    }
+    if (name === "metadata") {
+      if (!plainObject(decoded)) throw new Error("metadata must be a JSON object");
+      return decoded;
+    }
+    if (!Array.isArray(decoded)) throw new Error(name + " must be a JSON array");
+    return decoded;
+  }
+  if (MULTIPART_SWITCH_FIELDS.includes(name)) {
+    if (value === "true") return true;
+    if (value === "false") return false;
+  }
+  return value;
+}
+
 export const protocols = {
   openai_responses: {
     decodeRequest: function (ctx) {
@@ -578,7 +619,7 @@ export const protocols = {
         const fields = ctx.body.fields || {};
         for (const name of Object.keys(fields)) {
           if (fields[name].length > 1) throw new Error(name + " must be provided once");
-          req[name] = fields[name][0];
+          req[name] = multipartField(name, fields[name][0]);
         }
         const files = ctx.body.files || [];
         if (files.length) throw new Error("APIMart image references must be public URLs, so file uploads are not supported");
