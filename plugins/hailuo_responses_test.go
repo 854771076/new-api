@@ -1592,3 +1592,158 @@ func TestHailuoAsyncSpeechArtifacts(t *testing.T) {
 		assert.Nil(t, missing)
 	})
 }
+
+// The settlement hands the plugin the task and the result alone: the
+// characters of a speech task travel with the result the host carries, so the
+// billed count survives the way from the poll to the settlement.
+func TestHailuoSpeechSettlementCharacters(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	task := map[string]any{"task_id": "task_123", "action": "text_to_speech"}
+
+	t.Run("the plugin state of the poll carries the characters", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete", task, map[string]any{
+			"task_id": "task_123", "status": "SUCCESS",
+			"plugin_state": map[string]any{"speechCharacters": 42},
+		})
+		assert.Equal(t, map[string]any{"characters": float64(42)}, facts)
+	})
+
+	t.Run("the settled facts carry the characters", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete", task, map[string]any{
+			"task_id": "task_123", "status": "SUCCESS",
+			"usage_facts": map[string]any{"characters": 42},
+		})
+		assert.Equal(t, map[string]any{"characters": float64(42)}, facts)
+	})
+
+	t.Run("the settled facts may keep the count under its own name", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete", task, map[string]any{
+			"task_id": "task_123", "status": "SUCCESS",
+			"usage_facts": map[string]any{"speechCharacters": 42},
+		})
+		assert.Equal(t, map[string]any{"characters": float64(42)}, facts)
+	})
+
+	t.Run("a task without any characters reports no fact", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete", task, map[string]any{
+			"task_id": "task_123", "status": "SUCCESS",
+		})
+		assert.Nil(t, facts)
+	})
+}
+
+// A speech poll does not name the characters, so the count of the create reply
+// travels with the task until the settlement reads it.
+func TestHailuoSpeechPollCarriesCharacters(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+
+	t.Run("the poll reply names the characters", func(t *testing.T) {
+		result := callHailuoHook(t, plugin, "parseTaskResult",
+			map[string]any{"model": "speech-2.8-hd", "action": "text_to_speech"},
+			map[string]any{"task_id": "task_123", "status": "success", "usage_characters": 2048,
+				"base_resp": map[string]any{"status_code": 0}})
+		assert.Equal(t, "SUCCESS", result["status"])
+		state, ok := result["state"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, float64(2048), state["speechCharacters"])
+	})
+
+	t.Run("the count of the create reply is kept when the poll names none", func(t *testing.T) {
+		result := callHailuoHook(t, plugin, "parseTaskResult",
+			map[string]any{"model": "speech-2.8-hd", "action": "text_to_speech",
+				"state": map[string]any{"speechCharacters": 2048}},
+			map[string]any{"task_id": "task_123", "status": "processing",
+				"base_resp": map[string]any{"status_code": 0}})
+		assert.Equal(t, "IN_PROGRESS", result["status"])
+		state, ok := result["state"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, float64(2048), state["speechCharacters"])
+	})
+
+	t.Run("a poll without any characters carries none", func(t *testing.T) {
+		result := callHailuoHook(t, plugin, "parseTaskResult",
+			map[string]any{"model": "speech-2.8-hd", "action": "text_to_speech"},
+			map[string]any{"task_id": "task_123", "status": "success",
+				"base_resp": map[string]any{"status_code": 0}})
+		assert.Equal(t, "SUCCESS", result["status"])
+		assert.NotContains(t, result, "state")
+	})
+}
+
+// A channel that renames the model must not turn the speech polls into video
+// polls: the action of the task tells the two apart.
+func TestHailuoSpeechTaskIsToldApartByItsAction(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+
+	t.Run("a renamed speech model still polls as a speech task", func(t *testing.T) {
+		result := callHailuoHook(t, plugin, "parseTaskResult",
+			map[string]any{"model": "voice-alias", "upstreamModel": "voice-alias", "action": "text_to_speech"},
+			map[string]any{"task_id": "task_123", "status": "success",
+				"base_resp": map[string]any{"status_code": 0}})
+		assert.Equal(t, "SUCCESS", result["status"])
+	})
+
+	t.Run("a renamed speech model still settles its characters", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete",
+			map[string]any{"action": "text_to_speech", "model": "voice-alias"},
+			map[string]any{"plugin_state": map[string]any{"speechCharacters": 42}})
+		assert.Equal(t, map[string]any{"characters": float64(42)}, facts)
+	})
+
+	t.Run("a video task keeps its own facts", func(t *testing.T) {
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete",
+			map[string]any{"action": "text_to_video", "model": "MiniMax-Hailuo-2.3"},
+			map[string]any{"plugin_state": map[string]any{"speechCharacters": 42}},
+			map[string]any{"task_id": "1", "status": "Success", "video_width": 1920, "video_height": 1080,
+				"base_resp": map[string]any{"status_code": 0}})
+		assert.NotContains(t, facts, "characters")
+	})
+}
+
+// The speech create reply reports a numeric task id, but the host takes the
+// task id as a string.
+func TestHailuoAsyncSpeechNumericTaskID(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	parsed := callHailuoHook(t, plugin, "parseSubmitResponse", map[string]any{"upstreamModel": "speech-2.8-hd"},
+		map[string]any{"body": map[string]any{"task_id": int64(95157322514444)}})
+	taskID, ok := parsed["taskId"].(string)
+	require.True(t, ok, "the task id must be a string")
+	assert.Equal(t, "95157322514444", taskID)
+}
+
+// MiniMax may report a speech status in any case; the table is read with the
+// status normalized.
+func TestHailuoAsyncSpeechStatusCaseInsensitive(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	result := callHailuoHook(t, plugin, "parseTaskResult", map[string]any{"model": "speech-2.8-hd"},
+		map[string]any{"task_id": "task_123", "status": "Processing", "base_resp": map[string]any{"status_code": 0}})
+	assert.Equal(t, "IN_PROGRESS", result["status"])
+}
+
+// A case variant of a speech model is accepted, and MiniMax receives the
+// spelling the plugin declares.
+func TestHailuoAsyncSpeechModelCaseInsensitive(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	intent := callHailuoNative(t, plugin, "createSpeechTask", map[string]any{
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model":         "Speech-2.8-HD",
+			"text":          "a long text to speak",
+			"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+		}},
+	})
+	assert.Equal(t, "speech-2.8-hd", intent["model"])
+	requestBody, ok := intent["requestBody"].(map[string]any)
+	require.True(t, ok)
+
+	descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", map[string]any{
+		"requestBody":   requestBody,
+		"model":         "Speech-2.8-HD",
+		"upstreamModel": "Speech-2.8-HD",
+		"baseUrl":       "https://api.minimax.example",
+		"apiKey":        "test-ak",
+	})
+	assert.Equal(t, "https://api.minimax.example/v1/t2a_async_v2", descriptor["url"])
+	body, ok := descriptor["body"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "speech-2.8-hd", body["model"])
+}

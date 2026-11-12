@@ -139,8 +139,9 @@ function imageURLs(value, name) {
   });
 }
 
-// The shots of a multi-shot request: consecutive indexes and a duration sum
-// that matches the duration of the whole task.
+// The shots of a multi-shot request: consecutive indexes and, when the client
+// fixed the duration of the task, a duration sum that matches it. A client
+// that leaves the duration out lets the shots decide it.
 function multiPrompt(value, duration) {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) throw new Error("multi_prompt must be an array of shots");
@@ -153,7 +154,7 @@ function multiPrompt(value, duration) {
     total += shotDuration;
     return { index: object.index, prompt: trimmed(object.prompt), duration: shotDuration };
   });
-  if (total !== duration) throw new Error("multi_prompt durations must add up to the duration of the task");
+  if (duration !== undefined && total !== duration) throw new Error("multi_prompt durations must add up to the duration of the task");
   return shots;
 }
 
@@ -186,7 +187,15 @@ function elementList(value) {
 function generationBody(source) {
   const prompt = trimmed(source.prompt);
   if (!prompt) throw new Error("prompt is required");
-  const duration = optionalInteger(source.duration, "duration", MIN_DURATION, MAX_DURATION, DEFAULT_DURATION);
+  // A client that leaves the duration out lets the shots of the task decide it.
+  const durationGiven = source.duration !== undefined && source.duration !== null && source.duration !== "";
+  const fixedDuration = durationGiven ? optionalInteger(source.duration, "duration", MIN_DURATION, MAX_DURATION) : undefined;
+  const shots = multiPrompt(source.multi_prompt, fixedDuration);
+  let duration = fixedDuration;
+  if (duration === undefined) {
+    const shotTotal = shots ? shots.reduce(function (sum, shot) { return sum + shot.duration; }, 0) : 0;
+    duration = shots ? integerField(shotTotal, "duration", MIN_DURATION, MAX_DURATION) : DEFAULT_DURATION;
+  }
   const body = { prompt: prompt, duration: duration };
 
   const negativePrompt = trimmed(source.negative_prompt);
@@ -209,7 +218,6 @@ function generationBody(source) {
   const shotType = optionalEnum(source.shot_type, "shot_type", SHOT_TYPES);
   if (shotType) body.shot_type = shotType;
 
-  const shots = multiPrompt(source.multi_prompt, duration);
   if (shots) body.multi_prompt = shots;
 
   const elements = elementList(source.element_list);
@@ -244,6 +252,15 @@ function videoURL(video) {
   if (!object) return "";
   if (Array.isArray(object.url)) return trimmed(object.url[0]);
   return trimmed(object.url);
+}
+
+// The videos of a finished task that carry a signed link. The artifact keys
+// and the content requests both address this list, so a video without a link
+// never shifts the positions of the ones after it.
+function artifactVideoEntries(data) {
+  return artifactVideos(data).filter(function (video) {
+    return videoURL(video);
+  });
 }
 
 // The artifact of a key like video-0 is the video at that position.
@@ -409,7 +426,11 @@ export function buildQueryRequest(ctx) {
   };
 }
 
-export function parseTaskResult(ctx, body, response) {
+// The states in which a task has failed for good: the gateway stops polling on
+// them and reports the failure.
+const FAILED_STATUSES = ["failed", "cancelled", "canceled"];
+
+export function parseTaskResult(ctx, body, _response) {
   // The poll reply is the body of this hook; the task data still holds the
   // reply of the submit round.
   const payload = plainObject(body);
@@ -418,20 +439,24 @@ export function parseTaskResult(ctx, body, response) {
   if (apiError) throw new Error(trimmed(apiError.message) || "APIMart rejected the request");
   const data = plainObject(payload.data);
   if (!data) throw new Error("APIMart returned an unexpected task reply");
-  // A task error carries the reason of the failure.
+  const status = trimmed(data.status);
+  // A task that failed for good carries the reason of the failure in its
+  // error field. Reporting the failure ends the polling round, while throwing
+  // would spend the whole polling budget on a task that already finished.
+  if (FAILED_STATUSES.includes(status.toLowerCase()))
+    return { code: 0, status: "FAILURE", progress: "100%", reason: failureReason(data.error) };
+  // An error on a task that has not failed yet is a transient upstream fault.
   const error = plainObject(data.error);
   if (error) throw new Error(trimmed(error.message) || "APIMart reported a task error");
-  const status = trimmed(data.status);
-  const statuses = { pending: "QUEUED", processing: "IN_PROGRESS", completed: "SUCCESS", failed: "FAILURE", cancelled: "FAILURE" };
+  const statuses = { pending: "QUEUED", processing: "IN_PROGRESS", completed: "SUCCESS" };
   const mapped = statuses[status];
   const result = {
-    code: typeof payload.code === "number" ? payload.code : 0,
+    code: 0,
     status: mapped || "UNKNOWN",
     progress: taskProgress(data, mapped),
     reason: "",
   };
   if (!mapped) result.reason = "unrecognized status: " + status;
-  if (result.status === "FAILURE") result.reason = "video generation failed";
   return result;
 }
 
@@ -444,9 +469,17 @@ function taskProgress(data, status) {
   return "0%";
 }
 
+// The reason of a failed task: the message the upstream gave, or a default
+// when it left the message out.
+function failureReason(error) {
+  const object = plainObject(error);
+  const message = object && typeof object.message === "string" ? object.message.trim() : "";
+  return message || "video generation failed";
+}
+
 // The completion hook is called with the task context while polling and with
 // the task JSON while settling, so the seconds are looked for in both.
-export function extractUsageOnComplete(first, second, body) {
+export function extractUsageOnComplete(first, second, _body) {
   const context = plainObject(first);
   const result = plainObject(second);
   const sources = [
@@ -463,18 +496,16 @@ export function extractUsageOnComplete(first, second, body) {
 }
 
 export function listArtifacts(ctx) {
-  const videos = artifactVideos(ctx.data);
+  const videos = artifactVideoEntries(ctx.data);
   const artifacts = [];
-  for (const video of videos) {
-    if (artifacts.length >= 64) break;
-    if (!videoURL(video)) continue;
-    artifacts.push({ key: "video-" + artifacts.length, type: "video" });
+  for (let index = 0; index < videos.length && artifacts.length < 64; index++) {
+    artifacts.push({ key: "video-" + index, type: "video" });
   }
   return artifacts;
 }
 
 export function buildContentRequest(ctx) {
-  const videos = artifactVideos(ctx.data);
+  const videos = artifactVideoEntries(ctx.data);
   const index = artifactIndex(ctx.artifactKey);
   const url = index >= 0 ? videoURL(videos[index]) : "";
   if (!url) throw new Error("artifact_not_found");
@@ -521,7 +552,7 @@ export const protocols = {
       if (progress !== null) event.progress = progress;
       return { events: [event], state: state, done: false };
     },
-    renderFinal: function (ctx, task) {
+    renderFinal: function (ctx, _task) {
       return {
         output: [
           {

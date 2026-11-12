@@ -41,17 +41,17 @@ func apimartCall(t *testing.T, plugin *jsplugin.LoadedPlugin, export string, mem
 // documented field filled in.
 func apimartVideoBody() map[string]any {
 	return map[string]any{
-		"model":          "seedance-1.0-pro",
-		"prompt":         "a cat walks on the beach",
+		"model":           "seedance-1.0-pro",
+		"prompt":          "a cat walks on the beach",
 		"negative_prompt": "blurry",
-		"mode":           "pro",
-		"duration":       8,
-		"aspect_ratio":   "16:9",
-		"image_urls":     []any{"https://cdn.example/a.png", "https://cdn.example/b.png"},
-		"watermark":      false,
-		"audio":          true,
-		"multi_shot":     true,
-		"shot_type":      "customize",
+		"mode":            "pro",
+		"duration":        8,
+		"aspect_ratio":    "16:9",
+		"image_urls":      []any{"https://cdn.example/a.png", "https://cdn.example/b.png"},
+		"watermark":       false,
+		"audio":           true,
+		"multi_shot":      true,
+		"shot_type":       "customize",
 		"multi_prompt": []any{
 			map[string]any{"index": 1, "prompt": "first shot", "duration": 4},
 			map[string]any{"index": 2, "prompt": "second shot", "duration": 4},
@@ -199,6 +199,55 @@ func TestApimartSubmitRequestValidation(t *testing.T) {
 	}
 }
 
+// A client that only sends the shots leaves the duration of the task to the
+// sum of the shot durations; a duration the client fixed still has to match.
+func TestApimartMultiPromptDuration(t *testing.T) {
+	plugin := newApimartPlugin(t)
+	const base = "https://api.apimart.ai"
+	shots := []any{
+		map[string]any{"index": 1, "prompt": "first shot", "duration": 4},
+		map[string]any{"index": 2, "prompt": "second shot", "duration": 6},
+	}
+
+	t.Run("takes the duration of the shots when the client leaves it out", func(t *testing.T) {
+		descriptor, err := apimartCall(t, plugin, "buildSubmitRequest", nil, map[string]any{
+			"baseUrl": base, "apiKey": "key", "model": "seedance-1.0-pro", "upstreamModel": "seedance-1.0-pro",
+			"requestBody": map[string]any{
+				"model": "seedance-1.0-pro", "prompt": "a cat walks on the beach", "multi_prompt": shots,
+			},
+		})
+		require.NoError(t, err)
+		sent := decodePluginValue(t, descriptor)
+		upstream := decodePluginValue(t, sent["body"])
+		assert.Equal(t, float64(10), upstream["duration"])
+	})
+
+	t.Run("keeps the duration the client fixed", func(t *testing.T) {
+		descriptor, err := apimartCall(t, plugin, "buildSubmitRequest", nil, map[string]any{
+			"baseUrl": base, "apiKey": "key", "model": "seedance-1.0-pro", "upstreamModel": "seedance-1.0-pro",
+			"requestBody": map[string]any{
+				"model": "seedance-1.0-pro", "prompt": "a cat walks on the beach",
+				"duration": 10, "multi_prompt": shots,
+			},
+		})
+		require.NoError(t, err)
+		sent := decodePluginValue(t, descriptor)
+		upstream := decodePluginValue(t, sent["body"])
+		assert.Equal(t, float64(10), upstream["duration"])
+	})
+
+	t.Run("refuses shots that do not add up to the duration the client fixed", func(t *testing.T) {
+		_, err := apimartCall(t, plugin, "buildSubmitRequest", nil, map[string]any{
+			"baseUrl": base, "apiKey": "key", "model": "seedance-1.0-pro", "upstreamModel": "seedance-1.0-pro",
+			"requestBody": map[string]any{
+				"model": "seedance-1.0-pro", "prompt": "a cat walks on the beach",
+				"duration": 8, "multi_prompt": shots,
+			},
+		})
+		require.ErrorContains(t, err, "multi_prompt durations must add up to the duration of the task")
+	})
+}
+
 // The submit reply carries the task id in its first data entry, and an API
 // error is reported with the upstream message.
 func TestApimartSubmitResponseParsing(t *testing.T) {
@@ -264,15 +313,66 @@ func TestApimartQueryStatusMapping(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, parsed["status"])
 			assert.Equal(t, tc.wantProgress, parsed["progress"])
 			assert.Equal(t, tc.wantReason, parsed["reason"])
-			assert.Equal(t, float64(200), parsed["code"])
+			assert.Equal(t, float64(0), parsed["code"])
+		})
+	}
+
+	t.Run("reports a finished task with the success code", func(t *testing.T) {
+		value, err := apimartCall(t, plugin, "parseTaskResult", nil,
+			map[string]any{"taskId": "task_123", "data": map[string]any{"data": map[string]any{"status": "completed"}}},
+			map[string]any{"code": 200, "data": map[string]any{"status": "completed"}},
+			map[string]any{"status": 200})
+		require.NoError(t, err)
+		parsed := decodePluginValue(t, value)
+		assert.Equal(t, float64(0), parsed["code"])
+		assert.Equal(t, "SUCCESS", parsed["status"])
+		assert.Equal(t, "100%", parsed["progress"])
+	})
+
+	// A task that failed for good ends the polling round with the reason the
+	// upstream gave, instead of a transient failure the gateway has to retry.
+	for _, tc := range []struct {
+		name   string
+		status string
+	}{
+		{"failed", "failed"},
+		{"failed in upper case", "FAILED"},
+		{"cancelled", "cancelled"},
+		{"canceled", "canceled"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			value, err := apimartCall(t, plugin, "parseTaskResult", nil, map[string]any{},
+				map[string]any{"data": map[string]any{"status": tc.status, "error": map[string]any{"message": "insufficient credits"}}},
+				map[string]any{"status": 200})
+			require.NoError(t, err)
+			parsed := decodePluginValue(t, value)
+			assert.Equal(t, "FAILURE", parsed["status"])
+			assert.Equal(t, float64(0), parsed["code"])
+			assert.Contains(t, parsed["reason"], "insufficient credits")
 		})
 	}
 
 	t.Run("reports the task error", func(t *testing.T) {
-		_, err := apimartCall(t, plugin, "parseTaskResult", nil, map[string]any{},
+		value, err := apimartCall(t, plugin, "parseTaskResult", nil, map[string]any{},
 			map[string]any{"data": map[string]any{"status": "failed", "error": map[string]any{"code": "content_policy", "message": "the prompt was rejected"}}},
 			map[string]any{"status": 200})
-		require.ErrorContains(t, err, "the prompt was rejected")
+		require.NoError(t, err)
+		parsed := decodePluginValue(t, value)
+		assert.Equal(t, "FAILURE", parsed["status"])
+		assert.Equal(t, "the prompt was rejected", parsed["reason"])
+		assert.Equal(t, float64(0), parsed["code"])
+	})
+
+	t.Run("keeps reporting a finished task as a success", func(t *testing.T) {
+		value, err := apimartCall(t, plugin, "parseTaskResult", nil, map[string]any{},
+			map[string]any{"data": map[string]any{"status": "completed", "result": map[string]any{"videos": []any{}}}},
+			map[string]any{"status": 200})
+		require.NoError(t, err)
+		parsed := decodePluginValue(t, value)
+		assert.Equal(t, "SUCCESS", parsed["status"])
+		assert.Equal(t, float64(0), parsed["code"])
+		assert.Equal(t, "100%", parsed["progress"])
+		assert.Equal(t, "", parsed["reason"])
 	})
 }
 
@@ -326,6 +426,45 @@ func TestApimartArtifactProxy(t *testing.T) {
 	assert.Equal(t, "https://cdn.example/b.mp4", descriptor["url"])
 	assert.Equal(t, "GET", descriptor["method"])
 	assert.Equal(t, true, descriptor["credentialless"])
+
+	// A video without a link is no artifact, so the keys of the ones after it
+	// must still address the video they belong to.
+	t.Run("keeps the artifact keys on the videos that carry a link", func(t *testing.T) {
+		body := map[string]any{
+			"code": 200,
+			"data": map[string]any{
+				"status": "completed",
+				"result": map[string]any{
+					"videos": []any{
+						map[string]any{"url": []any{}},
+						map[string]any{"url": []any{"https://cdn.example/b.mp4"}},
+					},
+				},
+			},
+		}
+
+		value, err := apimartCall(t, plugin, "listArtifacts", nil, map[string]any{
+			"taskId": "task_123", "status": "SUCCESS", "action": "text_to_video", "data": body, "state": nil,
+		})
+		require.NoError(t, err)
+		encoded, err := common.Marshal(value)
+		require.NoError(t, err)
+		var artifacts []any
+		require.NoError(t, common.Unmarshal(encoded, &artifacts))
+		require.Len(t, artifacts, 1)
+		artifact := decodePluginValue(t, artifacts[0])
+		assert.Equal(t, "video-0", artifact["key"])
+		assert.Equal(t, "video", artifact["type"])
+
+		content, err := apimartCall(t, plugin, "buildContentRequest", nil, map[string]any{
+			"artifactKey": "video-0", "data": body, "clientRequest": map[string]any{"method": "GET"},
+		})
+		require.NoError(t, err)
+		descriptor := decodePluginValue(t, content)
+		assert.Equal(t, "https://cdn.example/b.mp4", descriptor["url"])
+		assert.Equal(t, "GET", descriptor["method"])
+		assert.Equal(t, true, descriptor["credentialless"])
+	})
 }
 
 // The billed duration is the one the gateway sent upstream; the upstream's own
@@ -364,15 +503,15 @@ func TestApimartUsageSeconds(t *testing.T) {
 			{"no state at all", map[string]any{}, map[string]any{}, map[string]any{}},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-					value, err := apimartCall(t, plugin, "extractUsageOnComplete", nil, tc.first, tc.second,
-						map[string]any{"data": map[string]any{"actual_time": 42}})
-					require.NoError(t, err)
-					facts := decodePluginValue(t, value)
-					if len(tc.wantFacts) == 0 {
-						assert.Empty(t, facts)
-						return
-					}
-					assert.Equal(t, tc.wantFacts, facts)
+				value, err := apimartCall(t, plugin, "extractUsageOnComplete", nil, tc.first, tc.second,
+					map[string]any{"data": map[string]any{"actual_time": 42}})
+				require.NoError(t, err)
+				facts := decodePluginValue(t, value)
+				if len(tc.wantFacts) == 0 {
+					assert.Empty(t, facts)
+					return
+				}
+				assert.Equal(t, tc.wantFacts, facts)
 			})
 		}
 	})

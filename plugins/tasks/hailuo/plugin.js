@@ -109,17 +109,18 @@ export const meta = {
   name: "Hailuo Video",
   icon: "Hailuo.Color",
   description: {
-    en: "MiniMax Hailuo video generation (text-to-video, image-to-video, and MiniMax-H3 multimodal reference)",
-    zh: "MiniMax 海螺视频生成（文生视频、图生视频、MiniMax-H3 多模态参考生视频）",
+    en: "MiniMax Hailuo video generation (text-to-video, image-to-video, and MiniMax-H3 multimodal reference). It also serves long-text asynchronous speech synthesis for the MiniMax speech models",
+    zh: "MiniMax 海螺视频生成（文生视频、图生视频、MiniMax-H3 多模态参考生视频）。同时提供 MiniMax 语音模型的长文本异步语音合成",
   },
-  version: "1.4.0",
+  version: "1.5.0",
   author: { name: "QuantumNous" },
   channelTypes: [35],
   models: H3_MODELS.concat(V1_MODELS, SPEECH_MODELS),
   fetchMode: "per_task",
   upstreams: ["vendor", "new_api"],
   // Fallback for a channel alias that resolves to more than one model: the
-  // union of every family's fields and resolutions.
+  // union of every family's fields and resolutions. The speech models carry
+  // their own profile, so their character count stays out of this union.
   usageSchema: Object.assign({}, H3_USAGE_SCHEMA, {
     resolution: {
       enum: ["480P", "512P", "768P", "720P", "1080P", "2K"],
@@ -322,23 +323,49 @@ function isH3(model) {
   return H3_MODELS.includes(model);
 }
 
+// The spelling MiniMax knows a speech model by. The routing side accepts
+// case variants, so the plugin matches them too and answers with its own name.
+function speechModelName(model) {
+  const value = trimmed(model).toLowerCase();
+  for (const name of SPEECH_MODELS) {
+    if (name.toLowerCase() === value) return name;
+  }
+  return "";
+}
+
 // The long-text speech models, which come in at the plugin's own speech route
 // and are never claimed by a host protocol.
 function isSpeechModel(model) {
-  return SPEECH_MODELS.includes(model);
+  return Boolean(speechModelName(model));
 }
 
 // The status names MiniMax reports for a speech task
 // (platform.minimax.io/docs/api-reference/speech-t2a-async-query).
 const SPEECH_STATUSES = { success: "SUCCESS", failed: "FAILURE", expired: "FAILURE", processing: "IN_PROGRESS" };
 
+// A character count the upstream reported: a non-negative number, or nothing.
+// A count that is not there is never a zero.
+function characterCount(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return null;
+  return number;
+}
+
+// The first of the counts that is known.
+function knownCharacters(counts) {
+  for (const count of counts) {
+    const characters = characterCount(count);
+    if (characters !== null) return characters;
+  }
+  return null;
+}
+
 // The character count the create reply reports; the poll replies do not carry
 // it, so it is kept in the plugin state.
 function speechCharacters(body) {
   const source = plainObject(body) || {};
-  const value = Number(source.usage_characters);
-  if (!Number.isFinite(value) || value < 0) return null;
-  return value;
+  return characterCount(source.usage_characters);
 }
 
 // The text a speech task speaks, and the file that holds it when the text does
@@ -425,7 +452,7 @@ function h3MediaList(source, key) {
 function h3FrameImages(req) {
   const metadata = req.metadata || {};
   const images = h3MediaList(req, "images");
-  if (images.length > H3_MAX_FRAME_IMAGES) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_FRAME_IMAGES + " frame images");
+  if (images.length > H3_MAX_FRAME_IMAGES) throw new Error("The H3 family accepts at most " + H3_MAX_FRAME_IMAGES + " frame images (" + H3_FAMILY + ")");
   const frames = [];
   if (metadata.first_frame_image) frames.push(h3MediaItem("image_url", metadata.first_frame_image, "first_frame"));
   if (metadata.last_frame_image) frames.push(h3MediaItem("image_url", metadata.last_frame_image, "last_frame"));
@@ -680,8 +707,8 @@ export const native = {
   createSpeechTask: function (ctx) {
     const body = nativeBody(ctx);
     refuseCallback(body);
-    const model = trimmed(body.model);
-    if (!isSpeechModel(model)) throw new Error("model must be one of: " + SPEECH_MODELS.join(", "));
+    const model = speechModelName(body.model);
+    if (!model) throw new Error("model must be one of: " + SPEECH_MODELS.join(", "));
     const source = speechTextSource(body);
     if (source.text && source.textFileID) throw new Error("text and text_file_id are mutually exclusive");
     if (!source.text && !source.textFileID) throw new Error("text or text_file_id is required");
@@ -765,11 +792,13 @@ export function buildSubmitRequest(ctx) {
   // upstream serves the same body at the plugin's own speech route.
   if (isSpeechModel(ctx.model) || isSpeechModel(model)) {
     const vendorBody = plainObject(req.vendorBody) || {};
+    // MiniMax knows the speech models by the spelling the plugin declares.
+    const speechModel = speechModelName(model) || speechModelName(ctx.model);
     return {
       url: apiRoot(ctx) + (viaGateway(ctx) ? "/v1/audio/long_text" : "/v1/t2a_async_v2"),
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
-      body: Object.assign({}, vendorBody, { model: model || ctx.model }),
+      body: Object.assign({}, vendorBody, { model: speechModel }),
       action: "text_to_speech",
     };
   }
@@ -831,11 +860,13 @@ export function parseSubmitResponse(ctx, resp) {
     throw new Error("hailuo submit failed");
   }
   if (!body.task_id) throw new Error("missing task_id");
+  // The speech create reply reports a numeric task id; the host takes a string.
+  const taskId = speech ? String(body.task_id) : body.task_id;
   // The speech create reply reports the characters the task is billed on; the
   // poll replies do not, so the count is kept in the plugin state.
   const characters = speech ? speechCharacters(body) : null;
-  if (characters !== null) return { taskId: body.task_id, taskData: body, state: { speechCharacters: characters } };
-  return { taskId: body.task_id, taskData: body };
+  if (characters !== null) return { taskId: taskId, taskData: body, state: { speechCharacters: characters } };
+  return { taskId: taskId, taskData: body };
 }
 
 export function extractUsage(ctx) {
@@ -888,26 +919,35 @@ export function buildQueryRequest(ctx) {
 }
 
 // The speech poll reply: {task_id, status, file_id, base_resp}.
-function speechTaskResult(body) {
+function speechTaskResult(ctx, body) {
   const source = plainObject(body) || {};
   const base = plainObject(source.base_resp) || {};
+  let result;
   if (base.status_code !== undefined && base.status_code !== 0) {
-    return { code: base.status_code || 0, status: "FAILURE", progress: "100%", reason: base.status_msg || "" };
+    result = { code: base.status_code || 0, status: "FAILURE", progress: "100%", reason: base.status_msg || "" };
+  } else {
+    // MiniMax may report the status in any case.
+    const status = SPEECH_STATUSES[trimmed(source.status).toLowerCase()];
+    if (!status) {
+      result = { status: "UNKNOWN", reason: "unrecognized status: " + String(source.status || "") };
+    } else {
+      const progress = status === "SUCCESS" || status === "FAILURE" ? "100%" : "50%";
+      const reason = status === "FAILURE" ? "task " + String(source.status || "failed") : "";
+      result = { code: base.status_code || 0, status: status, progress: progress, reason: reason };
+    }
   }
-  const status = SPEECH_STATUSES[source.status];
-  if (!status) {
-    return { status: "UNKNOWN", reason: "unrecognized status: " + String(source.status || "") };
-  }
-  const progress = status === "SUCCESS" || status === "FAILURE" ? "100%" : "50%";
-  const reason = status === "FAILURE" ? "task " + String(source.status || "failed") : "";
-  return { code: base.status_code || 0, status: status, progress: progress, reason: reason };
+  // The poll reply does not carry the characters, but the task is billed on
+  // them, so the count travels with the task until the settlement reads it.
+  const characters = speechPollCharacters(ctx, body);
+  if (characters !== null) result.state = { speechCharacters: characters };
+  return result;
 }
 
 export function parseTaskResult(ctx, body) {
   // The speech task reports its own status names, and the video tables below
-  // carry some of them too, so the branch is taken by the model of the task,
-  // never by the name of the status.
-  if (isSpeechModel(ctx.upstreamModel) || isSpeechModel(ctx.model)) return speechTaskResult(body);
+  // carry some of them too, so the branch is taken by the task itself, never
+  // by the name of the status.
+  if (isSpeechTask(ctx)) return speechTaskResult(ctx, body);
   const apiError = h3APIError(body);
   if (apiError) {
     if (apiError.statusCode === 408 || apiError.statusCode === 429 || apiError.statusCode >= 500) throw new Error(apiError.message);
@@ -1031,9 +1071,17 @@ export function buildContentRequest(ctx) {
 // The speech model of a task, from the plugin context or from the task view.
 function speechTaskModel(source) {
   const task = plainObject(source) || {};
-  if (isSpeechModel(task.upstreamModel) || isSpeechModel(task.model)) return true;
-  const properties = plainObject(task.properties) || {};
-  return isSpeechModel(properties.origin_model_name) || isSpeechModel(properties.upstream_model_name);
+  return isSpeechModel(task.upstreamModel) || isSpeechModel(task.model);
+}
+
+// The speech task of a view: its action tells it apart, because a channel that
+// renames the model must not turn a speech poll into a video poll. The model
+// of the task names it when the action is not there.
+function isSpeechTask(source) {
+  const task = plainObject(source) || {};
+  const action = trimmed(task.action);
+  if (action) return action === "text_to_speech";
+  return speechTaskModel(task);
 }
 
 // The characters of the speech text: only the create reply knows them, and it
@@ -1041,17 +1089,38 @@ function speechTaskModel(source) {
 function speechTaskCharacters(ctx, body) {
   const source = plainObject(ctx) || {};
   const state = plainObject(source.state) || {};
-  const stored = Number(state.speechCharacters);
-  if (Number.isFinite(stored) && stored >= 0) return stored;
+  const stored = characterCount(state.speechCharacters);
+  if (stored !== null) return stored;
   const fromBody = speechCharacters(body);
   if (fromBody !== null) return fromBody;
   return speechCharacters(source.data);
 }
 
-export function extractUsageOnComplete(ctx, _taskResult, body) {
+// The characters at a poll: the poll reply names them, and the count of the
+// create reply is kept in the plugin state of the task.
+function speechPollCharacters(ctx, body) {
+  const source = plainObject(ctx) || {};
+  const state = plainObject(source.state) || {};
+  return knownCharacters([speechCharacters(body), state.speechCharacters, speechCharacters(source.data)]);
+}
+
+// The characters the host carries with the task: the plugin state of the poll
+// and the facts that are already settled.
+function resultTaskCharacters(result) {
+  const source = plainObject(result) || {};
+  const state = plainObject(source.plugin_state) || {};
+  const facts = plainObject(source.usage_facts) || {};
+  return knownCharacters([state.speechCharacters, facts.characters, facts.speechCharacters]);
+}
+
+export function extractUsageOnComplete(ctx, result, body) {
   // The speech task is billed on the characters of its text, which the create
   // reply reports and the poll replies do not.
-  if (speechTaskModel(ctx)) {
+  if (isSpeechTask(ctx)) {
+    // The settlement hands the plugin the task and the result alone, so the
+    // characters are read from the result the host carries.
+    const carried = resultTaskCharacters(result);
+    if (carried !== null) return { characters: carried };
     const characters = speechTaskCharacters(ctx, body);
     if (characters === null) return null;
     return { characters: characters };
