@@ -93,6 +93,8 @@ export const STATIC_I18N_KEYS = [
   'Connect to self-hosted models served by vLLM',
   'vLLM server address, without /v1',
   'vLLM API key, or EMPTY if authentication is disabled',
+  'APIMart',
+  'Connect to APIMart model services',
 
   'Price per image',
   'Per image',
