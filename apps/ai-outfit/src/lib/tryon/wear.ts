@@ -7,6 +7,10 @@ import { GatewayError } from '@/lib/gateway-errors';
 import { parsePersonalGarment, type ParseableGarment } from './parse-garment';
 import type { GarmentSource, GarmentSemanticHints } from '@/lib/types';
 
+/** 查询服装候选所需列，映射到 WearCandidate；创建与推进两处复用，避免列漂移。 */
+export const OUTFIT_SELECT =
+  'id, source, category, name_zh, user_id, bucket, thumb_path, preview_path, parse_status, product_bucket, product_path, garment_type, semantic_hints, original_bucket, original_path, parse_attempts, is_active';
+
 export interface WearCandidate {
   id: string;
   source: GarmentSource;

@@ -140,6 +140,7 @@ export interface ProviderSnapshot {
   model: string;
   provider?: string;
   size?: string;
+  vision_model?: string;
   [key: string]: unknown;
 }
 

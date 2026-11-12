@@ -29,6 +29,19 @@ type QuoteData = {
   unparsed_count: number;
 };
 
+type GenerateData = { id: string; result_path?: string | null; deduped?: boolean };
+type AdvanceData = {
+  status: 'pending' | 'succeeded' | 'failed';
+  stage: string;
+  result_bucket: string | null;
+  result_path: string | null;
+  error: string | null;
+};
+
+// 推进轮询：每次 /advance 调用本身会阻塞至单步完成，这里的小间隔仅用于避免紧循环。
+const ADVANCE_INTERVAL_MS = 1500;
+const MAX_ADVANCE_ATTEMPTS = 30;
+
 type Props = {
   characters: Item[];
   outfits: OutfitItem[];
@@ -244,17 +257,46 @@ export function StudioClient({
         router.replace('/login?error=session_expired');
         return;
       }
-      if (!res.ok || !data.success) {
+      if (!res.ok || !data.success || !data.data) {
         throw new Error(typeof data.message === 'string' && data.message
           ? data.message
           : failureMessage(res, '生成失败，请稍后重试'));
       }
-      router.push('/history');
+      const created = data.data as GenerateData;
+      // 幂等命中且已有结果：直接跳历史，不再推进。
+      if (created.result_path) {
+        router.push('/history');
+        return;
+      }
+      // 创建任务后由前端逐次调用 /advance 单步推进，避开 Hobby 60s 硬超时。
+      if (await pollUntilDone(created.id)) router.push('/history');
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
+  }
+
+  async function pollUntilDone(id: string): Promise<boolean> {
+    for (let i = 0; i < MAX_ADVANCE_ATTEMPTS; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, ADVANCE_INTERVAL_MS));
+      const res = await fetch(`/api/generate/${id}/advance`, { method: 'POST' });
+      const data: Envelope = await readEnvelope(res);
+      if (res.status === 401) {
+        router.replace('/login?error=session_expired');
+        return false;
+      }
+      if (!res.ok || !data.success || !data.data) {
+        throw new Error(typeof data.message === 'string' && data.message
+          ? data.message
+          : failureMessage(res, '生成过程中断，请稍后在「历史」中查看结果'));
+      }
+      const adv = data.data as AdvanceData;
+      if (adv.status === 'succeeded') return true;
+      if (adv.status === 'failed') throw new Error(adv.error || '生成失败，请稍后重试');
+      // pending：继续轮询
+    }
+    throw new Error('生成耗时较长，请稍后在「历史」中查看结果，勿重复提交。');
   }
 
   const modelReady = models.some((m) => m.model_id === modelId);

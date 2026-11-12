@@ -85,7 +85,7 @@ export async function runTryon(supabase: SupabaseClient, order: TryonOrder): Pro
   }
 }
 
-async function runBoardAndTryon(
+export async function runBoardAndTryon(
   admin: SupabaseClient,
   order: TryonOrder,
   persona: Awaited<ReturnType<typeof ensurePersona>>,
