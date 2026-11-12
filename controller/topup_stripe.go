@@ -295,6 +295,17 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 		return
 	}
 
+	if strings.HasPrefix(referenceId, model.AppProductOrderTradeNoPrefix) {
+		total, _ := strconv.ParseFloat(event.GetObjectValue("amount_total"), 64)
+		if err := model.CompleteAppProductOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, total/100); err == nil {
+			logger.LogInfo(ctx, common.LogText("Stripe app product order processed trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
+			return
+		} else if err != nil && !errors.Is(err, model.ErrAppProductOrderNotFound) {
+			logger.LogError(ctx, common.LogText("Stripe app product order processing failed trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
+			return
+		}
+	}
+
 	err := model.Recharge(referenceId, customerId, callerIp)
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Stripe top-up processing failed trade_no=%s event_type=%s client_ip=%s error=%q", referenceId, string(event.Type), callerIp, err.Error()))
@@ -402,6 +413,47 @@ func genStripeLink(referenceId string, customerId string, email string, amount i
 	return result.URL, nil
 }
 
+// genStripeProductLink generates a Stripe Checkout session URL for a single
+// app product purchase charged through the product's fixed Stripe Price.
+func genStripeProductLink(referenceId string, customerId string, email string, priceId string) (string, error) {
+	if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
+		return "", errors.New("invalid Stripe API key")
+	}
+
+	stripe.Key = setting.StripeApiSecret
+
+	params := &stripe.CheckoutSessionParams{
+		ClientReferenceID: stripe.String(referenceId),
+		SuccessURL:        stripe.String(paymentReturnPath("/usage-logs")),
+		CancelURL:         stripe.String(paymentReturnPath("/wallet")),
+		LineItems: []*stripe.CheckoutSessionLineItemParams{
+			{
+				Price:    stripe.String(priceId),
+				Quantity: stripe.Int64(1),
+			},
+		},
+		Mode:                stripe.String(string(stripe.CheckoutSessionModePayment)),
+		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled),
+	}
+
+	if "" == customerId {
+		if "" != email {
+			params.CustomerEmail = stripe.String(email)
+		}
+
+		params.CustomerCreation = stripe.String(string(stripe.CheckoutSessionCustomerCreationAlways))
+	} else {
+		params.Customer = stripe.String(customerId)
+	}
+
+	result, err := session.New(params)
+	if err != nil {
+		return "", err
+	}
+
+	return result.URL, nil
+}
+
 func GetChargedAmount(count float64, user model.User) float64 {
 	topUpGroupRatio := common.GetTopupGroupRatio(user.Group)
 	if topUpGroupRatio == 0 {
@@ -448,4 +500,68 @@ func getStripeMinTopup() int64 {
 		minTopup = minTopup * int(common.QuotaPerUnit)
 	}
 	return int64(minTopup)
+}
+
+// generateStripeTopUpCheckout is the pure checkout core shared by the OAuth app
+// top-up endpoint. Stripe settlement credits Money × QuotaPerUnit, so Money is
+// stored as the normalized unit quantity that reproduces creditedQuota.
+func generateStripeTopUpCheckout(ctx context.Context, user *model.User, amount int64, appId int) (payLink string, orderID string, err error) {
+	if !isStripeTopUpEnabled() {
+		return "", "", common.NewMessage("Stripe configuration is incomplete")
+	}
+	if user == nil {
+		return "", "", common.NewMessage("User does not exist")
+	}
+	if appId < 0 {
+		return "", "", model.ErrInvalidAppId
+	}
+	if amount < getStripeMinTopup() {
+		return "", "", common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getStripeMinTopup()})
+	}
+
+	creditedQuota, err := validateTopUpQuota(amount)
+	if err != nil {
+		return "", "", err
+	}
+	if appId > 0 {
+		err = model.ValidateAppTopUpQuotaCapacity(user.Id, appId, creditedQuota)
+	} else {
+		err = model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota)
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	unitCount := amount
+	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
+		unitCount = decimal.NewFromInt(amount).Div(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart()
+	}
+
+	tradeNo := fmt.Sprintf("STRIPE-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
+	topUp := &model.TopUp{
+		AppId:           appId,
+		UserId:          user.Id,
+		Amount:          amount,
+		Money:           float64(unitCount),
+		TradeNo:         tradeNo,
+		PaymentMethod:   model.PaymentMethodStripe,
+		PaymentProvider: model.PaymentProviderStripe,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusPending,
+	}
+	if err := topUp.Insert(); err != nil {
+		logger.LogError(ctx, common.LogText("Stripe failed to create top-up order user_id=%d app_id=%d trade_no=%s amount=%d error=%q", user.Id, appId, tradeNo, amount, err.Error()))
+		return "", "", common.NewMessage("Failed to create order")
+	}
+
+	payLink, err = genStripeLink(tradeNo, user.StripeCustomer, user.Email, unitCount, "", "")
+	if err != nil {
+		logger.LogError(ctx, common.LogText("Stripe failed to create checkout session user_id=%d trade_no=%s error=%q", user.Id, tradeNo, err.Error()))
+		topUp.Status = common.TopUpStatusFailed
+		_ = topUp.Update()
+		return "", "", common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText("Stripe top-up order created user_id=%d trade_no=%s amount=%d unit_count=%d", user.Id, tradeNo, amount, unitCount))
+
+	return payLink, tradeNo, nil
 }

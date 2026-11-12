@@ -294,6 +294,48 @@ func OAuthProductCheckout(c *gin.Context) {
 			"expires_at":     result.ExpiresAt,
 			"order_id":       result.TradeNo,
 		})
+	case model.PaymentMethodStripe:
+		result, err := CreateAppProductStripeCheckout(c.Request.Context(), user, product)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"pay_link":       result.CheckoutURL,
+			"order_id":       result.TradeNo,
+		})
+	case model.PaymentMethodCreem:
+		result, err := CreateAppProductCreemCheckout(c.Request.Context(), user, product)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"checkout_url":   result.CheckoutURL,
+			"order_id":       result.TradeNo,
+		})
+	case model.PaymentProviderEpay:
+		paymentType, err := firstConfiguredEpayMethod()
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		result, err := CreateAppProductEpayCheckout(c.Request.Context(), user, product, paymentType)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": model.PaymentProviderEpay,
+			"url":            result.URL,
+			"params":         result.Params,
+			"order_id":       result.TradeNo,
+		})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app products"})
 	}

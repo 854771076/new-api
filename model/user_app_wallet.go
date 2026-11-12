@@ -387,3 +387,37 @@ func adjustUserAppUsedQuota(db *gorm.DB, userId, appId, delta int) error {
 			"CASE WHEN used_quota + ? < 0 THEN 0 ELSE used_quota + ? END", delta, delta,
 		)).Error
 }
+
+// GetUserAppWallets lists every app wallet the user owns (app_id > 0). It is
+// the self-service view and must not leak other users' wallets.
+func GetUserAppWallets(userId int) ([]UserAppWallet, error) {
+	if userId <= 0 {
+		return nil, errors.New("invalid userId")
+	}
+	var wallets []UserAppWallet
+	if err := DB.Where("user_id = ? AND app_id > ?", userId, 0).
+		Order("app_id asc").Find(&wallets).Error; err != nil {
+		return nil, err
+	}
+	return wallets, nil
+}
+
+// ListUserAppWalletsForApp lists the wallet rows (balance + used quota) of one
+// app. Admin only; appId must be positive.
+func ListUserAppWalletsForApp(appId int, pageInfo *common.PageInfo) ([]UserAppWallet, int64, error) {
+	if appId <= 0 {
+		return nil, 0, ErrInvalidAppId
+	}
+	var wallets []UserAppWallet
+	var total int64
+	query := DB.Model(&UserAppWallet{}).Where("app_id = ?", appId)
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := query.Order("id desc").
+		Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).
+		Find(&wallets).Error; err != nil {
+		return nil, 0, err
+	}
+	return wallets, total, nil
+}

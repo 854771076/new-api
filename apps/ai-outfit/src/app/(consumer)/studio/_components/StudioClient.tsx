@@ -6,6 +6,7 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { MediaCard } from '@/components/MediaCard';
 import { CharacterUploader } from '@/components/CharacterUploader';
 import { GarmentUploader } from '@/components/GarmentUploader';
+import { QUOTA_PER_UNIT } from '@/lib/constants';
 import { Sparkles, Upload, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
 
 type Item = { id: string; name: string; subtitle?: string; signedUrl?: string | null };
@@ -65,10 +66,7 @@ function Chip({
 }
 
 function formatCredits(value: number): string {
-  const rounded = Math.round(value * 100) / 100;
-  return Number.isInteger(rounded)
-    ? rounded.toLocaleString('zh-CN')
-    : rounded.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+  return `$${(value / QUOTA_PER_UNIT).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 // 平台超时/网关异常可能返回非 JSON（HTML/空响应），直接 res.json() 会抛 SyntaxError 并吞掉提示。
@@ -524,7 +522,7 @@ export function StudioClient({
                   </div>
                 ) : quote ? (
                   <div className="space-y-1 text-sm">
-                    <p>预计消耗积分：<strong className="text-lg tabular-nums">{formatCredits(quote.credits)}</strong></p>
+                    <p>预计消耗：<strong className="text-lg tabular-nums">{formatCredits(quote.credits)}</strong></p>
                     <p className="text-base-content/70">共 {quote.item_count} 套服装，其中 {quote.unparsed_count} 套个人服装将在生成时自动解析。</p>
                     <p className="text-xs text-base-content/60">最终以网关按模型实际用量计费为准；报价仅用于提交前确认，重复提交同一选择不会重复生成。</p>
                   </div>
@@ -554,7 +552,7 @@ export function StudioClient({
 
             {err ? (
               <div role="alert" className="alert alert-error alert-soft text-sm">
-                <span className="min-w-0 wrap-anywhere">{err} <Link href="/profile" className="link">查看积分</Link></span>
+                <span className="min-w-0 wrap-anywhere">{err} <Link href="/profile" className="link">查看余额</Link></span>
                 <button type="button" className="btn btn-ghost min-h-11" disabled={loading || !modelReady} onClick={handleGenerate}>重试</button>
               </div>
             ) : null}

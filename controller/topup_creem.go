@@ -9,13 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
-	"io"
-	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
@@ -328,6 +330,18 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		return
 	}
 
+	if strings.HasPrefix(referenceId, model.AppProductOrderTradeNoPrefix) {
+		if err := model.CompleteAppProductOrder(referenceId, common.GetJsonString(event), model.PaymentProviderCreem, float64(event.Object.Order.AmountPaid)/100); err == nil {
+			logger.LogInfo(c.Request.Context(), common.LogText("Creem app product order processed trade_no=%s creem_order_id=%s", referenceId, event.Object.Order.Id))
+			c.Status(http.StatusOK)
+			return
+		} else if err != nil && !errors.Is(err, model.ErrAppProductOrderNotFound) {
+			logger.LogError(c.Request.Context(), common.LogText("Creem app product order processing failed trade_no=%s creem_order_id=%s error=%q", referenceId, event.Object.Order.Id, err.Error()))
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+	}
+
 	logger.LogInfo(c.Request.Context(), common.LogText("Creem payment completed callback trade_no=%s creem_order_id=%s amount_paid=%d currency=%s product_name=%q customer_email=%q customer_name=%q", referenceId, event.Object.Order.Id, event.Object.Order.AmountPaid, event.Object.Order.Currency, event.Object.Product.Name, event.Object.Customer.Email, event.Object.Customer.Name))
 
 	// 查询本地订单确认存在
@@ -463,4 +477,79 @@ func genCreemLink(ctx context.Context, referenceId string, product *CreemProduct
 
 	logger.LogInfo(ctx, common.LogText("Creem payment link created trade_no=%s response_id=%s checkout_url=%q", referenceId, checkoutResp.Id, checkoutResp.CheckoutUrl))
 	return checkoutResp.CheckoutUrl, nil
+}
+
+// generateCreemTopUpCheckout is the pure checkout core shared by the OAuth app
+// top-up endpoint. Creem is product based, so it matches a configured Creem
+// product whose quota equals the credited quota for the requested amount.
+func generateCreemTopUpCheckout(ctx context.Context, user *model.User, amount int64, appId int) (checkoutURL string, orderID string, err error) {
+	if !isCreemTopUpEnabled() {
+		return "", "", common.NewMessage("Creem configuration is incomplete")
+	}
+	if user == nil {
+		return "", "", common.NewMessage("User does not exist")
+	}
+	if appId < 0 {
+		return "", "", model.ErrInvalidAppId
+	}
+	if amount < getMinTopup() {
+		return "", "", common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getMinTopup()})
+	}
+
+	creditedQuota, err := validateTopUpQuota(amount)
+	if err != nil {
+		return "", "", err
+	}
+	if appId > 0 {
+		err = model.ValidateAppTopUpQuotaCapacity(user.Id, appId, creditedQuota)
+	} else {
+		err = model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota)
+	}
+	if err != nil {
+		return "", "", err
+	}
+
+	var products []CreemProduct
+	if err := common.Unmarshal([]byte(setting.CreemProducts), &products); err != nil {
+		logger.LogError(ctx, common.LogText("Creem failed to parse product config user_id=%d error=%q", user.Id, err.Error()))
+		return "", "", common.NewMessage("Product configuration error")
+	}
+	var selected *CreemProduct
+	for i := range products {
+		if products[i].Quota == int64(creditedQuota) {
+			selected = &products[i]
+			break
+		}
+	}
+	if selected == nil {
+		return "", "", common.NewMessage("No Creem product matches the requested amount")
+	}
+
+	tradeNo := fmt.Sprintf("CREEM-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
+	topUp := &model.TopUp{
+		AppId:           appId,
+		UserId:          user.Id,
+		Amount:          selected.Quota,
+		Money:           selected.Price,
+		TradeNo:         tradeNo,
+		PaymentMethod:   model.PaymentMethodCreem,
+		PaymentProvider: model.PaymentProviderCreem,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusPending,
+	}
+	if err := topUp.Insert(); err != nil {
+		logger.LogError(ctx, common.LogText("Creem failed to create top-up order user_id=%d app_id=%d trade_no=%s product_id=%s error=%q", user.Id, appId, tradeNo, selected.ProductId, err.Error()))
+		return "", "", common.NewMessage("Failed to create order")
+	}
+
+	checkoutURL, err = genCreemLink(ctx, tradeNo, selected, user.Email, user.Username)
+	if err != nil {
+		logger.LogError(ctx, common.LogText("Creem failed to create payment link user_id=%d trade_no=%s product_id=%s error=%q", user.Id, tradeNo, selected.ProductId, err.Error()))
+		topUp.Status = common.TopUpStatusFailed
+		_ = topUp.Update()
+		return "", "", common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText("Creem top-up order created user_id=%d trade_no=%s product_id=%s product_name=%q quota=%d money=%.2f", user.Id, tradeNo, selected.ProductId, selected.Name, selected.Quota, selected.Price))
+
+	return checkoutURL, tradeNo, nil
 }

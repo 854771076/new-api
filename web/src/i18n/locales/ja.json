@@ -6143,6 +6143,7 @@
     "Subscription purchased with balance, plan: {{plan}}, payment amount: {{amount}}, quota deducted: {{quota}}": "残高でサブスクリプションを購入しました。プラン：{{plan}}、支払額：{{amount}}、差し引かれたクォータ：{{quota}}",
     "Subscription purchased, plan: {{plan}}, payment amount: {{amount}}, payment method: {{method}}": "サブスクリプションを購入しました。プラン：{{plan}}、支払額：{{amount}}、支払方法：{{method}}",
     "Subscriptions": "サブスクリプション",
+    "Subscriptions & Quota by App": "アプリ別のサブスクリプションとクォータ",
     "Subtract": "減算",
     "succeeded": "成功",
     "Success": "成功",

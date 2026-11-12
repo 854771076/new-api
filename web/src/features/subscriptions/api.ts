@@ -75,10 +75,14 @@ export async function patchPlanStatus(
 // ============================================================================
 
 export async function getUserSubscriptions(
-  userId: number
+  userId: number,
+  appId: number = 0
 ): Promise<ApiResponse<UserSubscriptionRecord[]>> {
   const res = await api.get(
-    `/api/subscription/admin/users/${userId}/subscriptions`
+    `/api/subscription/admin/users/${userId}/subscriptions`,
+    {
+      params: { app_id: appId },
+    }
   )
   return res.data
 }

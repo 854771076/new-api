@@ -70,10 +70,47 @@ func GetSubscriptionSelf(c *gin.Context) {
 		activeSubscriptions = []model.SubscriptionSummary{}
 	}
 
+	// Per-app subscriptions (app_id > 0) and the user's own app wallets for the
+	// self-service "subscriptions & quota per app" view.
+	appSubscriptions, err := model.GetUserAppSubscriptions(userId)
+	if err != nil {
+		appSubscriptions = []model.SubscriptionSummary{}
+	}
+	appWallets, err := model.GetUserAppWallets(userId)
+	if err != nil {
+		appWallets = []model.UserAppWallet{}
+	}
+
+	// Resolve the app names for the user's own per-app wallets/subscriptions so
+	// the self-service view can show friendly names without the admin-only
+	// oauth-apps endpoint.
+	appIdSet := make(map[int]struct{})
+	for _, w := range appWallets {
+		if w.AppId > 0 {
+			appIdSet[w.AppId] = struct{}{}
+		}
+	}
+	for _, s := range appSubscriptions {
+		if s.Subscription != nil && s.Subscription.AppId > 0 {
+			appIdSet[s.Subscription.AppId] = struct{}{}
+		}
+	}
+	appIds := make([]int, 0, len(appIdSet))
+	for id := range appIdSet {
+		appIds = append(appIds, id)
+	}
+	appNames, err := model.GetOAuthAppNamesByIds(appIds)
+	if err != nil {
+		appNames = map[int]string{}
+	}
+
 	common.ApiSuccess(c, gin.H{
 		"billing_preference": pref,
 		"subscriptions":      activeSubscriptions, // all active subscriptions
 		"all_subscriptions":  allSubscriptions,    // all subscriptions including expired
+		"app_subscriptions":  appSubscriptions,    // subscriptions across app scopes
+		"app_wallets":        appWallets,          // the user's per-app quota pools
+		"app_names":          appNames,            // id -> name for the above app scopes
 	})
 }
 
@@ -424,7 +461,16 @@ func AdminListUserSubscriptions(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid user ID")
 		return
 	}
-	subs, err := model.GetAllUserSubscriptions(userId, 0)
+	appId := 0
+	if rawAppId := strings.TrimSpace(c.Query("app_id")); rawAppId != "" {
+		parsed, err := strconv.Atoi(rawAppId)
+		if err != nil || parsed < 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		appId = parsed
+	}
+	subs, err := model.GetAllUserSubscriptions(userId, appId)
 	if err != nil {
 		common.ApiError(c, err)
 		return

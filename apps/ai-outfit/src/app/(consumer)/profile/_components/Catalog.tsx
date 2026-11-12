@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { catalogSchema, formatCredits, formatPrice } from './profile-data';
+import { catalogSchema, formatCredits, formatPrice, paymentMethodLabels } from './profile-data';
 import type { PaymentMethod, Purchase } from './profile-data';
 import { useGatewayResource } from './use-gateway-resource';
 import { useState } from 'react';
@@ -58,7 +58,7 @@ export function Catalog(props: {
   return (
     <div className="space-y-4">
       <p className="text-sm text-base-content/70">
-        每次购买 1 份，限购与支付结果以结算为准。当前付款方式：{props.paymentMethod === 'balance' ? '余额支付' : '在线支付'}。
+        每次购买 1 份，限购与支付结果以结算为准。当前付款方式：{paymentMethodLabels[props.paymentMethod] ?? props.paymentMethod}。
       </p>
       <CatalogSection title="套餐" loading={catalog.loading} error={catalog.error}
         empty={!catalog.data?.plans.length} onRetry={retry}>
@@ -67,9 +67,9 @@ export function Catalog(props: {
             <div className="card-body gap-3">
               <h3 className="card-title wrap-anywhere">{plan.title}</h3>
               <p className="tabular-nums">价格：{formatPrice(plan.price_amount, plan.currency)}</p>
-              <p>套餐积分：{plan.total_amount === 0 ? '不限积分' : formatCredits(plan.total_amount)}</p>
+              <p>套餐到账：{plan.total_amount === 0 ? '不限' : formatCredits(plan.total_amount)}</p>
               <p>有效期：{plan.duration_value} {durationLabels[plan.duration_unit] ?? plan.duration_unit}</p>
-              <p>积分重置：{plan.quota_reset_period ? (resetLabels[plan.quota_reset_period] ?? plan.quota_reset_period) : '未提供'}</p>
+              <p>重置周期：{plan.quota_reset_period ? (resetLabels[plan.quota_reset_period] ?? plan.quota_reset_period) : '未提供'}</p>
               <p className="text-sm text-base-content/70">
                 每人限购：{plan.max_purchase_per_user === 0 ? '不限' : `${plan.max_purchase_per_user} 份`}
               </p>
@@ -85,8 +85,8 @@ export function Catalog(props: {
           </article>
         ))}
       </CatalogSection>
-      <p className="text-sm text-base-content/70">套餐生效情况可在「我的积分」中查看余额变化。</p>
-      <CatalogSection title="积分商品" loading={catalog.loading} error={catalog.error}
+      <p className="text-sm text-base-content/70">套餐生效情况可在「我的余额」中查看余额变化。</p>
+      <CatalogSection title="商品" loading={catalog.loading} error={catalog.error}
         empty={!catalog.data?.products.length} onRetry={retry}>
         {catalog.data?.products.map((product) => (
           <article key={product.id} className="card card-sm min-w-0 bg-base-200">
@@ -94,14 +94,14 @@ export function Catalog(props: {
               <h3 className="card-title wrap-anywhere">{product.name}</h3>
               {product.description ? <p className="whitespace-pre-wrap wrap-anywhere text-base-content/70">{product.description}</p> : null}
               <p className="tabular-nums">价格：{formatPrice(product.price_amount, product.currency)}</p>
-              <p>到账积分：{formatCredits(product.quota_amount)}</p>
+              <p>到账金额：{formatCredits(product.quota_amount)}</p>
               <p className="text-sm text-base-content/70">
                 每人限购：{product.max_purchase_per_user === 0 ? '不限' : `${product.max_purchase_per_user} 份`}
               </p>
               <div className="card-actions mt-auto">
                 <button type="button" className="btn btn-outline w-full" disabled={props.disabled}
                   onClick={() => props.onPurchase({ kind: 'product', item: product, payment_method: props.paymentMethod })}>
-                  购买积分商品
+                  购买商品
                 </button>
               </div>
             </div>

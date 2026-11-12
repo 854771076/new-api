@@ -87,7 +87,7 @@ function safeText(value: unknown, max = 300): string {
 function checkoutMessage(description: string): { message: string; code: string } {
   const d = description.trim().toLowerCase();
   if (/^insufficient (balance|quota)[.!]?$/.test(d)) {
-    return { message: '余额或积分不足，请先充值后再支付。', code: 'UPSTREAM_CHECKOUT_FAILED' };
+    return { message: '余额或额度不足，请先充值后再支付。', code: 'UPSTREAM_CHECKOUT_FAILED' };
   }
   if (d.includes('compliance')) {
     return { message: '支付功能尚未由管理员开通，请联系管理员。', code: 'UPSTREAM_PAYMENT_DISABLED' };

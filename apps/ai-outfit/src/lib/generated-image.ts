@@ -5,6 +5,7 @@ import { BlockList, isIP } from 'node:net';
 import sharp from 'sharp';
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_REFERENCE_DIMENSION = 1536;
 const blockedAddresses = new BlockList();
 for (const [network, prefix] of [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
@@ -100,4 +101,24 @@ export async function readGeneratedImage(image: { url?: string; b64_json?: strin
   const png = await pipeline.rotate().png().toBuffer();
   if (png.length > MAX_IMAGE_BYTES) throw new Error('生成图片超过 20MB 限制');
   return png;
+}
+
+/**
+ * 把参考图（人物、服装板等照片类素材）压缩为有损 JPEG 再上传。照片素材经 PNG
+ * 无损重编码会成倍膨胀，极易触发网关的请求体上限（裸 413）。限边 + JPEG q90 在
+ * 视觉质量与体积之间取平衡，从源头避开网关/反代的体积拦截。
+ */
+export async function prepareReferenceImage(urlValue: string): Promise<Buffer> {
+  const bytes = await downloadImage(urlValue);
+  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES) throw new Error('参考图数据无效或过大');
+  const pipeline = sharp(bytes, { limitInputPixels: 40_000_000, animated: false });
+  const metadata = await pipeline.metadata();
+  if (!['png', 'jpeg', 'webp'].includes(metadata.format ?? '')) throw new Error('参考图格式不支持');
+  const jpeg = await pipeline
+    .rotate()
+    .resize(MAX_REFERENCE_DIMENSION, MAX_REFERENCE_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 90 })
+    .toBuffer();
+  if (!jpeg.length || jpeg.length > MAX_IMAGE_BYTES) throw new Error('参考图压缩失败或过大');
+  return jpeg;
 }

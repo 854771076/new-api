@@ -6143,6 +6143,7 @@
     "Subscription purchased with balance, plan: {{plan}}, payment amount: {{amount}}, quota deducted: {{quota}}": "Đã mua gói đăng ký bằng số dư, gói: {{plan}}, số tiền thanh toán: {{amount}}, hạn mức đã trừ: {{quota}}",
     "Subscription purchased, plan: {{plan}}, payment amount: {{amount}}, payment method: {{method}}": "Đã mua gói đăng ký, gói: {{plan}}, số tiền thanh toán: {{amount}}, phương thức thanh toán: {{method}}",
     "Subscriptions": "Đăng ký",
+    "Subscriptions & Quota by App": "Đăng ký và hạn mức theo ứng dụng",
     "Subtract": "Trừ",
     "succeeded": "thành công",
     "Success": "Thành công",

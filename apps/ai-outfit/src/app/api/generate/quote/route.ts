@@ -10,7 +10,6 @@ import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gate
 import { buildQuote } from '@/lib/tryon/quote';
 import { resolveTryonModel } from '@/lib/tryon/models';
 import { resolveQuotePrices } from '@/lib/tryon/pricing';
-import { QUOTA_PER_CREDIT } from '@/lib/constants';
 import type { WearCandidate } from '@/lib/tryon/wear';
 import { z } from 'zod';
 
@@ -60,7 +59,7 @@ export async function POST(req: NextRequest) {
     const quote = buildQuote(activeOutfits as WearCandidate[], prices);
     return gatewaySuccess({
       quote,
-      credits: quote.total_quota / QUOTA_PER_CREDIT,
+      credits: quote.total_quota,
       item_count: quote.item_count,
       unparsed_count: quote.unparsed_garment_ids.length,
     });

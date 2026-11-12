@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { QUOTA_PER_CREDIT } from '@/lib/constants';
+import { QUOTA_PER_UNIT } from '@/lib/constants';
 
 const quotaSchema = z.number().int().safe().nonnegative();
 
@@ -14,6 +14,11 @@ export const userinfoSchema = z.object({
   app_used_quota: quotaSchema.optional(),
   request_count: quotaSchema.optional(),
   group: z.string().optional(),
+  subscription: z.object({
+    plan_title: z.string().optional(),
+    total_amount: quotaSchema,
+    end_time: quotaSchema,
+  }).nullable().optional(),
 });
 
 export const logsSchema = z.object({
@@ -64,6 +69,9 @@ export const checkoutSchema = z.object({
   order_id: z.string().optional(),
   checkout_url: z.string().optional(),
   payment_url: z.string().optional(),
+  pay_link: z.string().optional(),
+  url: z.string().optional(),
+  params: z.record(z.string(), z.string()).optional(),
   expires_at: z.union([z.string(), z.number()]).optional(),
   quota: quotaSchema.optional(),
   quota_amount: quotaSchema.optional(),
@@ -72,7 +80,7 @@ export const checkoutSchema = z.object({
 export type GatewayPlan = z.infer<typeof catalogSchema>['plans'][number];
 export type GatewayProduct = z.infer<typeof catalogSchema>['products'][number];
 export type GatewayCheckoutResult = z.infer<typeof checkoutSchema>;
-export type PaymentMethod = 'balance' | 'waffo_pancake';
+export type PaymentMethod = string;
 export type Purchase =
   | { kind: 'topup'; amount: number; payment_method: PaymentMethod }
   | { kind: 'plan'; item: GatewayPlan; payment_method: PaymentMethod }
@@ -85,13 +93,10 @@ export interface SupabaseUserLite {
   user_metadata: { name?: string; full_name?: string };
 }
 
-// 网关内部 quota 换算成面向用户的积分：1 积分 = QUOTA_PER_CREDIT quota。
-// 整数不显示小数，非整数最多保留 2 位。
+// 网关 quota 为基本记账单位；new-api 默认 $1 = 500,000 quota，此处换算为美元价格显示。
 export function formatCredits(value: number | undefined): string {
   if (value === undefined) return '—';
-  const credits = value / QUOTA_PER_CREDIT;
-  const rounded = Number.isInteger(credits) ? credits : Math.round(credits * 100) / 100;
-  return `${rounded.toLocaleString('zh-CN', { maximumFractionDigits: 2 })} 积分`;
+  return `$${(value / QUOTA_PER_UNIT).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export function formatPrice(amount: number, currency: string): string {
@@ -108,6 +113,18 @@ export function safePaymentUrl(value: string | undefined): string | null {
     return null;
   }
 }
+
+export const paymentMethodsSchema = z.object({
+  payment_methods: z.array(z.string()),
+});
+
+export const paymentMethodLabels: Record<string, string> = {
+  balance: '余额支付',
+  stripe: 'Stripe',
+  creem: 'Creem',
+  epay: '易支付',
+  waffo_pancake: 'Waffo Pancake',
+};
 
 const envelopeSchema = z.object({
   success: z.boolean(),

@@ -14,7 +14,7 @@ const componentRoot = fileURLToPath(new URL('../', import.meta.url)).replaceAll(
 const appRoot = resolve(componentRoot, '../../../../..').replaceAll('\\', '/');
 const user = { id: 'profile-fixture', email: 'profile@example.com', app_metadata: { provider: 'custom:newapi' }, user_metadata: { name: '测试用户' } };
 const plan = { id: 1, title: 'App 月套餐', price_amount: 3, currency: 'USD', total_amount: 300000, duration_unit: 'month', duration_value: 1, allow_balance_pay: true, max_purchase_per_user: 2, quota_reset_period: 'monthly' };
-const product = { id: 2, name: '积分包', description: '换装积分', price_amount: 2, currency: 'USD', quota_amount: 200000, max_purchase_per_user: 0 };
+const product = { id: 2, name: '额度包', description: '换装额度', price_amount: 2, currency: 'USD', quota_amount: 200000, max_purchase_per_user: 0 };
 let browser;
 let server;
 let gatewaySuccess;
@@ -144,7 +144,7 @@ const waitText = (page, text) => page.getByText(text, { exact: false }).first().
 const count = (state, endpoint) => state.calls.filter((call) => call.path.endsWith(endpoint)).length;
 async function confirmTopup(page) {
   await page.getByRole('button', { name: '确认充值', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: '确认付款：积分充值', exact: true });
+  const dialog = page.getByRole('dialog', { name: '确认付款：余额充值', exact: true });
   await dialog.waitFor({ state: 'visible' });
   return dialog;
 }
@@ -153,11 +153,11 @@ test('zero and missing credits render in user-facing credit units without platfo
   for (const info of [{ id: user.id, quota: 9000000, app_quota: 0, app_used_quota: 123 }, { id: user.id, quota: 9000000 }]) {
     const { page } = await openProfile({ info });
     try {
-      await waitText(page, '我的积分');
-      assert.equal(await page.locator('p.text-primary').innerText(), info.app_quota === 0 ? '0 积分' : '—');
+      await waitText(page, '我的余额');
+      assert.equal(await page.locator('p.text-primary').innerText(), info.app_quota === 0 ? '$0.00' : '—');
       if (info.app_quota === 0) {
-        await waitText(page, '积分不足，可在下方充值后继续换装。');
-        await waitText(page, '已用积分：0.25 积分');
+        await waitText(page, '余额不足，可在下方充值后继续换装。');
+        await waitText(page, '已用余额：$0.00');
       }
       assert.equal(await page.getByText('平台余额', { exact: false }).count(), 0);
       assert.equal(await page.getByText('quota', { exact: false }).count(), 0);
@@ -168,7 +168,7 @@ test('zero and missing credits render in user-facing credit units without platfo
 test('real success envelope with null error_code displays credits, catalog and logs', async () => {
   const { page } = await openProfile();
   try {
-    await waitText(page, '剩余积分');
+    await waitText(page, '剩余余额');
     await waitText(page, plan.title);
     await waitText(page, product.name);
     await waitText(page, 'model-page-1');
@@ -190,7 +190,7 @@ test('topup rejects values outside integer 1..10000 and accepts both boundaries'
     for (const amount of ['1', '10000']) {
       await input.fill(amount);
       const dialog = await confirmTopup(page);
-      await waitText(page, `充值数量：${amount}，到账积分以网关结算结果为准。`);
+      await waitText(page, `充值数量：${amount}，到账金额以网关结算结果为准。`);
       await dialog.getByRole('button', { name: '取消', exact: true }).click();
       await dialog.waitFor({ state: 'hidden' });
     }
@@ -212,7 +212,7 @@ test('fractional amount is rejected; balance topup requires confirmation and sub
     assert.equal(count(state, '/topup'), 0);
     assert.equal(await dialog.getByRole('button', { name: '取消', exact: true }).evaluate((button) => button === document.activeElement), true);
     await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
-    await waitText(page, '支付成功，积分已更新。'); await waitText(page, '1,000 积分');
+    await waitText(page, '支付成功，余额已更新。'); await waitText(page, '$1.00');
     assert.deepEqual(state.calls.find((call) => call.path.endsWith('/topup')).body, { amount: 10, payment_method: 'balance' });
     assert.equal(count(state, '/catalog'), 1);
     assert.equal(count(state, '/userinfo'), 2);
@@ -226,10 +226,10 @@ test('catalog balance purchases debit credits and disable plans that disallow it
     await page.getByLabel('选择付款方式').selectOption('balance');
     await waitText(page, plan.title);
     assert.equal(await page.getByRole('button', { name: '购买套餐', exact: true }).isDisabled(), true);
-    await page.getByRole('button', { name: '购买积分商品', exact: true }).click();
-    await waitText(page, '将从积分中扣款');
+    await page.getByRole('button', { name: '购买商品', exact: true }).click();
+    await waitText(page, '将从余额中扣款');
     await page.getByRole('dialog').getByRole('button', { name: '确认付款', exact: true }).click();
-    await waitText(page, '支付成功，积分已更新。');
+    await waitText(page, '支付成功，余额已更新。');
     assert.deepEqual(state.calls.find((call) => call.path.endsWith('/checkout')).body, { kind: 'product', id: 2, payment_method: 'balance' });
   } finally { await page.close(); }
 });
@@ -239,9 +239,9 @@ test('plan checkout confirms one plan and shows its credit allowance', async () 
   try {
     await page.getByLabel('选择付款方式').selectOption('balance');
     await page.getByRole('button', { name: '购买套餐', exact: true }).click();
-    await waitText(page, '套餐积分：600 积分');
+    await waitText(page, '套餐到账：$0.60');
     await page.getByRole('dialog').getByRole('button', { name: '确认付款', exact: true }).click();
-    await waitText(page, '支付成功，积分已更新。');
+    await waitText(page, '支付成功，余额已更新。');
     assert.deepEqual(state.calls.find((call) => call.path.endsWith('/checkout')).body, { kind: 'plan', id: 1, payment_method: 'balance' });
   } finally { await page.close(); }
 });
@@ -258,10 +258,10 @@ test('pending HTTPS order opens native modal; Escape restores focus and refreshe
     assert.equal(await payment.locator('iframe').getAttribute('src'), 'https://checkout.example/pay');
     await page.keyboard.press('Escape');
     await payment.waitFor({ state: 'hidden' });
-    await waitText(page, '我的积分');
+    await waitText(page, '我的余额');
     assert.equal(await page.getByRole('button', { name: '确认充值', exact: true }).evaluate((button) => button === document.activeElement), true);
     assert.equal(count(state, '/userinfo'), 2); assert.equal(count(state, '/logs'), 2); assert.equal(count(state, '/catalog'), 1);
-    assert.equal(await page.getByText('支付成功，积分已更新。', { exact: false }).count(), 0);
+    assert.equal(await page.getByText('支付成功，余额已更新。', { exact: false }).count(), 0);
     assert.deepEqual(state.calls.find((call) => call.path.endsWith('/topup')).body, { amount: 50, payment_method: 'waffo_pancake' });
   } finally { await page.close(); }
 });
@@ -276,7 +276,7 @@ test('unsafe or missing payment links are blocked while pending order handles re
       await waitText(page, '支付链接暂时无法打开');
       assert.equal(await payment.locator('iframe').count(), 0); assert.equal(await payment.getByRole('link').count(), 0);
       await payment.getByRole('button', { name: '关闭并刷新', exact: true }).click();
-      await waitText(page, '我的积分');
+      await waitText(page, '我的余额');
       assert.equal(count(state, '/userinfo'), 2); assert.equal(count(state, '/catalog'), 1);
       await waitText(page, 'order-blocked');
     } finally { await page.close(); }
@@ -305,14 +305,14 @@ test('business failures stay visible without marking an order paid', async () =>
     const dialog = await confirmTopup(page); await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
     await waitText(page, '测试请求被拒绝（checkout_failed）');
     await waitText(page, 'model-page-1'); await waitText(page, plan.title);
-    assert.equal(await page.getByText('支付成功，积分已更新。', { exact: false }).count(), 0); assert.equal(count(state, '/topup'), 1);
+    assert.equal(await page.getByText('支付成功，余额已更新。', { exact: false }).count(), 0); assert.equal(count(state, '/topup'), 1);
   } finally { await page.close(); }
 });
 
 test('empty states are independent; mobile and landscape contain long catalog text', async () => {
   const empty = await openProfile({ catalog: { plans: [], products: [] }, total: 0 });
   try {
-    await waitText(empty.page, '当前 App 暂无可购买的套餐'); await waitText(empty.page, '当前 App 暂无可购买的积分商品'); await waitText(empty.page, '暂无消费记录');
+    await waitText(empty.page, '当前 App 暂无可购买的套餐'); await waitText(empty.page, '当前 App 暂无可购买的商品'); await waitText(empty.page, '暂无消费记录');
   } finally { await empty.page.close(); }
   for (const width of [375, 812]) {
     const { page } = await openProfile({ catalog: { plans: [plan], products: [{ ...product, name: 'LongTitle'.repeat(16), description: 'LongDescription'.repeat(32) }] } }, { width, height: 667 });
@@ -333,14 +333,14 @@ test('userinfo and catalog loading/errors keep the other resources available and
       if (url.pathname === endpoint) await gate.promise;
     } });
     try {
-      await waitText(page, endpoint.endsWith('/userinfo') ? '正在读取积分' : '正在加载套餐');
+      await waitText(page, endpoint.endsWith('/userinfo') ? '正在读取余额' : '正在加载套餐');
       await waitText(page, 'model-page-1');
-      await waitText(page, endpoint.endsWith('/userinfo') ? plan.title : '我的积分');
+      await waitText(page, endpoint.endsWith('/userinfo') ? plan.title : '我的余额');
       gate.resolve();
-      await waitText(page, endpoint.endsWith('/userinfo') ? '暂时无法读取积分，请稍后重试。' : '测试请求被拒绝（checkout_failed）');
+      await waitText(page, endpoint.endsWith('/userinfo') ? '暂时无法读取余额，请稍后重试。' : '测试请求被拒绝（checkout_failed）');
       state.failure = undefined;
       await page.getByRole('button', { name: endpoint.endsWith('/userinfo') ? '重试' : '重试目录', exact: true }).first().click();
-      await waitText(page, endpoint.endsWith('/userinfo') ? '我的积分' : plan.title);
+      await waitText(page, endpoint.endsWith('/userinfo') ? '我的余额' : plan.title);
       assert.equal(count(state, endpoint), 2); assert.equal(count(state, '/logs'), 1);
       assert.equal(count(state, endpoint.endsWith('/userinfo') ? '/catalog' : '/userinfo'), 1);
     } finally { gate.resolve(); await page.close(); }
@@ -352,7 +352,7 @@ test('omitted optional reset metadata does not hide the App catalog or invent a 
   assert.equal(quota_reset_period, 'monthly');
   const { page } = await openProfile({ catalog: { plans: [minimalPlan], products: [product] } });
   try {
-    await waitText(page, '积分重置：未提供');
+    await waitText(page, '重置周期：未提供');
     await waitText(page, product.name);
     assert.equal(await page.getByRole('button', { name: '购买套餐', exact: true }).isEnabled(), true);
   } finally { await page.close(); }
@@ -364,7 +364,7 @@ test('catalog and confirmation preserve small configured prices without assuming
   });
   try {
     await waitText(page, '价格：0.0001 CNY');
-    await page.getByRole('button', { name: '购买积分商品', exact: true }).click();
+    await page.getByRole('button', { name: '购买商品', exact: true }).click();
     const confirmation = page.getByRole('dialog');
     await waitText(page, '购买数量：1 份；价格：0.0001 CNY');
     assert.equal(await confirmation.getByRole('heading').evaluate((heading) => heading.scrollWidth <= heading.clientWidth), true);
@@ -374,7 +374,7 @@ test('catalog and confirmation preserve small configured prices without assuming
     assert.deepEqual(state.calls.find((call) => call.path.endsWith('/checkout')).body, { kind: 'product', id: 2, payment_method: 'waffo_pancake' });
     await payment.getByRole('button', { name: '关闭并刷新', exact: true }).click();
     await payment.waitFor({ state: 'hidden' });
-    assert.equal(await page.getByText('支付成功，积分已更新。', { exact: false }).count(), 0);
+    assert.equal(await page.getByText('支付成功，余额已更新。', { exact: false }).count(), 0);
   } finally { await page.close(); }
 });
 
@@ -384,12 +384,12 @@ test('a failed later purchase does not retain the previous paid-success receipt'
     let dialog = await confirmTopup(page);
     await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' });
-    await waitText(page, '支付成功，积分已更新。'); await waitText(page, '1,000 积分');
+    await waitText(page, '支付成功，余额已更新。'); await waitText(page, '$1.00');
     state.failure = '/api/gateway/topup';
     dialog = await confirmTopup(page);
     await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
     await waitText(page, '测试请求被拒绝');
-    assert.equal(await page.getByText('支付成功，积分已更新。', { exact: false }).count(), 0);
+    assert.equal(await page.getByText('支付成功，余额已更新。', { exact: false }).count(), 0);
     assert.equal(count(state, '/topup'), 2);
   } finally { await page.close(); }
 });
@@ -402,7 +402,7 @@ test('unknown or missing checkout status fails closed and never displays paid su
       await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
       await waitText(page, '网关返回的数据不完整');
       await dialog.waitFor({ state: 'hidden' });
-      assert.equal(await page.getByText('支付成功，积分已更新。', { exact: false }).count(), 0);
+      assert.equal(await page.getByText('支付成功，余额已更新。', { exact: false }).count(), 0);
       assert.equal(await page.getByRole('dialog').count(), 0);
       assert.equal(count(state, '/topup'), 1);
     } finally { await page.close(); }
@@ -605,7 +605,7 @@ test('all expired-session responses redirect to login rather than continuing as 
         const dialog = await confirmTopup(page); await dialog.getByRole('button', { name: '确认付款', exact: true }).click();
       }
       if (endpoint.endsWith('/checkout')) {
-        await page.getByRole('button', { name: '购买积分商品', exact: true }).click();
+        await page.getByRole('button', { name: '购买商品', exact: true }).click();
         await page.getByRole('dialog').getByRole('button', { name: '确认付款', exact: true }).click();
       }
       await page.waitForURL('**/login?error=session_expired');

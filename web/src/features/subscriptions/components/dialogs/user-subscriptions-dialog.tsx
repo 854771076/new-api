@@ -48,6 +48,7 @@ import {
   SheetDescription,
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { formatQuota } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
 import { getServerMessage } from '@/lib/server-error-message'
@@ -107,6 +108,7 @@ function SubscriptionStatusBadge(props: {
 
 export function UserSubscriptionsDialog(props: Props) {
   const { t } = useTranslation()
+  const { appId } = useActiveApp()
   const [loading, setLoading] = useState(false)
   const [creating, setCreating] = useState(false)
   const [plans, setPlans] = useState<PlanRecord[]>([])
@@ -136,8 +138,8 @@ export function UserSubscriptionsDialog(props: Props) {
     setLoading(true)
     try {
       const [plansRes, subsRes] = await Promise.all([
-        getAdminPlans(),
-        getUserSubscriptions(props.user.id),
+        getAdminPlans(appId),
+        getUserSubscriptions(props.user.id, appId),
       ])
       if (plansRes.success) {
         setPlans(plansRes.data || [])
@@ -154,7 +156,7 @@ export function UserSubscriptionsDialog(props: Props) {
     } finally {
       setLoading(false)
     }
-  }, [props.user?.id, t])
+  }, [props.user?.id, appId, t])
 
   useEffect(() => {
     if (props.open && props.user?.id) {

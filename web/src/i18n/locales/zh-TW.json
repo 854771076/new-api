@@ -6143,6 +6143,7 @@
     "Subscription purchased with balance, plan: {{plan}}, payment amount: {{amount}}, quota deducted: {{quota}}": "使用餘額購買訂閱成功，方案：{{plan}}，支付金額：{{amount}}，扣除額度：{{quota}}",
     "Subscription purchased, plan: {{plan}}, payment amount: {{amount}}, payment method: {{method}}": "訂閱購買成功，方案：{{plan}}，支付金額：{{amount}}，支付方式：{{method}}",
     "Subscriptions": "訂閱",
+    "Subscriptions & Quota by App": "各 App 訂閱與積分",
     "Subtract": "減少",
     "succeeded": "已成功",
     "Success": "成功",

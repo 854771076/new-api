@@ -329,6 +329,25 @@ func ListOAuthApps() ([]OAuthApp, error) {
 	return apps, err
 }
 
+// GetOAuthAppNamesByIds returns the id -> name mapping for the given app ids.
+// Only the id and name columns are read, so it is safe to use on the
+// self-service wallet view where the caller must not expose client secrets or
+// redirect URIs.
+func GetOAuthAppNamesByIds(ids []int) (map[int]string, error) {
+	result := make(map[int]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	var apps []OAuthApp
+	if err := DB.Model(&OAuthApp{}).Where("id IN ?", ids).Select("id", "name").Find(&apps).Error; err != nil {
+		return nil, err
+	}
+	for _, app := range apps {
+		result[app.Id] = app.Name
+	}
+	return result, nil
+}
+
 // CreateOAuthApp persists a new app. A confidential client must set
 // ClientSecretHash before calling; a public client has no secret at all.
 func CreateOAuthApp(app *OAuthApp) error {

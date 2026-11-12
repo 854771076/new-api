@@ -2,14 +2,18 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/Calcium-Ion/go-epay/epay"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -287,12 +291,14 @@ func AdminCompleteAppProductOrder(c *gin.Context) {
 	common.ApiSuccess(c, nil)
 }
 
-// AppProductCheckoutResult is returned by CreateAppProductWaffoPancakeCheckout.
+// AppProductCheckoutResult is returned by the app product checkout helpers.
 type AppProductCheckoutResult struct {
 	CheckoutURL string
 	TradeNo     string
 	SessionID   string
 	ExpiresAt   string
+	URL         string
+	Params      map[string]string
 }
 
 // CreateAppProductWaffoPancakeCheckout creates a pending product order and a
@@ -362,5 +368,185 @@ func CreateAppProductWaffoPancakeCheckout(ctx context.Context, user *model.User,
 		TradeNo:     order.TradeNo,
 		SessionID:   session.SessionID,
 		ExpiresAt:   session.ExpiresAt,
+	}, nil
+}
+
+// CreateAppProductStripeCheckout creates a pending product order and a Stripe
+// Checkout session for the product's fixed Stripe Price.
+func CreateAppProductStripeCheckout(ctx context.Context, user *model.User, product *model.AppProduct) (*AppProductCheckoutResult, error) {
+	if err := paymentComplianceError(); err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, common.NewMessage("User does not exist")
+	}
+	if product == nil {
+		return nil, model.ErrAppProductNotFound
+	}
+	if !isStripeTopUpEnabled() {
+		return nil, common.NewMessage("Stripe configuration is incomplete")
+	}
+	if product.PriceAmount < 0.01 {
+		return nil, common.NewMessage("Payment amount is too low")
+	}
+	priceID := strings.TrimSpace(product.StripePriceId)
+	if priceID == "" {
+		return nil, common.NewMessage("Stripe configuration is incomplete")
+	}
+
+	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
+		model.PaymentMethodStripe, model.PaymentProviderStripe)
+	if err != nil {
+		return nil, err
+	}
+
+	payLink, err := genStripeProductLink(order.TradeNo, user.StripeCustomer, user.Email, priceID)
+	if err != nil {
+		logger.LogError(ctx, common.LogText(
+			"Stripe failed to create app product checkout trade_no=%s product_id=%d error=%q",
+			order.TradeNo, product.Id, err.Error(),
+		))
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderStripe, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText(
+		"App product order created trade_no=%s user_id=%d app_id=%d product_id=%d quota=%d money=%.2f",
+		order.TradeNo, order.UserId, order.AppId, order.ProductId, order.QuotaAmount, order.Money,
+	))
+
+	return &AppProductCheckoutResult{
+		CheckoutURL: payLink,
+		TradeNo:     order.TradeNo,
+	}, nil
+}
+
+// CreateAppProductCreemCheckout creates a pending product order and a Creem
+// checkout bound to the product's fixed Creem product.
+func CreateAppProductCreemCheckout(ctx context.Context, user *model.User, product *model.AppProduct) (*AppProductCheckoutResult, error) {
+	if err := paymentComplianceError(); err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, common.NewMessage("User does not exist")
+	}
+	if product == nil {
+		return nil, model.ErrAppProductNotFound
+	}
+	if !isCreemTopUpEnabled() {
+		return nil, common.NewMessage("Creem configuration is incomplete")
+	}
+	if product.PriceAmount < 0.01 {
+		return nil, common.NewMessage("Payment amount is too low")
+	}
+	productID := strings.TrimSpace(product.CreemProductId)
+	if productID == "" {
+		return nil, common.NewMessage("Creem configuration is incomplete")
+	}
+
+	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
+		model.PaymentMethodCreem, model.PaymentProviderCreem)
+	if err != nil {
+		return nil, err
+	}
+
+	checkoutURL, err := genCreemLink(ctx, order.TradeNo, &CreemProduct{
+		ProductId: productID,
+		Name:      product.Name,
+		Price:     product.PriceAmount,
+		Currency:  product.Currency,
+		Quota:     product.QuotaAmount,
+	}, user.Email, user.Username)
+	if err != nil {
+		logger.LogError(ctx, common.LogText(
+			"Creem failed to create app product checkout trade_no=%s product_id=%d error=%q",
+			order.TradeNo, product.Id, err.Error(),
+		))
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderCreem, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText(
+		"App product order created trade_no=%s user_id=%d app_id=%d product_id=%d quota=%d money=%.2f",
+		order.TradeNo, order.UserId, order.AppId, order.ProductId, order.QuotaAmount, order.Money,
+	))
+
+	return &AppProductCheckoutResult{
+		CheckoutURL: checkoutURL,
+		TradeNo:     order.TradeNo,
+	}, nil
+}
+
+// CreateAppProductEpayCheckout creates a pending product order and starts an
+// epay payment. The concrete payment type (for example alipay or wxpay) must be
+// configured and passed in.
+func CreateAppProductEpayCheckout(ctx context.Context, user *model.User, product *model.AppProduct, paymentType string) (*AppProductCheckoutResult, error) {
+	if err := paymentComplianceError(); err != nil {
+		return nil, err
+	}
+	if user == nil {
+		return nil, common.NewMessage("User does not exist")
+	}
+	if product == nil {
+		return nil, model.ErrAppProductNotFound
+	}
+	if !isEpayTopUpEnabled() {
+		return nil, common.NewMessage("Epay configuration is incomplete")
+	}
+	if !operation_setting.ContainsPayMethod(paymentType) {
+		return nil, common.NewMessage("Payment method does not exist")
+	}
+	if product.PriceAmount < 0.01 {
+		return nil, common.NewMessage("Payment amount is too low")
+	}
+
+	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
+		paymentType, model.PaymentProviderEpay)
+	if err != nil {
+		return nil, err
+	}
+
+	callBackAddress := service.GetCallbackAddress()
+	returnUrl, err := url.Parse(paymentReturnPath("/wallet"))
+	if err != nil {
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Callback URL configuration error")
+	}
+	notifyUrl, err := url.Parse(callBackAddress + "/api/user/epay/notify")
+	if err != nil {
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Callback URL configuration error")
+	}
+
+	client := GetEpayClient()
+	if client == nil {
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Payment information has not been configured by administrator")
+	}
+
+	uri, params, err := client.Purchase(&epay.PurchaseArgs{
+		Type:           paymentType,
+		ServiceTradeNo: order.TradeNo,
+		Name:           fmt.Sprintf("APP:%s", product.Name),
+		Money:          strconv.FormatFloat(product.PriceAmount, 'f', 2, 64),
+		Device:         epay.PC,
+		NotifyUrl:      notifyUrl,
+		ReturnUrl:      returnUrl,
+	})
+	if err != nil {
+		logger.LogError(ctx, common.LogText(
+			"Epay failed to create app product checkout trade_no=%s product_id=%d error=%q",
+			order.TradeNo, product.Id, err.Error(),
+		))
+		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		return nil, common.NewMessage("Failed to start payment")
+	}
+	logger.LogInfo(ctx, common.LogText(
+		"App product order created trade_no=%s user_id=%d app_id=%d product_id=%d quota=%d money=%.2f",
+		order.TradeNo, order.UserId, order.AppId, order.ProductId, order.QuotaAmount, order.Money,
+	))
+
+	return &AppProductCheckoutResult{
+		URL:     uri,
+		Params:  params,
+		TradeNo: order.TradeNo,
 	}, nil
 }

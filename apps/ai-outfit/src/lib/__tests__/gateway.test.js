@@ -613,7 +613,7 @@ async function referenceJpeg(width = 2) {
   return sharp({ create: { width, height: 2, channels: 3, background: '#336699' } }).jpeg().toBuffer();
 }
 
-test('image edits upload ordered normalized PNG files with multipart headers and prompt constraints', async () => {
+test('image edits upload ordered normalized JPEG files with multipart headers and prompt constraints', async () => {
   await persistGatewaySession(session, user);
   const sources = await Promise.all([referenceJpeg(2), referenceJpeg(3), referenceJpeg(4)]);
   const downloads = referenceDownloads(sources);
@@ -647,11 +647,11 @@ test('image edits upload ordered normalized PNG files with multipart headers and
   const files = form.getAll('image[]');
   expect(files).toHaveLength(3);
   for (let index = 0; index < files.length; index++) {
-    expect(files[index].name).toBe(`reference-${index + 1}.png`);
-    expect(files[index].type).toBe('image/png');
+    expect(files[index].name).toBe(`reference-${index + 1}.jpg`);
+    expect(files[index].type).toBe('image/jpeg');
     const bytes = Buffer.from(await files[index].arrayBuffer());
-    expect(bytes.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    expect(await sharp(bytes).metadata()).toMatchObject({ format: 'png', width: index + 2, height: 2 });
+    expect(bytes.subarray(0, 3)).toEqual(Buffer.from([255, 216, 255]));
+    expect(await sharp(bytes).metadata()).toMatchObject({ format: 'jpeg', width: index + 2, height: 2 });
   }
 });
 
@@ -797,15 +797,13 @@ test('non-JSON image success and failed reference downloads expose no raw body o
   expect(globalThis.fetch).not.toHaveBeenCalled();
 });
 
-test('aggregate normalized PNG uploads above 40 MiB are rejected before upstream generation', async () => {
+test('aggregate normalized reference uploads above 40 MiB are rejected before upstream generation', async () => {
   await persistGatewaySession(session, user);
-  // Deterministic uncompressed PNGs exercise the real byte cap without random
-  // stress fixtures. Restore the native codec option spy with the other spies.
-  const originalPng = sharp.prototype.png;
-  spyOn(sharp.prototype, 'png').mockImplementation(function () {
-    return originalPng.call(this, { compressionLevel: 0 });
-  });
-  const source = await sharp({ create: { width: 2000, height: 1800, channels: 4, background: '#336699' } }).png().toBuffer();
+  // Reference images are now re-encoded to bounded JPEGs, so force a deterministic
+  // per-image size and let the aggregate byte cap (40 MiB) be the only guard tripped.
+  const source = await referenceJpeg();
+  const large = Buffer.alloc(15 * 1024 * 1024, 7);
+  spyOn(sharp.prototype, 'jpeg').mockReturnValue({ toBuffer: async () => large });
   referenceDownloads(Array(3).fill(source));
   await expect(generateImage(imageInput)).rejects.toMatchObject({ status: 413, code: 'REFERENCE_IMAGES_TOO_LARGE' });
   expect(globalThis.fetch).not.toHaveBeenCalled();

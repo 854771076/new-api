@@ -2,10 +2,10 @@ import 'server-only';
 import { z } from 'zod';
 import { config } from '@/lib/config';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
-import { readGeneratedImage } from '@/lib/generated-image';
+import { prepareReferenceImage } from '@/lib/generated-image';
 import { GatewayError, readGatewayError } from '@/lib/gateway-errors';
 import { gatewayCheckoutSchema, gatewayCheckoutResultSchema, gatewayTopupSchema,
-  gatewayPlanSchema, gatewayProductSchema,
+  gatewayPlanSchema, gatewayProductSchema, gatewayPaymentMethodsSchema,
   type GatewayCheckoutInput, type GatewayCheckoutResult, type GatewayPaymentMethod,
   type GatewayPlan, type GatewayProduct } from '@/lib/gateway-contract';
 
@@ -82,6 +82,7 @@ export interface GatewayUserinfo {
   app_used_quota?: number;
   request_count?: number;
   group?: string;
+  subscription?: { plan_title?: string; total_amount?: number; end_time?: number } | null;
   [key: string]: unknown;
 }
 
@@ -135,6 +136,12 @@ export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<
     app_used_quota: typeof raw.app_used_quota === 'number' ? raw.app_used_quota : undefined,
     request_count: typeof raw.request_count === 'number' ? raw.request_count : undefined,
     group: typeof raw.group === 'string' ? raw.group : undefined,
+    subscription:
+      raw.subscription === null
+        ? null
+        : raw.subscription && typeof raw.subscription === 'object'
+          ? raw.subscription as GatewayUserinfo['subscription']
+          : undefined,
     display_name:
       typeof raw.display_name === 'string'
         ? raw.display_name
@@ -150,7 +157,7 @@ async function checkout(path: string, body: Record<string, unknown>, opts?: Fetc
   const parsed = gatewayCheckoutResultSchema.safeParse(await readJson(res));
   if (!parsed.success || (parsed.data.payment_method && parsed.data.payment_method !== body.payment_method) ||
       (body.payment_method === 'balance' && parsed.data.status !== 'success') ||
-      (body.payment_method === 'waffo_pancake' && parsed.data.status !== 'pending')) {
+      (body.payment_method !== 'balance' && parsed.data.status !== 'pending')) {
     throw new GatewayError(502, 'Invalid gateway checkout response.', 'UPSTREAM_INVALID_RESPONSE');
   }
   return { ...parsed.data, payment_method: body.payment_method as GatewayPaymentMethod };
@@ -175,6 +182,14 @@ export async function fetchGatewayCatalog(opts?: FetchGatewayOptions): Promise<{
   const products = z.object({ products: z.array(gatewayProductSchema) }).safeParse(await readJson(productRes));
   if (!plans.success || !products.success) throw new GatewayError(502, 'Invalid gateway catalog response.', 'UPSTREAM_INVALID_RESPONSE');
   return { plans: plans.data.plans.map(value => value.plan), products: products.data.products };
+}
+
+export async function fetchGatewayPaymentMethods(opts?: FetchGatewayOptions): Promise<string[]> {
+  const res = await requestWithAuth('GET', '/oauth/payment/methods', { accessToken: opts?.accessToken });
+  if (!res.ok) throw await readGatewayError(res);
+  const parsed = gatewayPaymentMethodsSchema.safeParse(await readJson(res));
+  if (!parsed.success) throw new GatewayError(502, 'Invalid gateway payment methods response.', 'UPSTREAM_INVALID_RESPONSE');
+  return parsed.data.payment_methods;
 }
 
 export async function fetchGatewayCheckout(input: GatewayCheckoutInput, opts?: FetchGatewayOptions): Promise<GatewayCheckoutResult> {
@@ -259,6 +274,10 @@ export interface GatewayPricingEntry {
   quota_type: number;
   completion_ratio: number;
   image_ratio?: number | null;
+  /** 计费模式；为 "tiered_expr" 时以 billing_expr 为计费真相，旧 model_ratio/model_price 不可信。 */
+  billing_mode?: string;
+  /** tiered_expr 计费表达式（美元/token 或 fixed 单次价）。 */
+  billing_expr?: string;
   enable_groups?: string[];
   [key: string]: unknown;
 }
@@ -277,6 +296,8 @@ const gatewayPricingEntrySchema = z.object({
   quota_type: z.number().int().min(0).max(1).optional().default(0),
   completion_ratio: z.number().nonnegative().optional().default(0),
   image_ratio: z.number().nonnegative().nullable().optional(),
+  billing_mode: z.string().optional(),
+  billing_expr: z.string().optional(),
   enable_groups: z.array(z.string()).optional(),
 }).passthrough();
 
@@ -511,17 +532,17 @@ export async function generateImage(input: ImageGenerateInput): Promise<ImageGen
     // Wait for both decoders even on failure; no orphaned heavy work or next
     // batch is started after a rejected download. Promise ordering is stable.
     const batch = await Promise.allSettled(values.reference_images.slice(index, index + 2)
-      .map(url => readGeneratedImage({ url })));
+      .map(url => prepareReferenceImage(url)));
     for (const [offset, result] of batch.entries()) {
       if (result.status === 'rejected') {
         throw new GatewayError(502, 'Reference images could not be prepared.', 'UPSTREAM_REFERENCE_IMAGE_ERROR');
       }
-      const png = result.value;
-      uploadBytes += png.byteLength;
-      if (!png.byteLength || png.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
+      const image = result.value;
+      uploadBytes += image.byteLength;
+      if (!image.byteLength || image.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
         throw new GatewayError(413, 'Reference images exceed the upload limit.', 'REFERENCE_IMAGES_TOO_LARGE');
       }
-      form.append('image[]', new Blob([new Uint8Array(png)], { type: 'image/png' }), `reference-${index + offset + 1}.png`);
+      form.append('image[]', new Blob([new Uint8Array(image)], { type: 'image/jpeg' }), `reference-${index + offset + 1}.jpg`);
     }
   }
 
@@ -564,14 +585,14 @@ export async function generateReferenceImage(input: ReferenceImageInput): Promis
   form.set('n', '1');
   let uploadBytes = 0;
   for (const url of values.reference_images) {
-    const png = await readGeneratedImage({ url }).catch(() => {
+    const image = await prepareReferenceImage(url).catch(() => {
       throw new GatewayError(502, 'Reference images could not be prepared.', 'UPSTREAM_REFERENCE_IMAGE_ERROR');
     });
-    uploadBytes += png.byteLength;
-    if (!png.byteLength || png.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
+    uploadBytes += image.byteLength;
+    if (!image.byteLength || image.byteLength > MAX_IMAGE_BYTES || uploadBytes > MAX_REFERENCE_UPLOAD_BYTES) {
       throw new GatewayError(413, 'Reference images exceed the upload limit.', 'REFERENCE_IMAGES_TOO_LARGE');
     }
-    form.append('image[]', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'reference.png');
+    form.append('image[]', new Blob([new Uint8Array(image)], { type: 'image/jpeg' }), 'reference.jpg');
   }
 
   const res = await requestWithAuth('POST', '/v1/images/edits', { body: form, accessToken: values.accessToken });

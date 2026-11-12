@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { RefreshCw, UserRound, Wallet, History } from 'lucide-react';
+import { RefreshCw, UserRound, Wallet, History, BadgeCheck } from 'lucide-react';
 import { Payments } from './Payments';
 import { formatCredits, logsSchema, userinfoSchema } from './profile-data';
 import type { SupabaseUserLite } from './profile-data';
@@ -71,40 +71,72 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
 
         <section className="card card-border min-w-0 bg-base-100 shadow-sm" aria-busy={account.loading}>
           <div className="card-body min-w-0 gap-5 p-4 sm:p-6">
-            <h2 className="card-title text-xl"><Wallet size={20} className="text-primary" aria-hidden="true" />我的积分</h2>
+            <h2 className="card-title text-xl"><Wallet size={20} className="text-primary" aria-hidden="true" />我的余额</h2>
             {account.loading ? (
               <div role="status" className="space-y-3">
-                <p className="text-base-content/70">正在读取积分…</p>
+                <p className="text-base-content/70">正在读取余额…</p>
                 <div className="skeleton h-10 w-48" /><div className="skeleton h-6 w-full" />
               </div>
             ) : account.error ? (
               <div role="alert" className="alert alert-error alert-soft">
-                <span>暂时无法读取积分，请稍后重试。</span>
+                <span>暂时无法读取余额，请稍后重试。</span>
                 <button type="button" className="btn btn-outline" onClick={() => setInfoRevision((value) => value + 1)}>重试</button>
               </div>
             ) : (
               <>
                 <div className="stats stats-vertical w-full min-w-0 bg-base-200 text-base-content tabular-nums">
                   <div className="stat min-w-0 gap-2 p-5">
-                    <p className="stat-title text-sm text-base-content/70">剩余积分</p>
+                    <p className="stat-title text-sm text-base-content/70">剩余余额</p>
                     <p className="stat-value whitespace-normal break-all text-3xl font-semibold text-primary">{formatCredits(appQuota)}</p>
-                    <p className="stat-desc whitespace-normal text-sm text-base-content/70">已用积分：{formatCredits(appUsedQuota)}</p>
+                    <p className="stat-desc whitespace-normal text-sm text-base-content/70">已用余额：{formatCredits(appUsedQuota)}</p>
                   </div>
                 </div>
                 {usedPercentage !== null ? (
                   <div className="space-y-2">
-                    <progress className="progress progress-primary w-full" aria-label="已使用积分占比" value={usedPercentage} max={100} />
+                    <progress className="progress progress-primary w-full" aria-label="已使用余额占比" value={usedPercentage} max={100} />
                     <p className="text-sm text-base-content/70">已使用 {usedPercentage.toFixed(0)}%</p>
                   </div>
                 ) : null}
                 {appQuota === 0 ? (
-                  <div className="alert alert-info alert-soft"><span>积分不足，可在下方充值后继续换装。</span></div>
+                  <div className="alert alert-info alert-soft"><span>余额不足，可在下方充值后继续换装。</span></div>
                 ) : null}
               </>
             )}
           </div>
         </section>
       </div>
+
+      <section className="card card-border min-w-0 bg-base-100 shadow-sm" aria-busy={account.loading}>
+        <div className="card-body min-w-0 gap-5 p-4 sm:p-6">
+          <h2 className="card-title text-xl"><BadgeCheck size={20} className="text-primary" aria-hidden="true" />当前订阅</h2>
+          {account.loading ? (
+            <div role="status" className="space-y-3">
+              <p className="text-base-content/70">正在读取订阅信息…</p>
+              <div className="skeleton h-10 w-48" /><div className="skeleton h-6 w-full" />
+            </div>
+          ) : account.error ? (
+            <div role="alert" className="alert alert-error alert-soft">
+              <span>暂时无法读取订阅信息，请稍后重试。</span>
+              <button type="button" className="btn btn-outline" onClick={() => setInfoRevision((value) => value + 1)}>重试</button>
+            </div>
+          ) : info?.subscription ? (
+            <dl className="space-y-4 text-sm">
+              <div className="flex flex-wrap justify-between gap-2">
+                <dt className="text-base-content/70">套餐名称</dt><dd className="wrap-anywhere">{info.subscription.plan_title || '—'}</dd>
+              </div>
+              <div className="flex flex-wrap justify-between gap-2">
+                <dt className="text-base-content/70">套餐额度</dt><dd className="tabular-nums">{formatCredits(info.subscription.total_amount)}</dd>
+              </div>
+              <div className="flex flex-wrap justify-between gap-2">
+                <dt className="text-base-content/70">到期时间</dt>
+                <dd className="tabular-nums">{new Date(info.subscription.end_time * 1000).toLocaleString('zh-CN', { hour12: false })}</dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="text-base-content/70">暂未订阅套餐。</p>
+          )}
+        </div>
+      </section>
 
       <Payments appQuota={appQuota} onRefresh={refresh} />
 
@@ -127,7 +159,7 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
             <div className="min-w-0 overflow-x-auto" role="region" aria-label="消费记录表格" tabIndex={0}>
               <table className="table table-zebra">
                 <caption className="sr-only">第 {page} 页消费记录，每页 {PAGE_SIZE} 条</caption>
-                <thead><tr><th scope="col">时间</th><th scope="col">模型</th><th scope="col">渠道</th><th scope="col" className="text-right">Tokens（入 / 出）</th><th scope="col" className="text-right">消耗积分</th></tr></thead>
+                <thead><tr><th scope="col">时间</th><th scope="col">模型</th><th scope="col">渠道</th><th scope="col" className="text-right">Tokens（入 / 出）</th><th scope="col" className="text-right">消耗金额</th></tr></thead>
                 <tbody>
                   {logs.data.map((entry, index) => (
                     <tr key={String(entry.id ?? entry.request_id ?? index)}>

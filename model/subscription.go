@@ -1001,6 +1001,23 @@ func GetAllUserSubscriptions(userId int, appId int) ([]SubscriptionSummary, erro
 	return buildSubscriptionSummaries(subs), nil
 }
 
+// GetUserAppSubscriptions returns all subscriptions (active and expired) the
+// user holds across app scopes (app_id > 0), excluding the platform console.
+// It is the self-service per-app view and never crosses user boundaries.
+func GetUserAppSubscriptions(userId int) ([]SubscriptionSummary, error) {
+	if userId <= 0 {
+		return nil, errors.New("invalid userId")
+	}
+	var subs []UserSubscription
+	err := DB.Where("user_id = ? AND app_id > ?", userId, 0).
+		Order("app_id asc, end_time desc, id desc").
+		Find(&subs).Error
+	if err != nil {
+		return nil, err
+	}
+	return buildSubscriptionSummaries(subs), nil
+}
+
 func buildSubscriptionSummaries(subs []UserSubscription) []SubscriptionSummary {
 	if len(subs) == 0 {
 		return []SubscriptionSummary{}
