@@ -1,7 +1,12 @@
 import { z } from 'zod';
 import { QUOTA_PER_UNIT } from '@/lib/constants';
 
+// 通用非负额度：用于商品、日志、分页等语义上不可能为负的字段。
 const quotaSchema = z.number().int().safe().nonnegative();
+
+// 钱包余额允许负数：网关结算（DecreaseUserAppQuota）在实际扣费超过预扣额度时
+// 会把 App 钱包余额扣成负数，前端必须能解析这种已发生的透支状态，而不是整页报错。
+const walletBalanceSchema = z.number().int().safe();
 
 export const userinfoSchema = z.object({
   id: z.string(),
@@ -10,8 +15,8 @@ export const userinfoSchema = z.object({
   email: z.string().optional(),
   provider: z.string().optional(),
   quota: quotaSchema.optional(),
-  app_quota: quotaSchema.optional(),
-  app_used_quota: quotaSchema.optional(),
+  app_quota: walletBalanceSchema.optional(),
+  app_used_quota: walletBalanceSchema.optional(),
   request_count: quotaSchema.optional(),
   group: z.string().optional(),
   subscription: z.object({

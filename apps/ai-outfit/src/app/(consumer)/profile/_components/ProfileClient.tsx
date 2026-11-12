@@ -33,7 +33,9 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
   const appUsedQuota = info?.app_used_quota;
   let usedPercentage: number | null = null;
   if (appQuota !== undefined && appUsedQuota !== undefined) {
-    usedPercentage = appQuota + appUsedQuota > 0 ? (appUsedQuota / (appUsedQuota + appQuota)) * 100 : 0;
+    const total = appUsedQuota + appQuota;
+    // 透支（app_quota 为负）时分母可能为非正数，占比无意义，统一按 0 处理并限制在 0–100。
+    usedPercentage = total > 0 ? Math.min(100, Math.max(0, (appUsedQuota / total) * 100)) : 0;
   }
 
   return (
@@ -97,8 +99,10 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
                     <p className="text-sm text-base-content/70">已使用 {usedPercentage.toFixed(0)}%</p>
                   </div>
                 ) : null}
-                {appQuota === 0 ? (
-                  <div className="alert alert-info alert-soft"><span>余额不足，可在下方充值后继续换装。</span></div>
+                {appQuota !== undefined && appQuota <= 0 ? (
+                  <div className={`alert ${appQuota < 0 ? 'alert-warning' : 'alert-info'} alert-soft`}>
+                    <span>{appQuota < 0 ? '钱包已透支，请充值后继续换装。' : '余额不足，可在下方充值后继续换装。'}</span>
+                  </div>
                 ) : null}
               </>
             )}
