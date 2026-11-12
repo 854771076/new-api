@@ -8,7 +8,7 @@ const VIDEO_SECONDS_FIELD = {
 
 const RESOLUTION_DESCRIPTION = { en: "Output video resolution", zh: "输出视频分辨率" };
 
-// The H3 family allows duration 4 to 15 and renders 480P, 768P or 2K.
+// The H3 family allows duration 4 to 15; MiniMax-H3 renders 480P, 768P or 2K.
 const H3_USAGE_SCHEMA = {
   seconds: VIDEO_SECONDS_FIELD,
   resolution: {
@@ -28,6 +28,14 @@ const H3_USAGE_SCHEMA = {
     description: { en: "Input video unit price", zh: "输入视频单价" },
   },
 };
+
+// Only MiniMax-H3 renders 2K; Highspeed, Lite and Max stop at 768P.
+const H3_NO_2K_USAGE_SCHEMA = Object.assign({}, H3_USAGE_SCHEMA, {
+  resolution: {
+    enum: ["480P", "768P"],
+    description: RESOLUTION_DESCRIPTION,
+  },
+});
 
 // Hailuo 2.3 and 2.3-Fast allow duration 6 or 10 at 768P or 1080P.
 const HAILUO_23_USAGE_SCHEMA = {
@@ -141,7 +149,7 @@ export const meta = {
   ],
   usageProfiles: [
     {
-      models: H3_MODELS,
+      models: ["MiniMax-H3"],
       schema: H3_USAGE_SCHEMA,
       examples: [
         { label: "H3 480P 5s", facts: { seconds: 5, resolution: "480P", input_images: 0, input_video_seconds: 0 } },
@@ -149,6 +157,14 @@ export const meta = {
         { label: "H3 2K 5s", facts: { seconds: 5, resolution: "2K", input_images: 0, input_video_seconds: 0 } },
         { label: "H3 2K 5s · 9 images", facts: { seconds: 5, resolution: "2K", input_images: 9, input_video_seconds: 0 } },
         { label: "H3 2K 5s · input video", facts: { seconds: 5, resolution: "2K", input_images: 0, input_video_seconds: 15 } },
+      ],
+    },
+    {
+      models: ["MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"],
+      schema: H3_NO_2K_USAGE_SCHEMA,
+      examples: [
+        { label: "H3 480P 5s", facts: { seconds: 5, resolution: "480P", input_images: 0, input_video_seconds: 0 } },
+        { label: "H3 768P 5s", facts: { seconds: 5, resolution: "768P", input_images: 0, input_video_seconds: 0 } },
       ],
     },
     {
@@ -878,7 +894,11 @@ export function extractUsage(ctx) {
   // reserves them; the completion hook reports the upstream count.
   if (isSpeechModel(ctx.model) || isSpeechModel(model)) {
     const source = speechTextSource(plainObject(req.vendorBody) || req);
-    return { characters: source.text.length };
+    // The text of a file-based task is not known here, so its length stays
+    // unknown until the completion hook reports the upstream count.
+    if (!source.text) return {};
+    // The upstream counts characters as code points, not UTF-16 units.
+    return { characters: Array.from(source.text).length };
   }
   if (isH3(model)) {
     const h3 = h3Request(req, model);

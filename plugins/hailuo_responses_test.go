@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -63,9 +64,14 @@ func TestHailuoUsageProfilesPerModel(t *testing.T) {
 		resolutions []string
 	}{
 		{
-			models:      []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"},
+			models:      []string{"MiniMax-H3"},
 			fields:      []string{"input_images", "input_video_seconds", "resolution", "seconds"},
 			resolutions: []string{"480P", "768P", "2K"},
+		},
+		{
+			models:      []string{"MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"},
+			fields:      []string{"input_images", "input_video_seconds", "resolution", "seconds"},
+			resolutions: []string{"480P", "768P"},
 		},
 		{
 			models:      []string{"MiniMax-Hailuo-2.3", "MiniMax-Hailuo-2.3-Fast"},
@@ -1055,14 +1061,17 @@ func TestHailuoH3FamilyModels(t *testing.T) {
 	}
 	assert.Equal(t, family, routeModels)
 
-	var profile *jsplugin.UsageProfile
-	for index := range plugin.Meta.UsageProfiles {
-		if slices.Contains(plugin.Meta.UsageProfiles[index].Models, "MiniMax-H3-Highspeed") {
-			profile = &plugin.Meta.UsageProfiles[index]
+	// The family is split across usage profiles because only MiniMax-H3
+	// renders 2K; every model still belongs to exactly one profile.
+	for _, model := range family {
+		owners := 0
+		for index := range plugin.Meta.UsageProfiles {
+			if slices.Contains(plugin.Meta.UsageProfiles[index].Models, model) {
+				owners++
+			}
 		}
+		assert.Equal(t, 1, owners, "model %q must belong to exactly one usage profile", model)
 	}
-	require.NotNil(t, profile)
-	assert.Equal(t, family, profile.Models)
 
 	generation := jsplugin.DefaultRegistry.Generation()
 	require.NotNil(t, generation)
@@ -1178,24 +1187,33 @@ func TestHailuoH3FamilyTaskTypeArtifacts(t *testing.T) {
 	}
 }
 
-// The H3 profile prices the family with the resolutions the family renders,
-// and every example is a complete vector over the schema.
-func TestHailuoH3FamilyUsageProfiles(t *testing.T) {
+// The H3 profiles price each variant with the resolutions it renders, every
+// variant belongs to exactly one profile, and every example is a complete
+// vector over the schema of its own profile.
+func TestHailuoH3UsageProfilesFollowResolutionLimits(t *testing.T) {
 	plugin := loadHailuoPlugin(t)
 	family := []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"}
-	profiles := 0
+	profiled := make(map[string]int, len(family))
 	for _, profile := range plugin.Meta.UsageProfiles {
-		if slices.ContainsFunc(profile.Models, func(model string) bool { return slices.Contains(family, model) }) {
-			profiles++
+		for _, model := range profile.Models {
+			if slices.Contains(family, model) {
+				profiled[model]++
+			}
 		}
 	}
-	assert.Equal(t, 1, profiles, "the family shares one usage profile")
+	for _, model := range family {
+		assert.Equal(t, 1, profiled[model], model+" must belong to exactly one usage profile")
+	}
 
 	for _, model := range family {
 		t.Run(model, func(t *testing.T) {
 			schema, examples := plugin.Meta.UsageForModel(model)
 			require.Contains(t, schema, "resolution")
-			assert.Equal(t, []string{"480P", "768P", "2K"}, schema["resolution"].Enum)
+			if model == "MiniMax-H3" {
+				assert.Contains(t, schema["resolution"].Enum, "2K")
+			} else {
+				assert.NotContains(t, schema["resolution"].Enum, "2K")
+			}
 			require.NotEmpty(t, examples)
 			for _, example := range examples {
 				assert.ElementsMatch(t, slices.Collect(maps.Keys(schema)), slices.Collect(maps.Keys(example.Facts)), example.Label)
@@ -1204,6 +1222,16 @@ func TestHailuoH3FamilyUsageProfiles(t *testing.T) {
 				}
 			}
 		})
+	}
+
+	for _, profile := range plugin.Meta.UsageProfiles {
+		if !slices.ContainsFunc(profile.Models, func(model string) bool { return slices.Contains(family, model) }) {
+			continue
+		}
+		keys := slices.Collect(maps.Keys(profile.Schema))
+		for _, example := range profile.Examples {
+			assert.ElementsMatch(t, keys, slices.Collect(maps.Keys(example.Facts)), example.Label)
+		}
 	}
 	assert.Contains(t, plugin.Meta.UsageSchema["resolution"].Enum, "480P")
 }
@@ -1392,7 +1420,7 @@ func TestHailuoAsyncSpeech(t *testing.T) {
 	})
 }
 
-// The speech task reserves its characters from the request itself, so a
+// The speech task reserves the characters of the text it carries, so a
 // billing expression of the model never meets a missing fact at submission.
 func TestHailuoAsyncSpeechSubmitCharacters(t *testing.T) {
 	plugin := loadHailuoPlugin(t)
@@ -1409,15 +1437,6 @@ func TestHailuoAsyncSpeechSubmitCharacters(t *testing.T) {
 				"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
 			},
 			want: float64(len("a long text to speak")),
-		},
-		{
-			name: "text_file_id path",
-			body: map[string]any{
-				"model":         "speech-2.8-hd",
-				"text_file_id":  "file_123",
-				"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
-			},
-			want: float64(0),
 		},
 	}
 	for _, testCase := range testCases {
@@ -1441,6 +1460,59 @@ func TestHailuoAsyncSpeechSubmitCharacters(t *testing.T) {
 			assert.Equal(t, testCase.want, characters)
 		})
 	}
+}
+
+// The upstream bills the characters of the text it speaks as code points, so
+// an astral character reserves one character and not two UTF-16 units.
+func TestHailuoSpeechSubmitCountsCodePoints(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	text := "a long text to speak 😀"
+	intent := callHailuoNative(t, plugin, "createSpeechTask", map[string]any{
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model":         "speech-2.8-hd",
+			"text":          text,
+			"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+		}},
+	})
+	requestBody, ok := intent["requestBody"].(map[string]any)
+	require.True(t, ok)
+
+	facts := callHailuoHook(t, plugin, "extractUsage", map[string]any{
+		"usagePurpose":  "facts",
+		"requestBody":   requestBody,
+		"model":         "speech-2.8-hd",
+		"upstreamModel": "speech-2.8-hd",
+	})
+	require.Contains(t, facts, "characters")
+	characters, ok := facts["characters"].(float64)
+	require.True(t, ok, "characters must be a number")
+	assert.Equal(t, float64(len([]rune(text))), characters)
+	assert.Equal(t, float64(len(utf16.Encode([]rune(text)))-1), characters, "an astral character is one character, not two UTF-16 units")
+}
+
+// A speech task that speaks a file has no text to measure, so the reservation
+// reports no character count at all; the completion hook reports the count the
+// upstream bills.
+func TestHailuoSpeechFileRequestReservesNoCharacters(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	intent := callHailuoNative(t, plugin, "createSpeechTask", map[string]any{
+		"body": map[string]any{"kind": "json", "value": map[string]any{
+			"model":         "speech-2.8-hd",
+			"text_file_id":  "file_123",
+			"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+		}},
+	})
+	requestBody, ok := intent["requestBody"].(map[string]any)
+	require.True(t, ok)
+
+	facts := callHailuoHook(t, plugin, "extractUsage", map[string]any{
+		"usagePurpose":  "facts",
+		"requestBody":   requestBody,
+		"model":         "speech-2.8-hd",
+		"upstreamModel": "speech-2.8-hd",
+	})
+	require.NotNil(t, facts)
+	assert.NotContains(t, facts, "characters")
 }
 
 // The content array is the only shape that carries a reference image or
