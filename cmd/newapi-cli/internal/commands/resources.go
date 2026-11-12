@@ -156,26 +156,70 @@ func newTokenCmd() *cobra.Command {
 
 func newLogCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "log", Short: "Inspect logs"}
-	var p, pageSize int
-	var logType string
+	var p, pageSize, logType, channel int
+	var startTS, endTS int64
+	var modelName, tokenName, group, requestID, upstreamRequestID, username string
 	list := &cobra.Command{
 		Use:   "list",
-		Short: "List logs",
+		Short: "List usage logs",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			extra := ""
-			if logType != "" {
-				if _, err := strconv.Atoi(logType); err != nil {
-					return &CommandError{ExitCode: ExitUsage, Code: "usage_error", Message: "--type must be a number"}
-				}
-				extra = "&type=" + url.QueryEscape(logType)
+			q := url.Values{}
+			q.Set("p", strconv.Itoa(p))
+			q.Set("page_size", strconv.Itoa(pageSize))
+			if logType != 0 {
+				q.Set("type", strconv.Itoa(logType))
 			}
-			return runData(cmd, http.MethodGet, listPath("log", p, pageSize, extra), nil)
+			if startTS != 0 {
+				q.Set("start_timestamp", strconv.FormatInt(startTS, 10))
+			}
+			if endTS != 0 {
+				q.Set("end_timestamp", strconv.FormatInt(endTS, 10))
+			}
+			if modelName != "" {
+				q.Set("model_name", modelName)
+			}
+			if tokenName != "" {
+				q.Set("token_name", tokenName)
+			}
+			if group != "" {
+				q.Set("group", group)
+			}
+			if requestID != "" {
+				q.Set("request_id", requestID)
+			}
+			if upstreamRequestID != "" {
+				q.Set("upstream_request_id", upstreamRequestID)
+			}
+			if username != "" {
+				q.Set("username", username)
+			}
+			if channel != 0 {
+				q.Set("channel", strconv.Itoa(channel))
+			}
+			return runData(cmd, http.MethodGet, "/api/log/?"+q.Encode(), nil)
 		},
 	}
 	addPageFlags(list, &p, &pageSize)
-	list.Flags().StringVar(&logType, "type", "", "log type filter (numeric)")
-	cmd.AddCommand(list)
+	list.Flags().IntVar(&logType, "type", 0, "log type filter")
+	list.Flags().Int64Var(&startTS, "start-timestamp", 0, "start timestamp (unix seconds)")
+	list.Flags().Int64Var(&endTS, "end-timestamp", 0, "end timestamp (unix seconds)")
+	list.Flags().StringVar(&modelName, "model-name", "", "model name filter")
+	list.Flags().StringVar(&tokenName, "token-name", "", "token name filter")
+	list.Flags().StringVar(&group, "group", "", "group filter")
+	list.Flags().StringVar(&requestID, "request-id", "", "request id filter")
+	list.Flags().StringVar(&upstreamRequestID, "upstream-request-id", "", "upstream request id filter")
+	list.Flags().StringVar(&username, "username", "", "username filter")
+	list.Flags().IntVar(&channel, "channel", 0, "channel id filter")
+	files := &cobra.Command{
+		Use:   "files",
+		Short: "List server log files",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runData(cmd, http.MethodGet, "/api/performance/logs", nil)
+		},
+	}
+	cmd.AddCommand(list, files)
 	return cmd
 }
 

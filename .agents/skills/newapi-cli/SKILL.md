@@ -76,6 +76,7 @@ fails with HTTP 403, code `ACCESS_TOKEN_SCOPE_DENIED`, exit code 2 — re-run
 | `channel list`, `channel get` | `channel:read` |
 | `token list`, `token get`, `token create` | `api_key:read`, `api_key:write` |
 | `log list` | `log:read` |
+| `log files` | `ops:read` (also requires a root-role token) |
 | `option get` | `option:read` |
 | `option update` | `option:write` |
 | `plan list`, `product list`, `product orders` | `billing:read` |
@@ -101,7 +102,11 @@ auth login|status|logout
 user   list [--p 1] [--page-size 20] [--app-id <id>] | get <id>
 channel list [--p 1] [--page-size 20] | get <id>
 token  list [--p 1] [--page-size 20] | get <id> | create --name <name> [flags]
-log    list [--p 1] [--page-size 20] [--type <n>]
+log    list [--p 1] [--page-size 20] [--type <n>] [--start-timestamp <s>]
+            [--end-timestamp <s>] [--model-name <m>] [--token-name <t>]
+            [--group <g>] [--request-id <id>] [--upstream-request-id <id>]
+            [--username <u>] [--channel <id>]
+        | files
 option get <key> | update <key>=<value>
 plan   list [--p 1] [--page-size 20] [--app-id <id>]
         | create --title <title> [flags]
