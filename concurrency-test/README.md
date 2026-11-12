@@ -2,17 +2,28 @@
 
 本目录是并发控制(02-01..02-17)与 EWMA 负载均衡追加轮的**自建集成测试脚本**与实测报告,全部脚本针对**测试者自建的本地/内网测试网关**运行,不接触任何生产环境。
 
-## 凭据声明(密钥扫描豁免)
+## 凭据声明(脚本内不含真实凭据)
 
-脚本内出现的 token 与密码均为自建测试实例的凭据,泄露无影响:
+脚本**不硬编码任何真实 token / 密码 / 内网地址**。所有凭据与目标地址从环境变量读取,缺省值是占位符或本地默认:
 
-| 凭据 | 性质 | 所在脚本 |
-|------|------|----------|
-| `h5LJ3…N9gYObt` | 本地网关(127.0.0.1:3001)名为 `concurrency-test` 的测试 token(limit 3/5),实例销毁即失效 | load-test / queue-test / queue-scenario-test / retry-load-test / test-local / hold-buckets |
-| `sk-aFDp…qawqIXnmnJ` | 内网测试网关(upstream.example.internal:30000)测试 token | test.mjs |
-| `root` / `<test-password>` | 本地测试实例 root 初始密码(自建实例,非任何共享/生产系统) | coding-client-sim / lb-setup / loadbalance-ewma-test / queue-scenario-test |
+| 变量 | 用途 | 缺省 | 用到它的脚本 |
+|------|------|------|----------|
+| `ADMIN_USER` / `ADMIN_PASSWORD` | 本地测试实例 root 登录 | `root` / 空 | coding-client-sim / lb-setup / loadbalance-ewma-test / queue-scenario-test |
+| `TEST_BASE_URL` / `TEST_API_KEY` | 被测网关地址与 token | `http://upstream.example.internal:30000` / 空 | test.mjs |
+| `UPSTREAM_HOST` / `UPSTREAM_PORT` | 延迟代理的上游地址 | `upstream.example.internal` / `30000` | delay-proxy.mjs |
+| `SIM_KEY` / `SIM_CONFIG` / `SIM_CLIENTS` / `SIM_REQUESTS` | 接入方画像模拟参数 | 见脚本头注释 | coding-client-sim.mjs |
+| `LOAD_DURATION_MS` / `LOAD_BURST` / `LOAD_INTERVAL_MS` | 持续打流参数 | 见脚本头注释 | load-test / queue-test / retry-load-test 等 |
 
-这些值是集成测试自建内容的一部分,密钥扫描(gitleaks、detect-secrets 等)应跳过本目录——仓库根 `.gitleaks.toml` 已对 `concurrency-test/` 做 allowlist,行内同时带 `gitleaks:allow` / `pragma: allowlist secret` 标注。若复制本目录到新环境,先在自建实例上重建同名 token 再替换。
+`config.json` 是**唯一配置源**(已 git-exclude,填凭据不入库),`integration-run.mjs` / `capacity-run.mjs` 读它;其余脚本走环境变量。
+
+使用前在自建实例上重建 token 并设好环境变量即可:
+
+```bash
+export ADMIN_USER=root ADMIN_PASSWORD='<你的实例密码>'
+export TEST_BASE_URL='http://127.0.0.1:3001' TEST_API_KEY='<你的测试 token>'
+```
+
+仓库根 `.gitleaks.toml` 仍对 `concurrency-test/` 做 allowlist(该目录历史上含过自建测试凭据,扫描豁免以免误报),但目录内已不再保留真实值。
 
 ## 文档索引
 
