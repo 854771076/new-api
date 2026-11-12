@@ -29,7 +29,8 @@ type QuoteData = {
   unparsed_count: number;
 };
 
-type GenerateData = { id: string; result_path?: string | null; deduped?: boolean };
+type GenerateData = { id: string; result_path?: string | null; result_bucket?: string | null; deduped?: boolean };
+type ResultState = { id: string; bucket: string; path: string };
 type AdvanceData = {
   status: 'pending' | 'succeeded' | 'failed';
   stage: string;
@@ -138,6 +139,7 @@ export function StudioClient({
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [result, setResult] = useState<ResultState | null>(null);
   const [quote, setQuote] = useState<QuoteData | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
@@ -263,13 +265,19 @@ export function StudioClient({
           : failureMessage(res, '生成失败，请稍后重试'));
       }
       const created = data.data as GenerateData;
-      // 幂等命中且已有结果：直接跳历史，不再推进。
-      if (created.result_path) {
-        router.push('/history');
+      // 幂等命中且已有结果：直接展示结果，不再推进。
+      if (created.result_path && created.result_bucket) {
+        setResult({ id: created.id, bucket: created.result_bucket, path: created.result_path });
         return;
       }
       // 创建任务后由前端逐次调用 /advance 单步推进，避开 Hobby 60s 硬超时。
-      if (await pollUntilDone(created.id)) router.push('/history');
+      const adv = await pollUntilDone(created.id);
+      if (adv?.result_path && adv.result_bucket) {
+        setResult({ id: created.id, bucket: adv.result_bucket, path: adv.result_path });
+      } else if (adv) {
+        // 成功但缺少结果路径（异常情况）：退回历史页查看记录。
+        router.push('/history');
+      }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -277,14 +285,14 @@ export function StudioClient({
     }
   }
 
-  async function pollUntilDone(id: string): Promise<boolean> {
+  async function pollUntilDone(id: string): Promise<AdvanceData | null> {
     for (let i = 0; i < MAX_ADVANCE_ATTEMPTS; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, ADVANCE_INTERVAL_MS));
       const res = await fetch(`/api/generate/${id}/advance`, { method: 'POST' });
       const data: Envelope = await readEnvelope(res);
       if (res.status === 401) {
         router.replace('/login?error=session_expired');
-        return false;
+        return null;
       }
       if (!res.ok || !data.success || !data.data) {
         throw new Error(typeof data.message === 'string' && data.message
@@ -292,7 +300,7 @@ export function StudioClient({
           : failureMessage(res, '生成过程中断，请稍后在「历史」中查看结果'));
       }
       const adv = data.data as AdvanceData;
-      if (adv.status === 'succeeded') return true;
+      if (adv.status === 'succeeded') return adv;
       if (adv.status === 'failed') throw new Error(adv.error || '生成失败，请稍后重试');
       // pending：继续轮询
     }
@@ -331,6 +339,23 @@ export function StudioClient({
         </ul>
       </header>
 
+      {result ? (
+        <section className="card card-border bg-base-100 shadow-md" aria-labelledby="result-title">
+          <div className="card-body items-center gap-5 p-4 text-center sm:p-8">
+            <h2 id="result-title" className="card-title text-xl"><span className="badge badge-success">完成</span>生成完成</h2>
+            <div className="w-full max-w-md overflow-hidden rounded-box bg-base-200">
+              {/* 结果图走媒体代理动态签名，不能用 next/image */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={`/api/media/${result.bucket}/${result.path}`} alt="换装结果" className="h-auto w-full object-contain" />
+            </div>
+            <div className="flex flex-wrap justify-center gap-2">
+              <Link href="/history" className="btn btn-primary min-h-11 gap-2">去作品历史 <ChevronRight size={16} aria-hidden="true" /></Link>
+              <button type="button" className="btn btn-ghost min-h-11" onClick={() => { setResult(null); setStep(1); }}>再生成一次</button>
+            </div>
+          </div>
+        </section>
+      ) : (
+        <>
       {/* Step 1 — 人物 */}
       {step === 1 ? (
         <section className="card card-border bg-base-100 shadow-sm" aria-labelledby="step-1-title">
@@ -612,6 +637,9 @@ export function StudioClient({
           </div>
         </section>
       ) : null}
+
+        </>
+      )}
 
       <dialog ref={charDialog} className="modal" aria-labelledby="char-upload-title" onClose={() => setCharUploadOpen(false)}>
         <div className="modal-box max-w-lg">
