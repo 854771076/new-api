@@ -48,3 +48,6 @@ go.work.sum
 
 # Supabase CLI scratch dir (contains .temp/ linked project metadata)
 /supabase/
+
+# GSD planning artifacts (local-only, never committed)
+.planning/
