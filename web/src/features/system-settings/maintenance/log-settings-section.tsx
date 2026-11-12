@@ -47,6 +47,7 @@ import { useUpdateOption } from '../hooks/use-update-option'
 import { safeNumberFieldProps } from '../utils/numeric-field'
 import { HistoryLogCleanup } from './history-log-cleanup'
 import { ServerLogFiles } from './server-log-files'
+import { ServerLogViewer } from './server-log-viewer'
 
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
@@ -217,6 +218,10 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
       <Separator />
 
       <ServerLogFiles />
+
+      <Separator />
+
+      <ServerLogViewer />
     </SettingsSection>
   )
 }

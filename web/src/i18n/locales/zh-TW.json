@@ -7504,6 +7504,19 @@
     "Zhipu": "智譜",
     "Zhipu GLM": "智譜GLM",
     "Zhipu V4": "智譜 V4",
-    "Zoom": "縮放"
+    "Zoom": "縮放",
+    "View Server Logs": "查看伺服器日誌",
+    "Inspect server log files: view the tail of a file or search recent entries by keyword.": "查看日誌檔案末尾內容，或按關鍵字檢索最近的日誌。",
+    "Tail": "末尾",
+    "Log File": "日誌檔案",
+    "Lines": "行數",
+    "Load": "載入",
+    "Keyword": "關鍵字",
+    "Since": "時間範圍",
+    "Limit": "上限",
+    "No log files available": "沒有可用的日誌檔案",
+    "No matches found": "未找到符合項目",
+    "{{count}} matches": "{{count}} 筆符合",
+    "Log content truncated": "日誌內容已截斷"
   }
 }

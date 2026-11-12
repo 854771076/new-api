@@ -7504,6 +7504,19 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "View Server Logs": "Просмотр журналов сервера",
+    "Inspect server log files: view the tail of a file or search recent entries by keyword.": "Просматривайте конец файла журнала или ищите недавние записи по ключевому слову.",
+    "Tail": "Хвост",
+    "Log File": "Файл журнала",
+    "Lines": "Строк",
+    "Load": "Загрузить",
+    "Keyword": "Ключевое слово",
+    "Since": "Период",
+    "Limit": "Лимит",
+    "No log files available": "Нет доступных файлов журнала",
+    "No matches found": "Совпадений не найдено",
+    "{{count}} matches": "{{count}} совпадений",
+    "Log content truncated": "Содержимое журнала обрезано"
   }
 }

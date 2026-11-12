@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -340,6 +341,201 @@ func CleanupLogFiles(c *gin.Context) {
 		"message": "",
 		"data":    result,
 	})
+}
+
+// LogFileContentResponse 日志文件末尾内容响应。
+type LogFileContentResponse struct {
+	File      string   `json:"file"`
+	LineCount int      `json:"line_count"`
+	Truncated bool     `json:"truncated"`
+	Lines     []string `json:"lines"`
+}
+
+// LogSearchMatch 一条命中的日志行。
+type LogSearchMatch struct {
+	File string `json:"file"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
+}
+
+// LogSearchResponse 日志关键词检索结果。
+type LogSearchResponse struct {
+	Keyword      string           `json:"keyword"`
+	Since        string           `json:"since"`
+	FilesScanned int              `json:"files_scanned"`
+	Matched      int              `json:"matched"`
+	Truncated    bool             `json:"truncated"`
+	Lines        []LogSearchMatch `json:"lines"`
+}
+
+// maxLogContentBytes / maxLogSearchBytes 限定单次读取日志文件的字节上限，避免读取
+// 超大文件占用过多内存。日志行通常很短，8/32 MB 已足够覆盖排查所需内容。
+const (
+	maxLogContentBytes = 8 << 20
+	maxLogSearchBytes  = 32 << 20
+)
+
+// readLogTail 读取 path 末尾至多 maxBytes 字节并返回其中的行。truncated 表示文件
+// 超过了窗口、起始部分被跳过；返回的行会去掉因 seek 造成的残缺首行与末尾换行
+// 产生的空行。
+func readLogTail(path string, maxBytes int64) ([]string, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := false
+	offset := int64(0)
+	if info.Size() > maxBytes {
+		offset = info.Size() - maxBytes
+		truncated = true
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, false, err
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if truncated && len(lines) > 0 {
+		lines = lines[1:]
+	}
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, truncated, nil
+}
+
+// GetLogFileContent 读取指定日志文件的末尾若干行。
+func GetLogFileContent(c *gin.Context) {
+	name := c.Query("file")
+	if name == "" {
+		common.ApiErrorMsg(c, "file parameter is required")
+		return
+	}
+	if *common.LogDir == "" {
+		common.ApiErrorMsg(c, "log directory not configured")
+		return
+	}
+	files, err := getLogFiles()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	// 只允许读取日志目录中真实存在的文件，天然阻止路径穿越。
+	found := false
+	for _, f := range files {
+		if f.Name == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		common.ApiErrorMsg(c, "log file not found")
+		return
+	}
+
+	lines := 200
+	if raw := c.Query("lines"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			common.ApiErrorMsg(c, "lines must be a positive integer")
+			return
+		}
+		if n > 5000 {
+			n = 5000
+		}
+		lines = n
+	}
+
+	content, truncated, err := readLogTail(filepath.Join(*common.LogDir, name), maxLogContentBytes)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if len(content) > lines {
+		content = content[len(content)-lines:]
+	}
+	common.ApiSuccess(c, LogFileContentResponse{
+		File:      name,
+		LineCount: len(content),
+		Truncated: truncated,
+		Lines:     content,
+	})
+}
+
+// SearchLogFiles 在最近时间段内的日志文件中按关键词检索。
+func SearchLogFiles(c *gin.Context) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	if keyword == "" {
+		common.ApiErrorMsg(c, "keyword parameter is required")
+		return
+	}
+	sinceStr := c.DefaultQuery("since", "24h")
+	since, err := time.ParseDuration(sinceStr)
+	if err != nil || since <= 0 {
+		common.ApiErrorMsg(c, "since must be a positive Go duration such as 1h or 30m")
+		return
+	}
+	limit := 200
+	if raw := c.Query("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			common.ApiErrorMsg(c, "limit must be a positive integer")
+			return
+		}
+		if n > 1000 {
+			n = 1000
+		}
+		limit = n
+	}
+
+	resp := LogSearchResponse{Keyword: keyword, Since: sinceStr, Lines: []LogSearchMatch{}}
+	if *common.LogDir == "" {
+		common.ApiSuccess(c, resp)
+		return
+	}
+	files, err := getLogFiles()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	cutoff := time.Now().Add(-since)
+	lower := strings.ToLower(keyword)
+search:
+	for _, f := range files {
+		if f.ModTime.Before(cutoff) {
+			continue
+		}
+		resp.FilesScanned++
+		lines, truncated, err := readLogTail(filepath.Join(*common.LogDir, f.Name), maxLogSearchBytes)
+		if err != nil {
+			continue
+		}
+		if truncated {
+			resp.Truncated = true
+		}
+		for i, line := range lines {
+			if !strings.Contains(strings.ToLower(line), lower) {
+				continue
+			}
+			resp.Lines = append(resp.Lines, LogSearchMatch{File: f.Name, Line: i + 1, Text: line})
+			resp.Matched++
+			if resp.Matched >= limit {
+				resp.Truncated = true
+				break search
+			}
+		}
+	}
+	common.ApiSuccess(c, resp)
 }
 
 // getDiskCacheInfo 获取磁盘缓存目录信息

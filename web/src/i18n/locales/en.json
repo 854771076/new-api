@@ -7504,6 +7504,19 @@
     "Zhipu": "Zhipu",
     "Zhipu GLM": "Zhipu GLM",
     "Zhipu V4": "Zhipu V4",
-    "Zoom": "Zoom"
+    "Zoom": "Zoom",
+    "View Server Logs": "View Server Logs",
+    "Inspect server log files: view the tail of a file or search recent entries by keyword.": "Inspect server log files: view the tail of a file or search recent entries by keyword.",
+    "Tail": "Tail",
+    "Log File": "Log File",
+    "Lines": "Lines",
+    "Load": "Load",
+    "Keyword": "Keyword",
+    "Since": "Since",
+    "Limit": "Limit",
+    "No log files available": "No log files available",
+    "No matches found": "No matches found",
+    "{{count}} matches": "{{count}} matches",
+    "Log content truncated": "Log content truncated"
   }
 }

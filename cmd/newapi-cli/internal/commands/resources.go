@@ -219,7 +219,116 @@ func newLogCmd() *cobra.Command {
 			return runData(cmd, http.MethodGet, "/api/performance/logs", nil)
 		},
 	}
-	cmd.AddCommand(list, files)
+	var tailLines int
+	var follow bool
+	tail := &cobra.Command{
+		Use:   "tail <file>",
+		Short: "Print the end of a server log file",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := newClient()
+			if err != nil {
+				return err
+			}
+			q := url.Values{}
+			q.Set("file", args[0])
+			q.Set("lines", strconv.Itoa(tailLines))
+			path := "/api/performance/logs/content?" + q.Encode()
+			out := cmd.OutOrStdout()
+			fetch := func() ([]string, error) {
+				data, err := c.Do(http.MethodGet, path, nil)
+				if err != nil {
+					return nil, mapClientErr(err)
+				}
+				var resp struct {
+					Lines []string `json:"lines"`
+				}
+				if err := json.Unmarshal(data, &resp); err != nil {
+					return nil, generalErr("unexpected response: %v", err)
+				}
+				return resp.Lines, nil
+			}
+			lines, err := fetch()
+			if err != nil {
+				return err
+			}
+			for _, line := range lines {
+				fmt.Fprintln(out, line)
+			}
+			if !follow {
+				return nil
+			}
+			prev := ""
+			if len(lines) > 0 {
+				prev = lines[len(lines)-1]
+			}
+			for {
+				time.Sleep(2 * time.Second)
+				next, err := fetch()
+				if err != nil {
+					return err
+				}
+				start := len(next)
+				for i := len(next) - 1; i >= 0; i-- {
+					if next[i] == prev {
+						start = i + 1
+						break
+					}
+				}
+				for _, line := range next[start:] {
+					fmt.Fprintln(out, line)
+				}
+				if len(next) > 0 {
+					prev = next[len(next)-1]
+				}
+			}
+		},
+	}
+	tail.Flags().IntVar(&tailLines, "lines", 200, "number of lines from the end")
+	tail.Flags().BoolVar(&follow, "follow", false, "keep tailing and print new lines")
+	var searchSince string
+	var searchLimit int
+	search := &cobra.Command{
+		Use:   "search <keyword>",
+		Short: "Search recent server logs for a keyword",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := newClient()
+			if err != nil {
+				return err
+			}
+			q := url.Values{}
+			q.Set("keyword", args[0])
+			q.Set("since", searchSince)
+			q.Set("limit", strconv.Itoa(searchLimit))
+			data, err := c.Do(http.MethodGet, "/api/performance/logs/search?"+q.Encode(), nil)
+			if err != nil {
+				return mapClientErr(err)
+			}
+			var resp struct {
+				Matched int `json:"matched"`
+				Lines   []struct {
+					File string `json:"file"`
+					Line int    `json:"line"`
+					Text string `json:"text"`
+				} `json:"lines"`
+			}
+			if err := json.Unmarshal(data, &resp); err != nil {
+				return generalErr("unexpected response: %v", err)
+			}
+			if resp.Matched == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "(no matches)")
+				return nil
+			}
+			for _, m := range resp.Lines {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s:%d: %s\n", m.File, m.Line, m.Text)
+			}
+			return nil
+		},
+	}
+	search.Flags().StringVar(&searchSince, "since", "24h", "only scan files modified within this duration (e.g. 1h, 30m)")
+	search.Flags().IntVar(&searchLimit, "limit", 200, "maximum number of matches")
+	cmd.AddCommand(list, files, tail, search)
 	return cmd
 }
 
