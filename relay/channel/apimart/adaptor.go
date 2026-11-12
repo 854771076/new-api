@@ -15,6 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// imageNotSupportedMessage explains that APIMart image generation is served by
+// the APIMart task plugin, not by this channel.
+const imageNotSupportedMessage = "apimart channel: image generation is not supported here, use the APIMart task plugin instead"
+
 type Adaptor struct {
 }
 
@@ -48,7 +52,12 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
-	return nil, errors.New("apimart channel: image generation is not supported here, use the APIMart task plugin instead")
+	return nil, types.NewErrorWithStatusCode(
+		errors.New(imageNotSupportedMessage),
+		types.ErrorCodeInvalidRequest,
+		http.StatusBadRequest,
+		types.ErrOptionWithSkipRetry(),
+	)
 }
 
 func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.OpenAIResponsesRequest) (any, error) {
@@ -61,8 +70,6 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	switch info.RelayMode {
-	case relayconstant.RelayModeImagesGenerations, relayconstant.RelayModeImagesEdits:
-		usage, err = openai.OpenaiImageHandler(c, info, resp)
 	case relayconstant.RelayModeResponses:
 		if info.IsStream {
 			usage, err = openai.OaiResponsesStreamHandler(c, info, resp)
@@ -70,6 +77,17 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			usage, err = openai.OaiResponsesHandler(c, info, resp)
 		}
 	default:
+		// The channel serves no image path: an image request that reaches the
+		// response stage is refused instead of being handled as chat.
+		if info.RelayMode == relayconstant.RelayModeImagesGenerations || info.RelayMode == relayconstant.RelayModeImagesEdits {
+			err = types.NewErrorWithStatusCode(
+				errors.New(imageNotSupportedMessage),
+				types.ErrorCodeInvalidRequest,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
+			return
+		}
 		if info.IsStream {
 			usage, err = openai.OaiStreamHandler(c, info, resp)
 		} else {

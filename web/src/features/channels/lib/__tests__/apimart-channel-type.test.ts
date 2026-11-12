@@ -24,7 +24,9 @@ import { describe, expect, test } from 'vitest'
 import {
   CHANNEL_PROVIDER_PRESENTATION,
   CHANNEL_TYPE_APIMART,
+  CHANNEL_TYPE_DISPLAY_ORDER,
   CHANNEL_TYPE_OPTIONS,
+  CHANNEL_TYPE_VLLM,
   CHANNEL_TYPES,
   MODEL_FETCHABLE_TYPES,
 } from '../../constants'
@@ -82,6 +84,30 @@ describe('APIMart channel type', () => {
           option.value === CHANNEL_TYPE_APIMART && option.label === APIMART_BRAND
       )
     ).toBe(true)
+  })
+
+  test('keeps the APIMart channel type in the channel type display order', () => {
+    expect(CHANNEL_TYPE_DISPLAY_ORDER).toContain(CHANNEL_TYPE_APIMART)
+  })
+
+  test('keeps the display order inside the built channel type options', () => {
+    const positions = CHANNEL_TYPE_DISPLAY_ORDER.slice(0, 3).map((id) =>
+      CHANNEL_TYPE_OPTIONS.findIndex((option) => option.value === id)
+    )
+
+    expect(positions.every((position) => position >= 0)).toBe(true)
+    expect(positions).toEqual([...positions].sort((a, b) => a - b))
+  })
+
+  test('lists the APIMart channel type beside its neighbouring channel types', () => {
+    const apimartIndex = CHANNEL_TYPE_OPTIONS.findIndex(
+      (option) => option.value === CHANNEL_TYPE_APIMART
+    )
+    const vllmIndex = CHANNEL_TYPE_OPTIONS.findIndex(
+      (option) => option.value === CHANNEL_TYPE_VLLM
+    )
+
+    expect(apimartIndex).toBe(vllmIndex + 1)
   })
 
   test('ships the APIMart label and description in every locale', () => {
