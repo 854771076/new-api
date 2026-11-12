@@ -18,6 +18,27 @@ type SubscriptionPlanDTO struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+// PublicPricingPlan is the reduced subscription-plan view exposed to anonymous
+// visitors on the /pricing page. It omits payment-provider identifiers and
+// admin-only configuration fields that must not leak to unauthenticated users.
+type PublicPricingPlan struct {
+	Id                      int     `json:"id"`
+	Title                   string  `json:"title"`
+	Subtitle                string  `json:"subtitle"`
+	PriceAmount             float64 `json:"price_amount"`
+	Currency                string  `json:"currency"`
+	DurationUnit            string  `json:"duration_unit"`
+	DurationValue           int     `json:"duration_value"`
+	CustomSeconds           int64   `json:"custom_seconds"`
+	TotalAmount             int64   `json:"total_amount"`
+	QuotaResetPeriod        string  `json:"quota_reset_period"`
+	QuotaResetCustomSeconds int64   `json:"quota_reset_custom_seconds"`
+}
+
+type PublicPricingPlanDTO struct {
+	Plan PublicPricingPlan `json:"plan"`
+}
+
 type BillingPreferenceRequest struct {
 	BillingPreference string `json:"billing_preference"`
 }
@@ -49,6 +70,44 @@ func GetSubscriptionPlans(c *gin.Context) {
 		})
 	}
 	common.ApiSuccess(c, result)
+}
+
+// GetPublicPricingPlans serves anonymous pricing-disclosure data for the
+// public /pricing page: enabled subscription plans plus the top-up amount
+// options. Unlike GetSubscriptionPlans it does not gate on payment-compliance
+// confirmation, because disclosing prices publicly is itself a compliance
+// requirement.
+func GetPublicPricingPlans(c *gin.Context) {
+	plans, err := model.ListEnabledSubscriptionPlans(0)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	result := make([]PublicPricingPlanDTO, 0, len(plans))
+	for _, p := range plans {
+		result = append(result, PublicPricingPlanDTO{
+			Plan: PublicPricingPlan{
+				Id:                      p.Id,
+				Title:                   p.Title,
+				Subtitle:                p.Subtitle,
+				PriceAmount:             p.PriceAmount,
+				Currency:                p.Currency,
+				DurationUnit:            p.DurationUnit,
+				DurationValue:           p.DurationValue,
+				CustomSeconds:           p.CustomSeconds,
+				TotalAmount:             p.TotalAmount,
+				QuotaResetPeriod:        p.QuotaResetPeriod,
+				QuotaResetCustomSeconds: p.QuotaResetCustomSeconds,
+			},
+		})
+	}
+
+	paySetting := operation_setting.GetPaymentSetting()
+	common.ApiSuccess(c, gin.H{
+		"plans":                result,
+		"topup_amount_options": paySetting.AmountOptions,
+		"topup_discount":       paySetting.AmountDiscount,
+	})
 }
 
 func GetSubscriptionSelf(c *gin.Context) {

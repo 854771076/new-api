@@ -97,6 +97,20 @@ function tieredTokenQuota(
   return Math.round((rawCost / 1_000_000) * quotaPerUnit * ratio);
 }
 
+// 倍率计费：对齐网关 text_quota 的公式
+// quota = (text + image×image_ratio + output×completion_ratio) × model_ratio × group_ratio。
+// model_ratio / image_ratio 是无单位倍率，不乘 quota_per_unit、不除 1M。
+function ratioQuota(
+  tokens: TokenEstimates,
+  entry: GatewayPricingEntry,
+  ratio: number,
+): number {
+  const imageRatio = entry.image_ratio && entry.image_ratio > 0 ? entry.image_ratio : 1;
+  const completionRatio = entry.completion_ratio > 0 ? entry.completion_ratio : 1;
+  const weighted = tokens.text + tokens.image * imageRatio + tokens.output * completionRatio;
+  return Math.round(weighted * entry.model_ratio * ratio);
+}
+
 // 生图模型单张额度（n=1）。tiered_expr 优先按表达式折算，否则回退旧 model_price / image_ratio / model_ratio。
 export function estimateImageQuota(pricing: GatewayPricing, modelName: string): number {
   const entry = findEntry(pricing.data, modelName);
@@ -111,12 +125,12 @@ export function estimateImageQuota(pricing: GatewayPricing, modelName: string): 
       output: EST_IMAGE_OUTPUT_TOKENS,
     }, pricing.quota_per_unit, ratio);
   }
-  const unit = entry.quota_type === 1
-    ? entry.model_price
-    : typeof entry.image_ratio === 'number'
-      ? entry.image_ratio
-      : entry.model_ratio;
-  return Math.round(unit * pricing.quota_per_unit * ratio);
+  if (entry.quota_type === 1) return Math.round(entry.model_price * pricing.quota_per_unit * ratio);
+  return ratioQuota({
+    text: EST_IMAGE_PROMPT_TOKENS,
+    image: EST_IMAGE_TOKENS_PER_REF * EST_IMAGE_REF_COUNT,
+    output: EST_IMAGE_OUTPUT_TOKENS,
+  }, entry, ratio);
 }
 
 // 视觉模型单件解析额度。tiered_expr 优先按表达式折算，否则回退旧 model_price / model_ratio。
@@ -134,7 +148,11 @@ export function estimateVisionQuota(pricing: GatewayPricing, modelName: string):
     }, pricing.quota_per_unit, ratio);
   }
   if (entry.quota_type === 1) return Math.round(entry.model_price * pricing.quota_per_unit * ratio);
-  return Math.round(entry.model_ratio * pricing.quota_per_unit / 1_000_000 * EST_VISION_OUTPUT_TOKENS * ratio);
+  return ratioQuota({
+    text: EST_VISION_PROMPT_TOKENS,
+    image: EST_VISION_IMAGE_TOKENS,
+    output: EST_VISION_OUTPUT_TOKENS,
+  }, entry, ratio);
 }
 
 /** 拉取网关定价并折算为 quote 需要的 parsePrice / tryonPrice。 */
