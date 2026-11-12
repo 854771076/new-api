@@ -531,6 +531,13 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			}
 			modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "whisper-1")
 			relayMode = relayconstant.RelayModeAudioTranscription
+		} else if strings.HasPrefix(c.Request.URL.Path, "/v1/audio/voice/clone") {
+			// 音色克隆的模型语义与 TTS 不同，不套用 tts-1 默认模型
+			relayMode = relayconstant.RelayModeAudioVoiceClone
+		} else if strings.HasPrefix(c.Request.URL.Path, "/v1/audio/voice/design") {
+			relayMode = relayconstant.RelayModeAudioVoiceDesign
+		} else if strings.HasPrefix(c.Request.URL.Path, "/v1/audio/music") {
+			relayMode = relayconstant.RelayModeAudioMusic
 		}
 		c.Set("relay_mode", relayMode)
 	}

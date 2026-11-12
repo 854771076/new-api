@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -60,6 +61,15 @@ func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dt
 	return request, err
 }
 
+// audioMediaMetadata holds the vendor specific fields that clients pass through
+// the OpenAI audio request's metadata object, the only vendor extension slot
+// dto.AudioRequest offers.
+type audioMediaMetadata struct {
+	FileID      any    `json:"file_id"`
+	PreviewText string `json:"preview_text"`
+	Lyrics      string `json:"lyrics"`
+}
+
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
 	audioRequest := &dto.AudioRequest{}
 	err := common.UnmarshalBodyReusable(c, audioRequest)
@@ -70,6 +80,46 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 	case relayconstant.RelayModeAudioSpeech:
 		if audioRequest.Model == "" {
 			return nil, errors.New("model is required")
+		}
+	case relayconstant.RelayModeAudioVoiceClone, relayconstant.RelayModeAudioVoiceDesign, relayconstant.RelayModeAudioMusic:
+		// These three endpoints only exist on the MiniMax upstream. Reject other
+		// channels here so the request never reaches a provider adaptor that
+		// would parse it as a multipart form.
+		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeMiniMax {
+			return nil, errors.New("channel does not support this endpoint")
+		}
+		if audioRequest.Model == "" {
+			return nil, errors.New("model is required")
+		}
+		metadata := audioMediaMetadata{}
+		if len(audioRequest.Metadata) > 0 {
+			if err := common.Unmarshal(audioRequest.Metadata, &metadata); err != nil {
+				return nil, fmt.Errorf("invalid metadata: %w", err)
+			}
+		}
+		switch relayMode {
+		case relayconstant.RelayModeAudioVoiceClone:
+			if audioRequest.Voice == "" {
+				return nil, errors.New("voice is required")
+			}
+			// clone_prompt is only supplementary, it never replaces file_id.
+			if metadata.FileID == nil {
+				return nil, errors.New("metadata.file_id is required")
+			}
+		case relayconstant.RelayModeAudioVoiceDesign:
+			if audioRequest.Input == "" {
+				return nil, errors.New("input is required")
+			}
+			if metadata.PreviewText == "" {
+				return nil, errors.New("metadata.preview_text is required")
+			}
+			if len(metadata.PreviewText) > 500 {
+				return nil, errors.New("metadata.preview_text must be at most 500 characters")
+			}
+		case relayconstant.RelayModeAudioMusic:
+			if audioRequest.Input == "" && metadata.Lyrics == "" {
+				return nil, errors.New("input or metadata.lyrics is required")
+			}
 		}
 	default:
 		if audioRequest.Model == "" {

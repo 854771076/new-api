@@ -52,6 +52,10 @@ const (
 
 	RelayModeToolsSearch
 	RelayModeToolsFetch
+
+	RelayModeAudioVoiceClone  // minimax voice clone
+	RelayModeAudioVoiceDesign // minimax voice design
+	RelayModeAudioMusic       // minimax music generation
 )
 
 func Path2RelayMode(path string) int {
@@ -88,6 +92,12 @@ func Path2RelayMode(path string) int {
 		relayMode = RelayModeAudioTranscription
 	} else if strings.HasPrefix(path, "/v1/audio/translations") {
 		relayMode = RelayModeAudioTranslation
+	} else if strings.HasPrefix(path, "/v1/audio/voice/clone") {
+		relayMode = RelayModeAudioVoiceClone
+	} else if strings.HasPrefix(path, "/v1/audio/voice/design") {
+		relayMode = RelayModeAudioVoiceDesign
+	} else if strings.HasPrefix(path, "/v1/audio/music") {
+		relayMode = RelayModeAudioMusic
 	} else if strings.HasPrefix(path, "/v1/rerank") {
 		relayMode = RelayModeRerank
 	} else if strings.HasPrefix(path, "/v1/realtime") {
