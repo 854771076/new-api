@@ -11,7 +11,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var expectedKeys = []string{"alibaba", "doubao", "google", "hailuo", "jimeng", "kling", "runninghub", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+var expectedKeys = []string{"alibaba", "apimart", "doubao", "google", "hailuo", "jimeng", "kling", "runninghub", "sora", "sunoapi", "vertex-ai", "vidu", "xai"}
+
+// Every legacy channel type a built-in plugin claims, and the plugin that owns
+// it. The set must equal the union of the channel types the built-in plugins
+// declare.
+var expectedChannelTypes = []struct {
+	value int
+	key   string
+}{
+	{1, "sora"},
+	{17, "alibaba"},
+	{24, "google"},
+	{35, "hailuo"},
+	{36, "sunoapi"},
+	{41, "vertex-ai"},
+	{45, "doubao"},
+	{48, "xai"},
+	{50, "kling"},
+	{51, "jimeng"},
+	{52, "vidu"},
+	{54, "doubao"},
+	{55, "sora"},
+	{64, "apimart"},
+}
 
 func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing.T) {
 	generation := jsplugin.DefaultRegistry.Generation()
@@ -51,6 +74,8 @@ func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing
 		{"POST", "/ali/api/v1/services/aigc/video-generation/video-synthesis", "alibaba", jsplugin.RouteTypeSubmit, "", "taskCreated", false, true},
 		{"GET", "/api/v1/tasks/:task_id", "alibaba", jsplugin.RouteTypeQuery, "", "taskStatus", false, false},
 		{"GET", "/ali/api/v1/tasks/:task_id", "alibaba", jsplugin.RouteTypeQuery, "", "taskStatus", false, true},
+		{"POST", "/apimart/v1/videos/generations", "apimart", jsplugin.RouteTypeSubmit, "", "videoCreated", false, true},
+		{"GET", "/apimart/v1/tasks/:task_id", "apimart", jsplugin.RouteTypeQuery, "", "videoStatus", false, true},
 		{"POST", "/v1/videos/generations", "xai", jsplugin.RouteTypeSubmit, "", "videoCreated", false, false},
 		{"POST", "/v1/videos/edits", "xai", jsplugin.RouteTypeSubmit, "", "videoCreated", false, false},
 		{"POST", "/v1/videos/extensions", "xai", jsplugin.RouteTypeSubmit, "", "videoCreated", false, false},
@@ -117,24 +142,67 @@ func TestBuiltInVendorPluginsDeclareNativeRoutesAndLegacyChannelTypes(t *testing
 		assert.ElementsMatch(t, []string{"wan2.5-i2i-preview", "wanx2.1-imageedit"}, imageEdit.Route.Models)
 	}
 
-	channelTypes := []struct {
-		value int
-		key   string
-	}{
-		{1, "sora"},
-		{36, "sunoapi"},
-		{45, "doubao"},
-		{50, "kling"},
-		{51, "jimeng"},
-		{54, "doubao"},
-		{55, "sora"},
-		{48, "xai"},
-	}
-	for _, channelType := range channelTypes {
+	for _, channelType := range expectedChannelTypes {
 		plugin, found := generation.GetByChannelType(channelType.value)
 		require.True(t, found)
 		require.Equal(t, channelType.key, plugin.Meta.Key)
 	}
+}
+
+// The channel types a built-in plugin claims belong to that plugin alone.
+func TestBuiltInChannelTypesCoverEveryBuiltinPlugin(t *testing.T) {
+	metas := builtInPluginMetas(t)
+	claimed := map[int]string{}
+	for _, key := range expectedKeys {
+		for _, channelType := range metas[key].ChannelTypes {
+			require.NotContains(t, claimed, channelType, "channel type %d is claimed by two plugins", channelType)
+			claimed[channelType] = key
+		}
+	}
+	expected := map[int]string{}
+	for _, owner := range expectedChannelTypes {
+		expected[owner.value] = owner.key
+	}
+	assert.Equal(t, expected, claimed)
+}
+
+// A model name that differs from another plugin's only in case cannot be
+// routed: the routing generation refuses to build, the gateway then fails to
+// start and the whole plugin library is gone. APIMart therefore may not claim
+// a name another built-in plugin already claims, unless both spell it the
+// same way.
+func TestBuiltInApimartModelNamesDoNotCollideWithOtherPlugins(t *testing.T) {
+	metas := builtInPluginMetas(t)
+	apimart := metas["apimart"]
+	require.NotEmpty(t, apimart.Models)
+	for _, key := range expectedKeys {
+		if key == "apimart" {
+			continue
+		}
+		for _, model := range metas[key].Models {
+			for _, own := range apimart.Models {
+				if jsplugin.ASCIIFold(model) != jsplugin.ASCIIFold(own) {
+					continue
+				}
+				assert.Equal(t, own, model, "apimart model %q and %s model %q differ only in case", own, key, model)
+			}
+		}
+	}
+}
+
+// builtInPluginMetas loads the manifest of every built-in plugin, so the
+// contract tests can compare the plugins against each other.
+func builtInPluginMetas(t *testing.T) map[string]jsplugin.Meta {
+	t.Helper()
+	generation := jsplugin.DefaultRegistry.Generation()
+	require.NotNil(t, generation)
+	metas := make(map[string]jsplugin.Meta, len(expectedKeys))
+	for _, key := range expectedKeys {
+		plugin, found := generation.Get(key)
+		require.True(t, found, key)
+		metas[key] = plugin.Meta
+	}
+	return metas
 }
 
 func TestBuiltInTaskPluginResponsesAndUsageContracts(t *testing.T) {
@@ -342,6 +410,16 @@ func TestBuiltInPluginsAddressNewAPIUpstreamOnNativeRoutes(t *testing.T) {
 			gatewaySubmit:    "/vidu/ent/v2/text2video",
 			vendorQuery:      "/ent/v2/tasks/tid/creations",
 			gatewayQuery:     "/vidu/ent/v2/tasks/tid/creations",
+		},
+		{
+			key:              "apimart",
+			driver:           map[string]any{"action": "text_to_video", "model": "seedance-1.0-pro", "upstreamModel": "seedance-1.0-pro", "requestBody": map[string]any{"model": "seedance-1.0-pro", "prompt": "a cat"}},
+			vendorKey:        "vendor-key",
+			vendorAuthPrefix: "Bearer vendor-key",
+			vendorSubmit:     "/v1/videos/generations",
+			gatewaySubmit:    "/apimart/v1/videos/generations",
+			vendorQuery:      "/v1/tasks/tid",
+			gatewayQuery:     "/apimart/v1/tasks/tid",
 		},
 	}
 	variants := []struct {
