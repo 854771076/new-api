@@ -6,8 +6,6 @@ import { config } from '@/lib/config';
 
 export const dynamic = 'force-dynamic';
 
-const LIMIT = 24;
-
 export default async function StudioPage({
   searchParams,
 }: {
@@ -38,8 +36,7 @@ export default async function StudioPage({
     .select('id, name, image_path, cover_path, bucket')
     .eq('client_id', config.gatewayClientId)
     .eq('user_id', user.id)
-    .order('created_at', { ascending: false })
-    .limit(LIMIT);
+    .order('created_at', { ascending: false });
 
   // 2. 服装：RLS 已并集返回官方服装 + 当前用户自己的个人服装（source 区分归属）。
   let outfitQuery = supabase
@@ -55,7 +52,7 @@ export default async function StudioPage({
       `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
-  const { data: outfits } = await outfitQuery.order('sort_order', { ascending: true }).order('id', { ascending: true }).limit(LIMIT);
+  const { data: outfits } = await outfitQuery.order('sort_order', { ascending: true }).order('id', { ascending: true });
 
   // 3. 姿势
   let poseQuery = supabase
@@ -72,7 +69,7 @@ export default async function StudioPage({
       `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
     );
   }
-  const { data: poses } = await poseQuery.order('sort_order', { ascending: true }).order('id', { ascending: true }).limit(LIMIT);
+  const { data: poses } = await poseQuery.order('sort_order', { ascending: true }).order('id', { ascending: true });
 
   // 4. 批量 signed URL（人物优先用封面图，减少列表流量）
   // 服装按行内 bucket 分组签名：官方在 media-official，个人服装在 media-user。

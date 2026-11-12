@@ -112,7 +112,7 @@ outfit-demo/
 │  ├─ lib/
 │  │  ├─ supabase/{client,server,admin}.ts      # browser / server / service-role clients
 │  │  ├─ gateway*.ts                            # gateway contract, session, BFF proxy, errors
-│  │  ├─ tryon/                                 # try-on pipeline (quote, image, wear, rollback)
+│  │  ├─ tryon/                                 # try-on pipeline (quote, image, wear, rollback, advance)
 │  │  └─ config.ts · constants.ts · types.ts
 │  └─ proxy.ts                                  # Next.js 16 session-refresh middleware
 ├─ supabase/
@@ -125,6 +125,10 @@ outfit-demo/
 ├─ public/
 └─ .env.example · .gitignore · .vercelignore · package.json · tsconfig.json · next.config.ts · bun.lock
 ```
+
+## Async Try-On Generation
+
+Generation is asynchronous and resumable. `POST /api/generate` validates, freezes the quote, persists a `pending`/`quoted` record, and returns the task id immediately — it never blocks on the image. The browser then polls `POST /api/generate/[id]/advance` every ~1.5s; each call advances the six-stage pipeline one step and persists that step's output. Because `/advance` reads the gateway access token from the request cookie, it cannot run as a server background job: the tab must stay open to poll, and closing it pauses (not fails) the task. Re-entering the studio with the same selections re-runs `advance` from the persisted state, and the create endpoint dedupes back to the original id. See `src/lib/tryon/advance.ts`.
 
 ## Deploy on Vercel
 
