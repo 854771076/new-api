@@ -53,6 +53,10 @@ func OAuthTopupCheckout(c *gin.Context) {
 
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
+		if err := appBalancePayDisabledError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
 		quota, err := creditAppTopUpWithBalance(user.Id, app.Id, body.Amount)
 		if err != nil {
 			oauthCheckoutError(c, err)

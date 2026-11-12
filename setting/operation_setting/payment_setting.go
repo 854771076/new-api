@@ -6,6 +6,9 @@ type PaymentSetting struct {
 	AmountOptions  []int           `json:"amount_options"`
 	AmountDiscount map[int]float64 `json:"amount_discount"` // 充值金额对应的折扣，例如 100 元 0.9 表示 100 元充值享受 9 折优惠
 
+	// DisableAppBalancePay 全局禁用 OAuth 应用的余额支付，开启后所有应用的钱包余额支付失效。
+	DisableAppBalancePay bool `json:"disable_app_balance_pay"`
+
 	ComplianceConfirmed    bool   `json:"compliance_confirmed"`
 	ComplianceTermsVersion string `json:"compliance_terms_version"`
 	ComplianceConfirmedAt  int64  `json:"compliance_confirmed_at"`
@@ -19,6 +22,8 @@ const CurrentComplianceTermsVersion = "v1"
 var paymentSetting = PaymentSetting{
 	AmountOptions:  []int{10, 20, 50, 100, 200, 500},
 	AmountDiscount: map[int]float64{},
+	// 余额支付默认关闭：默认禁用 OAuth 应用的钱包余额支付。
+	DisableAppBalancePay: true,
 }
 
 func init() {
@@ -33,4 +38,10 @@ func GetPaymentSetting() *PaymentSetting {
 func IsPaymentComplianceConfirmed() bool {
 	return paymentSetting.ComplianceConfirmed &&
 		paymentSetting.ComplianceTermsVersion == CurrentComplianceTermsVersion
+}
+
+// IsAppBalancePayDisabled reports whether OAuth app balance payment is
+// globally disabled.
+func IsAppBalancePayDisabled() bool {
+	return paymentSetting.DisableAppBalancePay
 }

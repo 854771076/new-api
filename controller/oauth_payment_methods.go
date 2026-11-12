@@ -4,18 +4,22 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 )
 
-// OAuthPaymentMethods handles GET /oauth/payment/methods. It always includes
-// the balance method and appends each third-party provider only when that
-// provider is enabled for top-ups.
+// OAuthPaymentMethods handles GET /oauth/payment/methods. It includes the
+// balance method unless it is globally disabled, and appends each third-party
+// provider only when that provider is enabled for top-ups.
 func OAuthPaymentMethods(c *gin.Context) {
 	if _, _, ok := oauthAppAccess(c, model.OAuthScopeAPIRead); !ok {
 		return
 	}
 
-	methods := []string{model.PaymentMethodBalance}
+	methods := []string{}
+	if !operation_setting.IsAppBalancePayDisabled() {
+		methods = append(methods, model.PaymentMethodBalance)
+	}
 	if isStripeTopUpEnabled() {
 		methods = append(methods, model.PaymentMethodStripe)
 	}

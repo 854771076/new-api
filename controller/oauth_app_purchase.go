@@ -62,6 +62,15 @@ func paymentComplianceError() error {
 	return nil
 }
 
+// appBalancePayDisabledError reports when OAuth app balance payment is
+// globally disabled.
+func appBalancePayDisabledError() error {
+	if operation_setting.IsAppBalancePayDisabled() {
+		return common.NewMessage("Balance payment is disabled. Please use another payment method.")
+	}
+	return nil
+}
+
 // oauthCheckoutError maps purchase failures to OAuth error responses. Business
 // messages become 400; domain ownership/disabled errors keep their meaning; any
 // other failure is reported as a server error.
@@ -130,6 +139,10 @@ func OAuthSubscriptionCheckout(c *gin.Context) {
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
 		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		if err := appBalancePayDisabledError(); err != nil {
 			oauthCheckoutError(c, err)
 			return
 		}
@@ -266,6 +279,10 @@ func OAuthProductCheckout(c *gin.Context) {
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
 		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		if err := appBalancePayDisabledError(); err != nil {
 			oauthCheckoutError(c, err)
 			return
 		}
