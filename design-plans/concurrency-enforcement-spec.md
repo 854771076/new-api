@@ -3,10 +3,11 @@
 > **【实现状态说明 · 以 main 分支为准】**
 >
 > - **本规格描述的目标形态**:Token 轴与用户轴并发上限、Redis 共享计数、渠道并发轴、有界等待队列、429 契约、Token/用户配置入口,以及配套的验证要求与已知限制。
-> - **main 上现有实现只有 O-1**:进程内 `MemoryLimiter`(`service/concurrency/limiter.go`);Token 轴 / 用户轴作用域桶与并发中间件(`middleware/concurrency.go`,已挂载于 relay 与 playground 路由);管理员并发快照(`controller/concurrency.go` + `GET /api/concurrency/snapshot`);`Token.ConcurrencyLimit` / `Token.ConcurrencyLimitByModel` 两列及其三库幂等迁移(`model/token.go`、`model/main.go`);429 响应体的 `error.type` / `error.code` = `concurrency_exceeded` 与 CNT-01 message 形态。
-> - **O-1 尚未接线到运行期**:限流器未在启动流程装配(`SetConcurrencyLimiter` 无生产调用方),Token / 用户上限无来源(无 `User.ConcurrencyLimit` 字段、无管理员写入路径、无 `Retry-After` 头),§3.4 的同步 relay context 绑定亦未实现 —— 因此当前 main 的并发闸门尚不实际拦截。
-> - **正文标注「已交付(02-08~02-19)」的分片不在 main 上**:Redis ZSET 租约多桶、渠道并发轴、编辑抽屉前端 UI、有界等待队列等只存在于本地并发功能线分支 `newapi0924bak` 及同源 `newapi924-1015` / `newapi924-1029`;这些「已交付」是分片交付史实,不表示 main 已具备该能力。
-> - **main 引入这些能力时,以本文对应章节的行为要求、契约与字段定义为准重新实现**,不假定 main 已满足。
+> - **正文标注「已交付(02-08~02-19)」的分片已并入 main**:Redis ZSET 租约多桶(02-08)、渠道并发轴(02-09/02-14)、编辑抽屉前端 UI(02-09/02-11/02-13)、有界等待队列(02-16)、渠道路由健康度与 EWMA 有效权重(02-17)、上游 429 跨渠道补跳(02-18)均已落地,正文各章的「已交付」标注对 main 有效。
+> - **O-1 基础已接线到运行期**:限流器在启动流程装配(`main.go` 调用 `middleware.SetConcurrencyLimiter` 与 `controller.SetConcurrencyLimiter`);`Token.ConcurrencyLimit` / `Token.ConcurrencyLimitByModel` / `User.ConcurrencyLimit` 三处上限字段与管理员写入路径齐备;429 响应恒带 `Retry-After`;§3.4 的出站请求 context 绑定已实现。
+> - **交付形态**:本规格的验收证据在 `concurrency-test/`(集成测试方案与主矩阵报告)与各分片的钉子测试(`controller/relay_slot_test.go`、`router/concurrency_router_test.go`、`middleware/concurrency_test.go`、`service/concurrency/*_test.go`)。
+> - **调用方文档**:单次请求的 token 用量解析与并发 429 的四种 message 形态(错误识别)在 `handbook/token-usage-for-callers.md`。
+> - **改动本文时**:若某章的行为要求与 main 的实际实现出现分歧,以**行为要求与契约**为准修实现,而不是放宽本文;确需调整契约时同步改本文与对应钉子测试。
 
 > 本文档描述 new-api 网关中"并发上限从配置到强制执行"的完整规格:行为要求、客户端契约、作用域模型、实现要点、验证要求与已知限制。读者无需了解任何内部流程背景,所有引用均为仓库内实际代码路径。
 
@@ -23,7 +24,7 @@
 
 ## 2. 范围
 
-> 本节"范围内/范围外"描述规格初版的切分。初版之后 02-08~02-16 分片已陆续交付 Redis 共享计数、渠道并发轴、编辑抽屉前端 UI 与有界排队——相关内容已在对应章节按"已交付"标注,不再属于范围外。(此处"已交付"为分片交付史实;这些分片尚未合入 main,详见开头实现状态说明。)
+> 本节"范围内/范围外"描述规格初版的切分。初版之后 02-08~02-16 分片已陆续交付 Redis 共享计数、渠道并发轴、编辑抽屉前端 UI 与有界排队——相关内容已在对应章节按"已交付"标注,不再属于范围外。(这些分片已并入 main,详见开头实现状态说明。)
 
 **范围内(本列表为规格目标范围,不代表各项均已在 main 实现):**
 
@@ -34,12 +35,12 @@
 - 429 客户端契约。
 - 客户端断连后槽位即时释放(出站上游请求绑定客户端请求上下文)。
 
-**范围外(初版明确不做;前四项已由后续分片交付,逐条标注;以下"已交付"分片均尚未合入 main):**
+**范围外(初版明确不做;前四项已由后续分片交付,逐条标注):**
 
-- Redis 多节点共享计数(跨节点一致性、崩溃回收、fail-open)——已交付(02-08:RedisLimiter Lua 租约、fail-open 回落进程内 limiter;尚未合入 main)。
-- 渠道(Channel)并发上限与其 relay 强制——已交付(02-09 字段与三库迁移、02-14 relay 逐 attempt 取放、02-15 全饱和终态 429 归一;尚未合入 main)。
-- 管理员在 API Key 编辑抽屉配置 Token 并发字段的前端 UI——已交付(02-09/02-11/02-13;尚未合入 main)。
-- 有界等待队列(bounded wait queue)——已交付(02-16,默认开启,见 3.5;尚未合入 main)。
+- Redis 多节点共享计数(跨节点一致性、崩溃回收、fail-open)——已交付(02-08:RedisLimiter Lua 租约、fail-open 回落进程内 limiter)。
+- 渠道(Channel)并发上限与其 relay 强制——已交付(02-09 字段与三库迁移、02-14 relay 逐 attempt 取放、02-15 全饱和终态 429 归一)。
+- 管理员在 API Key 编辑抽屉配置 Token 并发字段的前端 UI——已交付(02-09/02-11/02-13)。
+- 有界等待队列(bounded wait queue)——已交付(02-16,默认开启,见 3.5)。
 - 异步任务(Midjourney/视频等 task relay)并发控制:任务轮询生命周期与请求槽位模型不同。
 - WebSocket/realtime 长连接占槽语义。
 - 普通用户自设 Token 并发上限:并发上限仅管理员可配(与 quota 集权一致)。
@@ -70,17 +71,17 @@
 3. 自助路径(用户修改自身资料)不接受、不回显并发字段。
 4. 前端仅管理员可见的界面门控只是呈现层,**不是安全边界**;安全边界永远在服务端。
 5. 请求内测试覆盖头(如 `X-Test-*` 限额覆盖)仅在框架测试模式下可读,生产模式不可用作绕过。
-6. 上限值校验已交付(02-13,该分片尚未合入 main):负数与畸形按模型 CSV 在保存前被拒绝、不落库(单一解析源 `ParseEntries`,Go/TS fixture 双端锁);读取侧仍保留防御性解码并忽略非法值作为纵深。
+6. 上限值校验已交付(02-13,):负数与畸形按模型 CSV 在保存前被拒绝、不落库(单一解析源 `ParseEntries`,Go/TS fixture 双端锁);读取侧仍保留防御性解码并忽略非法值作为纵深。
 
 ### 3.4 槽位释放(含客户端断连)
 
-> 本节为目标形态。main 尚未实现:`relay/channel/api_request.go` 的 `DoApiRequest` / `DoFormRequest` 仍用 `http.NewRequest` 构造请求(未绑定 `c.Request.Context()`),该改动随同步 relay 路径分片,尚未合入 main。
+> 本节已交付:`relay/channel/api_request.go` 的 `DoApiRequest` / `DoFormRequest` 已绑定 `c.Request.Context()`,客户端断连即时释放并发槽位。
 
 1. 出站上游 HTTP 请求必须绑定客户端请求的 context:客户端断连时上游请求被取消,并发槽位即时释放,不被上游挟持到其自然结束。
 2. 此绑定适用于同步 relay 路径(`DoApiRequest`、`DoFormRequest`)。任务轮询与 WebSocket 请求保持独立后台 context,不受客户端连接生命周期影响(任务语义要求其继续)。
 3. 对外错误文案不得因错误链处理而改变,也不得泄漏上游内部细节;同时必须保留可判定的错误链(如 `errors.Is(err, context.Canceled)`)。
 
-### 3.5 有界等待排队(02-16 已交付,该分片尚未合入 main)
+### 3.5 有界等待排队(02-16 已交付,)
 
 Token 轴与用户轴(中间件路径)达到上限的新请求不再立即拒绝,而是先尝试进入有界等待队列:
 
@@ -89,21 +90,21 @@ Token 轴与用户轴(中间件路径)达到上限的新请求不再立即拒绝
 3. 排队超时、队列满、排队被关闭三种情形均返回 429(第 4 节契约),状态码与错误类型不变;排队超时与队列满的 message 各自独立(第 4 节,06),排队关闭保持并发超限的既有文案。
 4. 队列为 per-node:多节点部署时各节点各自排队,跨节点总排队深为各节点之和——运维需知悉该语义。
 5. 4 个 `concurrency.queue_*` 配置项经 RootAuth option API 动态生效(atomic 读,无需重启);排队深度计入 snapshot 顶层 `queued` 字段。
-6. 渠道轴(relay 逐 attempt 取放)不经过此队列:渠道槽位获取失败即产生饱和拒绝信号,由 relay 重试循环换渠道消化(见第 4 节与 02-15 交付;02-15 尚未合入 main)。
+6. 渠道轴(relay 逐 attempt 取放)不经过此队列:渠道槽位获取失败即产生饱和拒绝信号,由 relay 重试循环换渠道消化(见第 4 节与 02-15 交付)。
 
 ## 4. 客户端契约(429)
 
-> 本节为目标形态。main 现有实现只覆盖其中一部分:`middleware/concurrency.go` 的 `rejectConcurrency` 产出 429 + `concurrency_exceeded` + CNT-01 message,但**无 `Retry-After` 头**(常量 `middleware.ConcurrencyRetryAfterSeconds` 与该头随 02-15/02-16 分片,尚未合入 main);另外三种 message(排队超时 / 队满 / 渠道饱和)与 `controller/relay.go` 的 `renderRelayTerminalError` 出口在 main 上均不存在。
+> 本节已交付:`middleware/concurrency.go` 的 `rejectConcurrency` 产出 429 + `concurrency_exceeded` + CNT-01 message,并带 `Retry-After` 头;排队超时 / 队满 / 渠道饱和三种 message 互不相同;`controller/relay.go` 的 `renderRelayTerminalError` 是渠道饱和的客户端可见出口。
 
 并发超限响应的确切格式:
 
 - 状态码:**429**
-- 响应头:**`Retry-After: 1`**(固定 1 秒代码常量,单一来源 `middleware.ConcurrencyRetryAfterSeconds`;该常量与响应头尚未合入 main)。边界:OpenAI Realtime 分支在任何终态写回前已将传输升级为 WebSocket,错误以 WS error frame 呈现,无 HTTP 头可写——该分支没有 `Retry-After` 头(02-15 裁定的契约边界)。
+- 响应头:**`Retry-After: 1`**(固定 1 秒代码常量,单一来源 `middleware.ConcurrencyRetryAfterSeconds`)。边界:OpenAI Realtime 分支在任何终态写回前已将传输升级为 WebSocket,错误以 WS error frame 呈现,无 HTTP 头可写——该分支没有 `Retry-After` 头(02-15 裁定的契约边界)。
 - 错误体:`error.type` 与 `error.code` 均为 **`concurrency_exceeded`**(状态码与类型归一,不新增错误码子类型——06 产品裁定),message 有四种逐字形态,按拒绝来源区分(调用方按 message 短语识别来源):
   - Token 轴/用户轴并发超限即时拒绝(排队关闭、深度系数为 0 或等待窗口为 0):`Concurrency limit exceeded for your account. Please retry after the current requests finish.`(CNT-01 逐字保持)
   - 排队等待超时(含等待中客户端断开退出等待):`Timed out waiting for an available concurrency slot. Please retry after the current requests finish.`(06)
   - 队列已满(未能入队):`The concurrency wait queue is full. Please retry later.`(06)
-  - 渠道饱和(全部渠道槽位占满):`Concurrency limit exceeded for the selected channel. Please retry after the current requests finish.`(02-15 裁定的中性模板,不含渠道 ID 或内部路由码;relay 出口形态,不归中间件;02-15 尚未合入 main)
+  - 渠道饱和(全部渠道槽位占满):`Concurrency limit exceeded for the selected channel. Please retry after the current requests finish.`(02-15 裁定的中性模板,不含渠道 ID 或内部路由码;relay 出口形态,不归中间件)
 - 三种中间件形态的 message 两两互不相同、各含可识别短语("Concurrency limit exceeded for your account" / "Timed out waiting" / "wait queue is full");**仅 message 区分来源**,429 状态码、`error.type`、`error.code`、`Retry-After: 1` 头对三种来源完全一致(06 产品裁定:不新增错误码子类型、不引入 `error.scope` 之类的结构化字段)。
 - 错误体**不得泄漏**内部作用域桶名(如 `key:11:*`)、数值 ID、队列深度或配置值。
 - 客户端可见的 429 **仅由"超限"这一种结果驱动**(三种中间件来源均为超限的不同阶段/出口,渠道饱和为 relay 路径的同一归一结果),不与其他限流类别或基础设施错误混淆;并发基础设施故障永不以 429 呈现。
@@ -129,11 +130,11 @@ Token 轴与用户轴(中间件路径)达到上限的新请求不再立即拒绝
 - 旧的 `user:<id>:<model>` 桶已移除,用户轴只有聚合桶。
 - `limit <= 0` 的桶恒通过但仍计数。
 - 中间件在 token 鉴权与模型解析之后执行(链序:TokenAuth → ModelRequestRateLimit → Distribute → ConcurrencyMiddleware),保证 token/user 上下文已就绪。
-- 后续分片新增的第四种桶 `channel:<id>`(渠道轴,02-14,该分片尚未合入 main)不经过本中间件批量取桶:它在 relay 重试循环内逐 attempt 获取/释放,limit 来源 `Channel.ConcurrencyLimit`,饱和拒绝信号交由重试循环换渠道消化(见第 4 节)。
+- 后续分片新增的第四种桶 `channel:<id>`(渠道轴,02-14,)不经过本中间件批量取桶:它在 relay 重试循环内逐 attempt 获取/释放,limit 来源 `Channel.ConcurrencyLimit`,饱和拒绝信号交由重试循环换渠道消化(见第 4 节)。
 
 ## 6. 实现要点
 
-> 本节为目标形态。main 上仅有 §6.1 的 `MemoryLimiter` 骨架与 §6.5 的快照端点(`/api/concurrency/snapshot` 路由与 authz 门已存在,但按 token/user 配置回填 limit 列的逻辑未实现);§6.2 的缓存并发字段与 schema 完整性门、§6.3 的 `User.ConcurrencyLimit` 字段与三库迁移、§6.4 的 Token 写入路径指针影子字段与管理员门、§6.6 的出站请求 context 绑定,均尚未合入 main。
+> 本节已交付:§6.1 的 `MemoryLimiter` / `RedisLimiter`、§6.2 的缓存并发字段与 schema 完整性门、§6.3 的 `User.ConcurrencyLimit` 字段与三库迁移、§6.4 的 Token 写入路径指针影子字段与管理员门、§6.5 的快照端点(含按 token/user 配置回填 limit 列)、§6.6 的出站请求 context 绑定均已落地。
 
 ### 6.1 限额计算采用 per-request 模式
 
@@ -144,7 +145,7 @@ Acquire(ctx context.Context, scope ScopeKey, limit int) (release func(), err err
 Snapshot(ctx) ...
 ```
 
-- **每次请求实时计算 limit 并传入 Acquire**,不采用"配置变更时推送 limit"的模式:后者需要跨层状态同步,且无法直接适配 Redis 计数后端——该判断已被 02-08 兑现:RedisLimiter 复用同一 per-request 契约,limit 每次随 Acquire 传入。(该形态在 main 上尚未落地:main 的 `service/concurrency/limiter.go` 仍是 `Acquire(ctx, scope)` + `SetLimit(ctx, scope, limit)` 的推送式接口,per-request 形态随 02-08 分片,尚未合入 main。)
+- **每次请求实时计算 limit 并传入 Acquire**,不采用"配置变更时推送 limit"的模式:后者需要跨层状态同步,且无法直接适配 Redis 计数后端——该判断已被 02-08 兑现:RedisLimiter 复用同一 per-request 契约,limit 每次随 Acquire 传入。(该形态已落地:`service/concurrency/limiter.go` 的 `Acquire(ctx, scope, limit)` 为 per-request 契约,`RedisLimiter` 复用同一签名。)
 - 接口不携带 `SetLimit`;进程内 limiter 不保存 limit 状态。
 - `Snapshot` 输出结构保持稳定(JSON 形状不变),便于后续消费方。
 
@@ -176,7 +177,7 @@ Snapshot(ctx) ...
 
 - 请求结构体用**指针影子字段**承载这两个可选值,绑定值只进指针——"请求缺省"与"显式 0"可区分;无条件拷贝会在前端表单不携带这两个字段时静默清零上限。
 - 拷贝发生在管理员角色门内、按"非 nil 才拷贝"执行。
-- 模型字段的 JSON tag 对外暴露为 `concurrency_limit_by_model`(否则绑定收不到、读回不回显);对非管理员的响应过滤已交付(02-11,该分片尚未合入 main):按请求者角色剥除两并发字段,非 admin 响应中整键缺席、admin 显式 0 保留。
+- 模型字段的 JSON tag 对外暴露为 `concurrency_limit_by_model`(否则绑定收不到、读回不回显);对非管理员的响应过滤已交付(02-11,):按请求者角色剥除两并发字段,非 admin 响应中整键缺席、admin 显式 0 保留。
 
 **用户写入 API**(`model/user.go` `EditWithTx`):更新 map 白名单包含 `concurrency_limit`;该白名单同时是拒绝非管理员注入此字段的服务端防线。
 
@@ -217,8 +218,8 @@ Snapshot(ctx) ...
 |----|------|------|
 | 管理端整字段替换语义 | 用户更新 API 缺省 `concurrency_limit` 会被当 0 清空——与同端点 username/group/remark 的 full-replace 语义一致,前端恒发送该键 | 采纳外部 API 兼容政策后再议 |
 | 流式断连 end-reason 分类竞态 | 断连原因可能被归类为扫描错误而非客户端离开,影响消费日志状态等少数消费者;窗口窄、不泄漏 | 待裁决 |
-| ~~非管理员响应字段过滤~~ | 已交付(02-11,该分片尚未合入 main):按请求者角色剥除 `concurrency_limit` / `concurrency_limit_by_model`,非 admin 响应中整键缺席 | 已关闭 |
-| ~~负数/畸形 CSV 校验~~ | 已交付(02-13,该分片尚未合入 main):保存前拒绝负数与畸形条目、不落库(单一解析源 + fixture 双端锁);读取侧防御性解码保留为纵深 | 已关闭 |
+| ~~非管理员响应字段过滤~~ | 已交付(02-11,):按请求者角色剥除 `concurrency_limit` / `concurrency_limit_by_model`,非 admin 响应中整键缺席 | 已关闭 |
+| ~~负数/畸形 CSV 校验~~ | 已交付(02-13,):保存前拒绝负数与畸形条目、不落库(单一解析源 + fixture 双端锁);读取侧防御性解码保留为纵深 | 已关闭 |
 | 非管理员写入静默忽略 | 返回 200 且审计无痕(既定缓解;从安全审计角度显式 403 或留痕更佳) | 后续安全加固 |
 | 上游 adaptor 旁路 | 个别图像生成 adaptor 自建后台 context,未走统一客户端请求构建(延迟释放,非泄漏) | 建议小修 |
 | PostgreSQL `users.access_token` 重复 DDL | 既有迁移每次启动重复发出自我 cast 的列类型变更(GORM 类型 tag 与 PG 类型上报差异),与本功能无关、良性 | 单独排查 |
@@ -226,13 +227,13 @@ Snapshot(ctx) ...
 
 ## 9. 演进方向(交付状态)
 
-> 本节"已交付"指分片交付史实。下列 02-08~02-16 能力均**尚未合入 main**,只存在于本地并发功能线分支(`newapi0924bak` 及其同源分支);main 引入时按本文各章的行为要求与契约实现。
+> 本节"已交付"指分片交付史实,且这些分片已并入 main;实现位置见各章的代码引用。
 
-原规划的三项依赖能力均已交付(下列分片均尚未合入 main),Acquire 携带 limit 的契约按预期承接了它们:
+原规划的三项依赖能力均已交付并并入 main,Acquire 携带 limit 的契约按预期承接了它们:
 
-1. **Redis 共享计数(已交付,02-08;尚未合入 main)**:启用 Redis 时并发计数跨节点一致(Lua all-or-nothing 租约、lease TTL 崩溃回收),Redis 不可达时 fail-open 回落进程内 limiter(基础设施故障不以 429 呈现);未启用 Redis 时保持进程内 limiter。
-2. **Token 并发配置 UI(已交付,02-09/02-11/02-13;尚未合入 main)**:API Key 编辑抽屉配置全局/按模型上限,0/留空 = 不限的明确语义,仅管理员可见,保存即生效(含缓存失效);含非管理员响应字段剥除与负数/畸形 CSV 保存前校验。
-3. **渠道并发轴(已交付,02-09/02-14/02-15;尚未合入 main)**:渠道字段与三库迁移、relay 逐 attempt 获取/释放渠道槽位、饱和拒绝驱动换渠道重试、全部饱和才终态 429(复用第 4 节的 429 契约,经 `renderRelayTerminalError` 归一化)。
-4. **有界等待排队(已交付,02-16;尚未合入 main)**:Token/用户轴超限先入有界队列等待,超时/队满/关闭统一 429,详见 3.5。
+1. **Redis 共享计数(已交付,02-08)**:启用 Redis 时并发计数跨节点一致(Lua all-or-nothing 租约、lease TTL 崩溃回收),Redis 不可达时 fail-open 回落进程内 limiter(基础设施故障不以 429 呈现);未启用 Redis 时保持进程内 limiter。
+2. **Token 并发配置 UI(已交付,02-09/02-11/02-13)**:API Key 编辑抽屉配置全局/按模型上限,0/留空 = 不限的明确语义,仅管理员可见,保存即生效(含缓存失效);含非管理员响应字段剥除与负数/畸形 CSV 保存前校验。
+3. **渠道并发轴(已交付,02-09/02-14/02-15)**:渠道字段与三库迁移、relay 逐 attempt 获取/释放渠道槽位、饱和拒绝驱动换渠道重试、全部饱和才终态 429(复用第 4 节的 429 契约,经 `renderRelayTerminalError` 归一化)。
+4. **有界等待排队(已交付,02-16)**:Token/用户轴超限先入有界队列等待,超时/队满/关闭统一 429,详见 3.5。
 
 仍未交付的方向:fail-closed 严格模式、per-channel-per-model 上限,见需求文档 Future Requirements。原「429 来源区分(`error.scope`)」已由 06 落地为 **仅 message 文本区分**(三种中间件形态各含可识别短语,见第 4 节;产品裁定不新增结构化字段)。
