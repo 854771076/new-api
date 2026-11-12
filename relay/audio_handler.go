@@ -39,6 +39,13 @@ func AudioHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	}
 	adaptor.Init(info)
 
+	// A retry may select a different channel than the one the request was
+	// validated against, so the MiniMax-only media endpoints are gated again
+	// before the adaptor converts the request.
+	if err := helper.EnsureAudioMediaChannelSupported(info); err != nil {
+		return types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithStatusCode(http.StatusBadRequest), types.ErrOptionWithSkipRetry())
+	}
+
 	ioReader, err := adaptor.ConvertAudioRequest(c, info, *request)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())

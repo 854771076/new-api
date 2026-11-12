@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -103,6 +104,74 @@ func TestMiniMaxImageEndpointSelection(t *testing.T) {
 	require.NotNil(t, payload)
 }
 
+func TestMiniMaxImageResponseFormat(t *testing.T) {
+	t.Parallel()
+
+	gin.SetMode(gin.TestMode)
+	adaptor := &Adaptor{}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	newEndpointInfo := func() *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{
+			RelayMode:       relayconstant.RelayModeImagesGenerations,
+			OriginModelName: "my-image-model",
+			ChannelMeta: &relaycommon.ChannelMeta{
+				UpstreamModelName: "MiniMax-H3-Image",
+			},
+		}
+	}
+
+	// 新端点只认 url / b64_json，两个合法值都原样下发上游
+	for _, responseFormat := range []string{"url", "b64_json"} {
+		payload, err := adaptor.ConvertImageRequest(c, newEndpointInfo(), dto.ImageRequest{
+			Model:          "my-image-model",
+			Prompt:         "a red fox in snowfall",
+			ResponseFormat: responseFormat,
+		})
+		require.NoError(t, err)
+
+		body, err := common.Marshal(payload)
+		require.NoError(t, err)
+		var upstreamRequest map[string]any
+		require.NoError(t, common.Unmarshal(body, &upstreamRequest))
+		assert.Equal(t, responseFormat, upstreamRequest["response_format"])
+	}
+
+	// 旧端点的词汇 base64 不在新端点的白名单里，以 400 拒绝
+	payload, err := adaptor.ConvertImageRequest(c, newEndpointInfo(), dto.ImageRequest{
+		Model:          "my-image-model",
+		Prompt:         "a red fox in snowfall",
+		ResponseFormat: "base64",
+	})
+	require.Error(t, err)
+	assert.Nil(t, payload)
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	assert.Contains(t, apiErr.Error(), "url")
+	assert.Contains(t, apiErr.Error(), "b64_json")
+	// 请求本身越界，重投到下一个渠道也不会变好
+	assert.True(t, types.IsSkipRetryError(apiErr))
+
+	// 旧端点仍把 OpenAI 的 b64_json 归一成旧词汇 base64
+	legacyInfo := &relaycommon.RelayInfo{
+		RelayMode:       relayconstant.RelayModeImagesGenerations,
+		OriginModelName: "image-01",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "image-01",
+		},
+	}
+	legacyPayload, err := adaptor.ConvertImageRequest(c, legacyInfo, dto.ImageRequest{
+		Model:          "image-01",
+		Prompt:         "a red fox in snowfall",
+		ResponseFormat: "b64_json",
+	})
+	require.NoError(t, err)
+	legacyRequest, ok := legacyPayload.(MiniMaxImageRequest)
+	require.True(t, ok)
+	assert.Equal(t, "base64", legacyRequest.ResponseFormat)
+}
+
 func TestMiniMaxImageNewEndpointResponse(t *testing.T) {
 	t.Parallel()
 
@@ -146,8 +215,22 @@ func TestMiniMaxImageNewEndpointResponse(t *testing.T) {
 	assert.Equal(t, "https://example.com/h3-2.png", payload.Data[1].Url)
 	assert.Equal(t, "aGVsbG8=", payload.Data[2].B64Json)
 
-	// 张数按 max(有 url 的条目数, 有 b64_json 的条目数) 回写，不是 len(data)
+	// 张数按翻译后 OpenAI 形状的条目数回写：3 条条目，其中 2 条带 url、1 条带 b64_json
 	assert.Equal(t, float64(2), info.PriceData.OtherRatios()["n"])
+
+	// 同一项同时带 url 与 b64_json 是同一张图的两种表示，只计一张
+	bothRecorder := httptest.NewRecorder()
+	bothContext, _ := gin.CreateTestContext(bothRecorder)
+	bothInfo := newInfo()
+	bothResp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       ioNopCloser(`{"data":[{"url":"https://example.com/h3-both.png","b64_json":"aGVsbG8="}]}`),
+	}
+
+	_, bothErr := adaptor.DoResponse(bothContext, bothResp, bothInfo)
+	require.Nil(t, bothErr)
+	assert.Equal(t, float64(1), bothInfo.PriceData.OtherRatios()["n"])
 
 	// 某一项带 error 时整次请求报错并带上游 message
 	errorRecorder := httptest.NewRecorder()
@@ -205,7 +288,7 @@ func TestMiniMaxImageLegacyEndpointUnchanged(t *testing.T) {
 	assert.Equal(t, "aGVsbG8=", payload.Data[1].B64Json)
 	assert.Empty(t, payload.Data[1].Url)
 
-	// 旧端点的两个数组并进同一个数组，计费张数按 max 规则推导
+	// 旧端点的两个数组并进同一个数组，计费张数按并进来的条目数推导
 	assert.Equal(t, float64(1), info.PriceData.OtherRatios()["n"])
 }
 

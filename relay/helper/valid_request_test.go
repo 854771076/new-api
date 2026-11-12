@@ -9,7 +9,9 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +31,9 @@ func TestGetAndValidAudioRequest(t *testing.T) {
 	}
 
 	longPreviewText := strings.Repeat("a", 501)
+	// 多字节字符按字符数算上限，500 个汉字不该被当成 1500 字节
+	chinesePreviewText := strings.Repeat("好", 500)
+	chineseTooLongPreviewText := strings.Repeat("好", 501)
 
 	for _, tt := range []struct {
 		name        string
@@ -50,6 +55,20 @@ func TestGetAndValidAudioRequest(t *testing.T) {
 			path:        "/v1/audio/voice/clone",
 			relayMode:   relayconstant.RelayModeAudioVoiceClone,
 			body:        `{"model":"speech-01","voice":"voice-abc","input":"hello","metadata":{"file_id":123,"clone_prompt":{"prompt_text":"hello"}}}`,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "voice clone accepts a metadata text without input",
+			path:        "/v1/audio/voice/clone",
+			relayMode:   relayconstant.RelayModeAudioVoiceClone,
+			body:        `{"model":"speech-01","voice":"voice-abc","metadata":{"file_id":123,"text":"hello"}}`,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "voice clone accepts a metadata text_file_id without input",
+			path:        "/v1/audio/voice/clone",
+			relayMode:   relayconstant.RelayModeAudioVoiceClone,
+			body:        `{"model":"speech-01","voice":"voice-abc","metadata":{"file_id":123,"text_file_id":"text-file-abc"}}`,
 			channelType: constant.ChannelTypeMiniMax,
 		},
 		{
@@ -88,6 +107,29 @@ func TestGetAndValidAudioRequest(t *testing.T) {
 			body:        `{"model":"speech-01","input":"hello","metadata":{"file_id":123}}`,
 			channelType: constant.ChannelTypeMiniMax,
 			wantErr:     "voice is required",
+		},
+		{
+			name:        "voice clone rejects a missing synthesis text",
+			path:        "/v1/audio/voice/clone",
+			relayMode:   relayconstant.RelayModeAudioVoiceClone,
+			body:        `{"model":"speech-01","voice":"voice-abc","metadata":{"file_id":123}}`,
+			channelType: constant.ChannelTypeMiniMax,
+			wantErr:     "input or metadata.text is required",
+		},
+		{
+			name:        "voice design accepts a preview_text of 500 multibyte characters",
+			path:        "/v1/audio/voice/design",
+			relayMode:   relayconstant.RelayModeAudioVoiceDesign,
+			body:        `{"model":"speech-02-hd","input":"a warm voice","metadata":{"preview_text":"` + chinesePreviewText + `"}}`,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "voice design rejects a preview_text of 501 multibyte characters",
+			path:        "/v1/audio/voice/design",
+			relayMode:   relayconstant.RelayModeAudioVoiceDesign,
+			body:        `{"model":"speech-02-hd","input":"a warm voice","metadata":{"preview_text":"` + chineseTooLongPreviewText + `"}}`,
+			channelType: constant.ChannelTypeMiniMax,
+			wantErr:     "metadata.preview_text must be at most 500 characters",
 		},
 		{
 			name:        "voice design rejects a missing preview_text",
@@ -163,6 +205,79 @@ func TestGetAndValidAudioRequest(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, request)
+		})
+	}
+}
+
+// TestEnsureAudioMediaChannelSupported pins the MiniMax-only channel gate of
+// the three media endpoints. The gate has to hold on every attempt, because a
+// retry may select a different channel than the one the request was validated
+// against.
+func TestEnsureAudioMediaChannelSupported(t *testing.T) {
+	newInfo := func(relayMode, channelType int) *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{
+			RelayMode:   relayMode,
+			ChannelMeta: &relaycommon.ChannelMeta{ChannelType: channelType},
+		}
+	}
+
+	for _, tt := range []struct {
+		name        string
+		relayMode   int
+		channelType int
+		wantErr     bool
+	}{
+		{
+			name:        "voice clone is rejected on a non minimax channel",
+			relayMode:   relayconstant.RelayModeAudioVoiceClone,
+			channelType: constant.ChannelTypeOpenAI,
+			wantErr:     true,
+		},
+		{
+			name:        "voice design is rejected on a non minimax channel",
+			relayMode:   relayconstant.RelayModeAudioVoiceDesign,
+			channelType: constant.ChannelTypeOpenAI,
+			wantErr:     true,
+		},
+		{
+			name:        "music is rejected on a non minimax channel",
+			relayMode:   relayconstant.RelayModeAudioMusic,
+			channelType: constant.ChannelTypeOpenAI,
+			wantErr:     true,
+		},
+		{
+			name:        "voice clone is allowed on a minimax channel",
+			relayMode:   relayconstant.RelayModeAudioVoiceClone,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "voice design is allowed on a minimax channel",
+			relayMode:   relayconstant.RelayModeAudioVoiceDesign,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "music is allowed on a minimax channel",
+			relayMode:   relayconstant.RelayModeAudioMusic,
+			channelType: constant.ChannelTypeMiniMax,
+		},
+		{
+			name:        "speech stays available on other channels",
+			relayMode:   relayconstant.RelayModeAudioSpeech,
+			channelType: constant.ChannelTypeOpenAI,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := EnsureAudioMediaChannelSupported(newInfo(tt.relayMode, tt.channelType))
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.EqualError(t, err, "channel does not support this endpoint")
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			require.True(t, types.IsSkipRetryError(apiErr))
 		})
 	}
 }

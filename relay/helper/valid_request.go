@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -68,6 +71,35 @@ type audioMediaMetadata struct {
 	FileID      any    `json:"file_id"`
 	PreviewText string `json:"preview_text"`
 	Lyrics      string `json:"lyrics"`
+	Text        string `json:"text"`
+	TextFileID  any    `json:"text_file_id"`
+}
+
+// EnsureAudioMediaChannelSupported rejects the three MiniMax-only audio media
+// endpoints when the selected channel cannot serve them. It must run on every
+// attempt: a retry may select a different channel than the one the request was
+// validated against, and the other adaptors would parse the request as a
+// multipart form.
+func EnsureAudioMediaChannelSupported(info *relaycommon.RelayInfo) error {
+	if info == nil {
+		return nil
+	}
+	switch info.RelayMode {
+	case relayconstant.RelayModeAudioVoiceClone, relayconstant.RelayModeAudioVoiceDesign, relayconstant.RelayModeAudioMusic:
+	default:
+		// Not a MiniMax-only media endpoint, every channel may serve it.
+		return nil
+	}
+	if info.HasChannelMeta() && info.ChannelType == constant.ChannelTypeMiniMax {
+		return nil
+	}
+	return types.NewErrorWithStatusCode(
+		errors.New("channel does not support this endpoint"),
+		types.ErrorCodeInvalidRequest,
+		http.StatusBadRequest,
+		types.ErrOptionWithStatusCode(http.StatusBadRequest),
+		types.ErrOptionWithSkipRetry(),
+	)
 }
 
 func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, error) {
@@ -85,8 +117,11 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 		// These three endpoints only exist on the MiniMax upstream. Reject other
 		// channels here so the request never reaches a provider adaptor that
 		// would parse it as a multipart form.
-		if common.GetContextKeyInt(c, constant.ContextKeyChannelType) != constant.ChannelTypeMiniMax {
-			return nil, errors.New("channel does not support this endpoint")
+		if err := EnsureAudioMediaChannelSupported(&relaycommon.RelayInfo{
+			RelayMode:   relayMode,
+			ChannelMeta: &relaycommon.ChannelMeta{ChannelType: common.GetContextKeyInt(c, constant.ContextKeyChannelType)},
+		}); err != nil {
+			return nil, err
 		}
 		if audioRequest.Model == "" {
 			return nil, errors.New("model is required")
@@ -106,6 +141,11 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 			if metadata.FileID == nil {
 				return nil, errors.New("metadata.file_id is required")
 			}
+			// The synthesis text is mandatory: the client input, or the text /
+			// text_file_id the client passed through in metadata.
+			if audioRequest.Input == "" && metadata.Text == "" && metadata.TextFileID == nil {
+				return nil, errors.New("input or metadata.text is required")
+			}
 		case relayconstant.RelayModeAudioVoiceDesign:
 			if audioRequest.Input == "" {
 				return nil, errors.New("input is required")
@@ -113,7 +153,7 @@ func GetAndValidAudioRequest(c *gin.Context, relayMode int) (*dto.AudioRequest, 
 			if metadata.PreviewText == "" {
 				return nil, errors.New("metadata.preview_text is required")
 			}
-			if len(metadata.PreviewText) > 500 {
+			if utf8.RuneCountInString(metadata.PreviewText) > 500 {
 				return nil, errors.New("metadata.preview_text must be at most 500 characters")
 			}
 		case relayconstant.RelayModeAudioMusic:

@@ -161,9 +161,16 @@ func oaiImage2MiniMaxH3ImageRequest(request dto.ImageRequest, model string) (Min
 		minimaxRequest.OutputFormat = outputFormat
 	}
 
-	// 新端点的 response_format 词汇是 url / b64_json，与旧端点不同，直接透传给上游
-	if request.ResponseFormat != "" {
+	// 新端点的 response_format 词汇是 url / b64_json，与旧端点的 base64 不同。
+	// 白名单外的值（例如沿用旧词汇的 base64）直接以 400 拒绝，不静默发往上游再失败
+	switch request.ResponseFormat {
+	case "":
+		// 客户端没指定就不下发该字段，由上游按自己的默认出图
+	case "url", "b64_json":
 		minimaxRequest.ResponseFormat = request.ResponseFormat
+	default:
+		return MiniMaxH3ImageRequest{}, minimaxImageInvalidRequest(
+			"minimax image response_format must be one of url, b64_json, got %q", request.ResponseFormat)
 	}
 
 	// disable_prompt_enhanced 与旧端点的 prompt_optimizer 语义相反，不做取反推导
@@ -367,8 +374,10 @@ func minimaxH3ImageUpstreamError(message string, code json.RawMessage) *types.Ne
 	}, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
 }
 
-// miniMaxImageCount 按翻译后的 OpenAI 形状统计计费张数：
-// 取有 url 的条目数与有 b64_json 的条目数中的较大者，拆分的一张图只计一次。
+// miniMaxImageCount counts billable images from the translated OpenAI-shaped
+// payload: the larger of the url-bearing and b64_json-bearing entry counts, so
+// one image split across both representations bills once and payload-less
+// entries bill nothing. Same rule as openaiImageResponseCount.
 func miniMaxImageCount(data []dto.ImageData) int64 {
 	var urls, b64s int64
 	for _, item := range data {
@@ -382,9 +391,23 @@ func miniMaxImageCount(data []dto.ImageData) int64 {
 	return max(urls, b64s)
 }
 
+// minimaxUpstreamModelName resolves the upstream model name: the channel mapped
+// name first, the origin model name as fallback. The caller that owns the
+// resolved name writes it back to info.UpstreamModelName so the request URL and
+// the response parser read the same value.
+func minimaxUpstreamModelName(info *relaycommon.RelayInfo) string {
+	if info == nil {
+		return ""
+	}
+	if model := info.GetUpstreamModelName(); model != "" {
+		return model
+	}
+	return info.GetOriginModelName()
+}
+
 func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	// 渠道做过模型映射时，上游请求体里的 model 是映射后的上游名
-	if isMiniMaxH3ImageModel(info.GetUpstreamModelName()) {
+	if isMiniMaxH3ImageModel(minimaxUpstreamModelName(info)) {
 		return miniMaxH3ImageHandler(c, resp, info)
 	}
 
@@ -410,7 +433,8 @@ func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	// 计费张数按翻译后的 OpenAI 形状条目推导：旧端点的两个数组并进同一个数组
+	// 计费张数按翻译后的 OpenAI 形状载荷推导：旧端点的 url 与 base64 两个数组并进同一个数组，
+	// 同一张图可能在两个数组里各出现一次，取两者的较大值只算一张
 	info.UpdateImageCount(miniMaxImageCount(openAIResponse.Data))
 	jsonResponse, err := common.Marshal(openAIResponse)
 	if err != nil {
@@ -438,7 +462,8 @@ func miniMaxH3ImageHandler(c *gin.Context, resp *http.Response, info *relaycommo
 	if apiErr != nil {
 		return nil, apiErr
 	}
-	// 计费张数按翻译后的 OpenAI 形状条目推导
+	// 计费张数按翻译后的 OpenAI 形状载荷推导：上游 data[] 一项一张图，
+	// 同一项同时给 url 与 b64_json 是同一张图的两种表示，只算一张
 	info.UpdateImageCount(miniMaxImageCount(openAIResponse.Data))
 	jsonResponse, err := common.Marshal(openAIResponse)
 	if err != nil {

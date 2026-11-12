@@ -2,12 +2,12 @@ package minimax
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -22,6 +22,11 @@ import (
 
 type Adaptor struct {
 }
+
+// contextKeyAudioCodec 保存本次请求实际发给上游的音频编码，响应侧据此决定 Content-Type。
+// 不复用 "response_format"：那个键在 minimax 包里表示上游 output_format（载荷编码），
+// 与客户端要的音频编码不是一回事。
+const contextKeyAudioCodec = "audio_codec"
 
 func (a *Adaptor) ConvertGeminiRequest(*gin.Context, *relaycommon.RelayInfo, *dto.GeminiChatRequest) (any, error) {
 	return nil, errors.New("not implemented")
@@ -39,17 +44,25 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		return convertMiniMaxMediaRequest(c, info, request)
 	}
 	if info.RelayMode != constant.RelayModeAudioSpeech {
-		return nil, errors.New("unsupported audio relay mode")
+		return nil, types.NewErrorWithStatusCode(
+			errors.New("unsupported audio relay mode"),
+			types.ErrorCodeInvalidRequest,
+			http.StatusBadRequest,
+			types.ErrOptionWithStatusCode(http.StatusBadRequest),
+			types.ErrOptionWithSkipRetry(),
+		)
 	}
 
-	// 上游 t2a_v2 的顶层 output_format 只接受 mp3 与 hex，其它值直接拒绝，不静默降级
-	outputFormat := request.ResponseFormat
-	if outputFormat == "" {
-		outputFormat = "mp3"
-	}
-	if outputFormat != "mp3" && outputFormat != "hex" {
+	// 客户端 response_format 的语义是「要什么音频编码」，不是载荷怎么传。
+	// hex/url 是载荷语义，一律按 mp3 处理；空串是 OpenAI 客户端的默认值。
+	audioCodec := "mp3"
+	switch request.ResponseFormat {
+	case "mp3", "wav", "flac", "aac", "pcm":
+		audioCodec = request.ResponseFormat
+	case "", "hex", "url":
+	default:
 		return nil, types.NewErrorWithStatusCode(
-			fmt.Errorf("minimax speech only supports mp3 and hex output format, got %q", outputFormat),
+			fmt.Errorf("minimax speech only supports mp3, wav, flac, aac and pcm audio format, got %q", request.ResponseFormat),
 			types.ErrorCodeInvalidRequest,
 			http.StatusBadRequest,
 			types.ErrOptionWithStatusCode(http.StatusBadRequest),
@@ -72,26 +85,40 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 			VoiceID: request.Voice,
 			Speed:   speed,
 		},
-		// audio_setting.format 是音频编码，与顶层 output_format（载荷编码）不是一个语义，恒为 mp3
+		// audio_setting.format 是音频编码；顶层 output_format 是载荷编码，上游只接受 hex 与 mp3，
+		// 载荷恒为 hex 就永远解得出来，不必猜 mp3 载荷的真实编码
 		AudioSetting: &AudioSetting{
-			Format: "mp3",
+			Format: audioCodec,
 		},
-		OutputFormat: outputFormat,
+		OutputFormat: "hex",
 	}
 
 	// 同步扩展字段的厂商自定义metadata
 	if len(request.Metadata) > 0 {
-		if err := json.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
+		if err := common.Unmarshal(request.Metadata, &minimaxRequest); err != nil {
 			return nil, fmt.Errorf("error unmarshalling metadata to minimax request: %w", err)
 		}
 	}
 
 	// metadata 可以补齐 voice_setting，但不能改写输出格式与音频编码
-	minimaxRequest.OutputFormat = outputFormat
+	minimaxRequest.OutputFormat = "hex"
 	if minimaxRequest.AudioSetting == nil {
 		minimaxRequest.AudioSetting = &AudioSetting{}
 	}
-	minimaxRequest.AudioSetting.Format = "mp3"
+	minimaxRequest.AudioSetting.Format = audioCodec
+
+	// metadata 只能补字段，不能改写模型 / 文本 / 音色 / 流式开关：
+	// 模型必须走渠道映射后的名字，文本与音色以客户端显式给的为准，
+	// 上游流式这条链路解不了 chunked 载荷，所以流式恒为关
+	minimaxRequest.Model = model
+	minimaxRequest.Stream = false
+	minimaxRequest.StreamOptions = nil
+	if request.Input != "" {
+		minimaxRequest.Text = request.Input
+	}
+	if request.Voice != "" {
+		minimaxRequest.VoiceSetting.VoiceID = request.Voice
+	}
 
 	if minimaxRequest.VoiceSetting.VoiceID == "" {
 		return nil, types.NewErrorWithStatusCode(
@@ -103,13 +130,13 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 		)
 	}
 
-	jsonData, err := json.Marshal(minimaxRequest)
+	jsonData, err := common.Marshal(minimaxRequest)
 	if err != nil {
 		return nil, fmt.Errorf("error marshalling minimax request: %w", err)
 	}
 
-	// 响应解码规则由本次请求实际发给上游的 output_format 决定
-	c.Set("response_format", outputFormat)
+	// 响应的 Content-Type 由本次请求实际发给上游的音频编码决定
+	c.Set(contextKeyAudioCodec, audioCodec)
 
 	// Debug: log the request structure
 	// fmt.Printf("MiniMax TTS Request: %s\n", string(jsonData))
@@ -119,12 +146,17 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
 	if info.RelayMode != constant.RelayModeImagesGenerations {
-		return nil, fmt.Errorf("unsupported image relay mode: %d", info.RelayMode)
+		return nil, minimaxImageInvalidRequest("unsupported image relay mode: %d", info.RelayMode)
 	}
-	// 渠道做过模型映射时，上游请求体里的 model 是映射后的上游名
-	upstreamModel := info.GetUpstreamModelName()
+	// 渠道做过模型映射时，上游请求体里的 model 是映射后的上游名；
+	// 原始模型名缺失时退回请求里的 model，并把结果写回 info，
+	// 让请求 URL 与响应解析读到同一个模型名
+	upstreamModel := minimaxUpstreamModelName(info)
 	if upstreamModel == "" {
 		upstreamModel = request.Model
+	}
+	if upstreamModel != "" && info.ChannelMeta != nil {
+		info.UpstreamModelName = upstreamModel
 	}
 	if isMiniMaxH3ImageModel(upstreamModel) {
 		h3Request, err := oaiImage2MiniMaxH3ImageRequest(request, upstreamModel)

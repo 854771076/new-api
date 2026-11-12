@@ -1,14 +1,15 @@
 package minimax
 
 import (
+	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -118,7 +119,7 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 
 	// Parse response
 	var minimaxResp MiniMaxTTSResponse
-	if unmarshalErr := json.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
+	if unmarshalErr := common.Unmarshal(body, &minimaxResp); unmarshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to unmarshal minimax TTS response: %w", unmarshalErr),
 			types.ErrorCodeBadResponseBody,
@@ -144,26 +145,31 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 		)
 	}
 
-	// 解码规则由本次请求实际发给上游的 output_format 决定，不靠猜载荷长相
-	outputFormat := c.GetString("response_format")
+	// 音频编码由本次请求实际发给上游的 audio_setting.format 决定
+	audioCodec := c.GetString(contextKeyAudioCodec)
+	if audioCodec == "" {
+		audioCodec = "mp3"
+	}
 
 	if strings.HasPrefix(minimaxResp.Data.Audio, "http") {
 		c.Redirect(http.StatusFound, minimaxResp.Data.Audio)
 	} else {
-		audioData := []byte(minimaxResp.Data.Audio)
-		if outputFormat == "hex" {
-			decoded, decodeErr := hex.DecodeString(minimaxResp.Data.Audio)
-			if decodeErr != nil {
-				return nil, types.NewErrorWithStatusCode(
-					fmt.Errorf("failed to decode hex audio data: %w", decodeErr),
-					types.ErrorCodeBadResponse,
-					http.StatusInternalServerError,
-				)
-			}
-			audioData = decoded
+		// 请求恒定让上游以 hex 回载荷，先按 hex 解；hex 解不开再退一步试 base64，
+		// 都解不开说明上游回了非预期内容，不能把原文当音频字节回传
+		audioData, decodeErr := hex.DecodeString(minimaxResp.Data.Audio)
+		if decodeErr != nil {
+			audioData, decodeErr = base64.StdEncoding.DecodeString(minimaxResp.Data.Audio)
+		}
+		if decodeErr != nil {
+			return nil, types.NewErrorWithStatusCode(
+				fmt.Errorf("failed to decode minimax audio data: %w", decodeErr),
+				types.ErrorCodeBadResponse,
+				http.StatusBadGateway,
+				types.ErrOptionWithStatusCode(http.StatusBadGateway),
+			)
 		}
 
-		c.Data(http.StatusOK, getContentTypeByFormat(outputFormat), audioData)
+		c.Data(http.StatusOK, getContentTypeByFormat(audioCodec), audioData)
 	}
 
 	usage = &dto.Usage{
