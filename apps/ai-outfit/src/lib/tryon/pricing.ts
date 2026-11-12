@@ -40,13 +40,19 @@ function findEntry(data: GatewayPricingEntry[], modelName: string): GatewayPrici
   return data.find((e) => modelName.startsWith(`${e.model_name}-`) || e.model_name.startsWith(`${modelName}-`));
 }
 
-// 分组倍率：优先取模型 enable_groups 里首个可用分组倍率；多分组不一致时近似取唯一值，否则 1。
+// 分组倍率：中继按用户所属分组统一计费（非按模型 enable_groups 逐条取倍率），
+// 而 /oauth/pricing 只回传「当前用户可用分组」的倍率，未直接标注用户所属分组。
+// 因此当启用且可用的分组倍率唯一时直接取用；不一致时回退默认倍率 1（展示口径，
+// 登录后下单以网关精确结算为准）。
 function effectiveGroupRatio(pricing: GatewayPricing, entry: GatewayPricingEntry): number {
+  const usable = new Set(Object.keys(pricing.usable_group));
+  const ratios = new Set<number>();
   for (const g of entry.enable_groups ?? []) {
-    if (g !== 'all' && typeof pricing.group_ratio[g] === 'number') return pricing.group_ratio[g];
+    if (g === 'all' || !usable.has(g)) continue;
+    const ratio = pricing.group_ratio[g];
+    if (typeof ratio === 'number') ratios.add(ratio);
   }
-  const values = Object.values(pricing.group_ratio).filter((v) => typeof v === 'number');
-  return values.length === 1 ? values[0] : 1;
+  return ratios.size === 1 ? [...ratios][0] : 1;
 }
 
 // 解析 tiered_expr：单次价返回 fixed，线性 token 表达式返回各变量系数；
@@ -100,6 +106,7 @@ function tieredTokenQuota(
 // 倍率计费：对齐网关 text_quota 的公式
 // quota = (text + image×image_ratio + output×completion_ratio) × model_ratio × group_ratio。
 // model_ratio / image_ratio 是无单位倍率，不乘 quota_per_unit、不除 1M。
+// model_ratio 由网关 GetModelRatio 填充（未配置时回退 37.5），倍率模式下恒为有效值，无需此处兜底。
 function ratioQuota(
   tokens: TokenEstimates,
   entry: GatewayPricingEntry,
