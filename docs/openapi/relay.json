@@ -1859,6 +1859,14 @@
                         "description": "克隆的补充提示，不能替代 metadata.file_id",
                         "properties": {
                           "prompt_audio": {
+                            "oneOf": [
+                              {
+                                "type": "integer"
+                              },
+                              {
+                                "type": "string"
+                              }
+                            ],
                             "description": "提示音频的 id，数字或字符串都行，原样转发给上游",
                             "example": 1234567890
                           },
@@ -1877,7 +1885,8 @@
                 },
                 "required": [
                   "model",
-                  "voice"
+                  "voice",
+                  "metadata"
                 ]
               }
             }
@@ -1907,8 +1916,15 @@
                       "description": "上游的输入敏感度信息",
                       "properties": {
                         "type": {
-                          "type": "integer",
-                          "description": "敏感度等级，上游给的是数字",
+                          "oneOf": [
+                            {
+                              "type": "integer"
+                            },
+                            {
+                              "type": "string"
+                            }
+                          ],
+                          "description": "敏感度等级，上游可能给数字也可能给字符串",
                           "example": 0
                         }
                       }
@@ -1970,7 +1986,12 @@
             },
             "headers": {}
           }
-        }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
       }
     },
     "/v1/audio/voice/design": {
@@ -2021,7 +2042,8 @@
                 },
                 "required": [
                   "model",
-                  "input"
+                  "input",
+                  "metadata"
                 ]
               }
             }
@@ -2057,7 +2079,12 @@
             },
             "headers": {}
           }
-        }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
       }
     },
     "/v1/audio/music": {
@@ -2088,7 +2115,7 @@
                   },
                   "metadata": {
                     "type": "object",
-                    "description": "厂商自定义字段",
+                    "description": "厂商自定义字段，走 metadata 分支时必须带 lyrics",
                     "properties": {
                       "lyrics": {
                         "type": "string",
@@ -2125,6 +2152,18 @@
                 },
                 "required": [
                   "model"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "input"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "metadata"
+                    ]
+                  }
                 ]
               }
             }
@@ -2166,7 +2205,12 @@
             "description": "上游给了音频地址时直接跳转",
             "headers": {}
           }
-        }
+        },
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ]
       }
     },
     "/v1/rerank": {
