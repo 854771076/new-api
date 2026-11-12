@@ -65,6 +65,19 @@ export function useAuthRedirect() {
 
       const targetPath =
         sanitizeAuthRedirect(redirectTo, window.location.origin) ?? '/dashboard'
+      // `/oauth/authorize` is served by the Go backend, not the SPA. A client
+      // navigation would match it to the frontend `/oauth/$provider` route and
+      // show "Missing code". Use a full page load so the browser re-enters the
+      // authorization endpoint with the freshly established session.
+      try {
+        const targetURL = new URL(targetPath, window.location.origin)
+        if (targetURL.pathname === '/oauth/authorize') {
+          window.location.assign(targetPath)
+          return
+        }
+      } catch {
+        // Fall through to the SPA navigation below.
+      }
       await navigate({ href: targetPath, replace: true })
     },
     [navigate, sessionID]
