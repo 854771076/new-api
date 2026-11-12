@@ -8,6 +8,8 @@ var ModelList = []string{
 	"abab6-chat",
 	"abab5.5-chat",
 	"abab5.5s-chat",
+	"MiniMax-M3",
+	"MiniMax-M3.1-Flash",
 	"MiniMax-M2.7",
 	"MiniMax-M2.7-highspeed",
 	"speech-2.5-hd-preview",
@@ -23,6 +25,9 @@ var ModelList = []string{
 	"MiniMax-M2.5-highspeed",
 	"image-01",
 	"image-01-live",
+	"MiniMax-H3-Image",
+	"MiniMax-H3-Image-Highspeed",
+	"music-3.0",
 }
 
 var ChannelName = "minimax"

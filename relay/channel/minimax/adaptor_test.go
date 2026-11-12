@@ -1,7 +1,9 @@
 package minimax
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +13,11 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetRequestURLForImageGeneration(t *testing.T) {
@@ -118,6 +123,174 @@ func TestDoResponseForImageGeneration(t *testing.T) {
 	if strings.Contains(body, `"image_urls"`) {
 		t.Fatalf("response body = %s, should not expose raw MiniMax image_urls payload", body)
 	}
+}
+
+func TestMiniMaxModelListIncludesOfficialFamilies(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{
+		"MiniMax-M3",
+		"MiniMax-M3.1-Flash",
+		"MiniMax-H3-Image",
+		"MiniMax-H3-Image-Highspeed",
+		"music-3.0",
+	} {
+		assert.Contains(t, ModelList, model, "official model %q should be registered", model)
+	}
+
+	// 停服的免费音乐模型与 hailuo 插件认领的语音模型不进渠道清单
+	for _, model := range []string{
+		"Music-3.0-free",
+		"Music-2.6-free",
+		"music-cover-free",
+		"speech-2.8-hd",
+		"speech-2.8-turbo",
+		"speech-2.6-hd",
+		"speech-2.6-turbo",
+	} {
+		assert.NotContains(t, ModelList, model, "model %q should not be registered in the channel model list", model)
+	}
+
+	// 既有语音条目不能重复登记
+	for _, model := range []string{
+		"speech-02-hd",
+		"speech-02-turbo",
+		"speech-01-hd",
+		"speech-01-turbo",
+	} {
+		count := 0
+		for _, registered := range ModelList {
+			if registered == model {
+				count++
+			}
+		}
+		assert.Equal(t, 1, count, "model %q should be registered exactly once", model)
+	}
+}
+
+func TestMiniMaxSpeechOutputFormat(t *testing.T) {
+	t.Parallel()
+
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		RelayMode:       relayconstant.RelayModeAudioSpeech,
+		OriginModelName: "speech-02-hd",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "speech-02-hd",
+		},
+	}
+
+	tests := []struct {
+		name           string
+		responseFormat string
+		wantOutput     string
+		wantRejected   bool
+	}{
+		{name: "missing format defaults to mp3", wantOutput: "mp3"},
+		{name: "mp3 accepted", responseFormat: "mp3", wantOutput: "mp3"},
+		{name: "hex accepted", responseFormat: "hex", wantOutput: "hex"},
+		{name: "opus rejected", responseFormat: "opus", wantRejected: true},
+		{name: "aac rejected", responseFormat: "aac", wantRejected: true},
+		{name: "flac rejected", responseFormat: "flac", wantRejected: true},
+		{name: "wav rejected", responseFormat: "wav", wantRejected: true},
+		{name: "pcm rejected", responseFormat: "pcm", wantRejected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c := gin.CreateTestContextOnly(recorder, gin.New())
+
+			body, err := adaptor.ConvertAudioRequest(c, info, dto.AudioRequest{
+				Model:          "speech-02-hd",
+				Input:          "hello",
+				Voice:          "male-qn-qingse",
+				ResponseFormat: tt.responseFormat,
+			})
+			if tt.wantRejected {
+				require.Error(t, err)
+				var apiErr *types.NewAPIError
+				require.ErrorAs(t, err, &apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+				assert.Contains(t, apiErr.Error(), "mp3")
+				assert.Contains(t, apiErr.Error(), "hex")
+				return
+			}
+			require.NoError(t, err)
+
+			payload := decodeMiniMaxTTSRequest(t, body)
+			assert.Equal(t, tt.wantOutput, payload["output_format"])
+			audioSetting, ok := payload["audio_setting"].(map[string]any)
+			require.True(t, ok, "audio_setting should be present in the upstream request")
+			assert.Equal(t, "mp3", audioSetting["format"])
+			assert.Equal(t, tt.wantOutput, c.GetString("response_format"))
+
+			// 响应解码按本次请求实际发给上游的 output_format 走
+			wantAudio := "mp3-audio"
+			upstreamAudio := wantAudio
+			if tt.wantOutput == "hex" {
+				upstreamAudio = hex.EncodeToString([]byte(wantAudio))
+			}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"data":{"audio":"` + upstreamAudio + `","status":2}}`)),
+			}
+			_, apiErr := handleTTSResponse(c, resp, info)
+			require.Nil(t, apiErr)
+			assert.Equal(t, "audio/mpeg", recorder.Header().Get("Content-Type"))
+			assert.Equal(t, wantAudio, recorder.Body.String())
+		})
+	}
+}
+
+func TestMiniMaxSpeechVoiceIdRequired(t *testing.T) {
+	t.Parallel()
+
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		RelayMode:       relayconstant.RelayModeAudioSpeech,
+		OriginModelName: "speech-02-hd",
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "speech-02-hd",
+		},
+	}
+
+	c := gin.CreateTestContextOnly(httptest.NewRecorder(), gin.New())
+	_, err := adaptor.ConvertAudioRequest(c, info, dto.AudioRequest{
+		Model: "speech-02-hd",
+		Input: "hello",
+		Voice: "",
+	})
+	require.Error(t, err)
+	var apiErr *types.NewAPIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+	assert.Contains(t, apiErr.Error(), "voice_id")
+
+	// 给了音色 id 时不应被拒
+	c2 := gin.CreateTestContextOnly(httptest.NewRecorder(), gin.New())
+	body, err := adaptor.ConvertAudioRequest(c2, info, dto.AudioRequest{
+		Model: "speech-02-hd",
+		Input: "hello",
+		Voice: "male-qn-qingse",
+	})
+	require.NoError(t, err)
+	payload := decodeMiniMaxTTSRequest(t, body)
+	voiceSetting, ok := payload["voice_setting"].(map[string]any)
+	require.True(t, ok, "voice_setting should be present in the upstream request")
+	assert.Equal(t, "male-qn-qingse", voiceSetting["voice_id"])
+}
+
+func decodeMiniMaxTTSRequest(t *testing.T, body io.Reader) map[string]any {
+	t.Helper()
+
+	raw, err := io.ReadAll(body)
+	require.NoError(t, err)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	return payload
 }
 
 type nopReadCloser struct {

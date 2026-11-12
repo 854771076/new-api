@@ -1,6 +1,7 @@
 package minimax
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,52 @@ type MiniMaxImageResponse struct {
 	} `json:"base_resp"`
 }
 
+// MiniMax 有两个图像端点，形状不同：旧端点 /v1/image_generation 的响应是
+// data.image_urls[] 与 data.image_base64[] 两个数组，新端点 /v1/images/generations
+// 的响应是 data[] 数组，每项带 url 或 b64_json。
+const (
+	// 新端点单次最多生成 10 张图
+	minimaxH3ImageMaxN = 10
+	// 新端点的默认分辨率档位
+	minimaxH3ImageArea1K = "1K"
+)
+
+// MiniMaxH3ImageRequest 是新端点 POST /v1/images/generations 的请求体。
+type MiniMaxH3ImageRequest struct {
+	Model                 string `json:"model"`
+	Prompt                string `json:"prompt"`
+	N                     int    `json:"n"`
+	Size                  string `json:"size,omitempty"`
+	AspectRatio           string `json:"aspect_ratio,omitempty"`
+	Area                  string `json:"area,omitempty"`
+	OutputFormat          string `json:"output_format,omitempty"`
+	ResponseFormat        string `json:"response_format,omitempty"`
+	DisablePromptEnhanced *bool  `json:"disable_prompt_enhanced,omitempty"`
+}
+
+// MiniMaxH3ImageResponse 是新端点的响应体。
+type MiniMaxH3ImageResponse struct {
+	Data     []MiniMaxH3ImageData `json:"data"`
+	Error    *MiniMaxH3ImageError `json:"error"`
+	BaseResp struct {
+		StatusCode int    `json:"status_code"`
+		StatusMsg  string `json:"status_msg"`
+	} `json:"base_resp"`
+}
+
+type MiniMaxH3ImageData struct {
+	URL           string               `json:"url"`
+	B64Json       string               `json:"b64_json"`
+	Size          string               `json:"size"`
+	RevisedPrompt string               `json:"revised_prompt"`
+	Error         *MiniMaxH3ImageError `json:"error"`
+}
+
+type MiniMaxH3ImageError struct {
+	Code    json.RawMessage `json:"code"`
+	Message string          `json:"message"`
+}
+
 func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest {
 	responseFormat := normalizeMiniMaxResponseFormat(request.ResponseFormat)
 	minimaxRequest := MiniMaxImageRequest{
@@ -66,6 +113,102 @@ func oaiImage2MiniMaxImageRequest(request dto.ImageRequest) MiniMaxImageRequest 
 	}
 
 	return minimaxRequest
+}
+
+// isMiniMaxH3ImageModel 判断上游模型是否走新端点 /v1/images/generations。
+func isMiniMaxH3ImageModel(model string) bool {
+	switch model {
+	case "MiniMax-H3-Image", "MiniMax-H3-Image-Highspeed":
+		return true
+	default:
+		return false
+	}
+}
+
+// oaiImage2MiniMaxH3ImageRequest 把 OpenAI 形状的图像请求翻译成新端点的请求体。
+// 新端点只接受 n 1-10，越界以 400 拒绝，不静默截断：截断会让计费乘数与真实出图数不一致。
+func oaiImage2MiniMaxH3ImageRequest(request dto.ImageRequest, model string) (MiniMaxH3ImageRequest, error) {
+	n := 1
+	if request.N != nil && *request.N > 0 {
+		n = int(*request.N)
+	}
+	if n > minimaxH3ImageMaxN {
+		return MiniMaxH3ImageRequest{}, minimaxImageInvalidRequest(
+			"minimax image generation supports at most %d images per request, got %d", minimaxH3ImageMaxN, n)
+	}
+
+	minimaxRequest := MiniMaxH3ImageRequest{
+		Model:  model,
+		Prompt: request.Prompt,
+		N:      n,
+		Size:   request.Size,
+	}
+	if aspectRatio := aspectRatioFromImageRequest(request); aspectRatio != "" {
+		minimaxRequest.AspectRatio = aspectRatio
+	}
+
+	area, err := minimaxH3ImageArea(request)
+	if err != nil {
+		return MiniMaxH3ImageRequest{}, err
+	}
+	minimaxRequest.Area = area
+
+	if len(request.OutputFormat) > 0 {
+		var outputFormat string
+		if err := common.Unmarshal(request.OutputFormat, &outputFormat); err != nil {
+			return MiniMaxH3ImageRequest{}, minimaxImageInvalidRequest("minimax image output_format must be a string")
+		}
+		minimaxRequest.OutputFormat = outputFormat
+	}
+
+	// 新端点的 response_format 词汇是 url / b64_json，与旧端点不同，直接透传给上游
+	if request.ResponseFormat != "" {
+		minimaxRequest.ResponseFormat = request.ResponseFormat
+	}
+
+	// disable_prompt_enhanced 与旧端点的 prompt_optimizer 语义相反，不做取反推导
+	if raw, ok := request.Extra["disable_prompt_enhanced"]; ok {
+		var disablePromptEnhanced bool
+		if err := common.Unmarshal(raw, &disablePromptEnhanced); err != nil {
+			return MiniMaxH3ImageRequest{}, minimaxImageInvalidRequest("minimax image disable_prompt_enhanced must be a boolean")
+		}
+		minimaxRequest.DisablePromptEnhanced = &disablePromptEnhanced
+	}
+
+	return minimaxRequest, nil
+}
+
+// minimaxH3ImageArea 取新端点的分辨率档位：只收 1K / 2K / 4K，缺省 1K。
+func minimaxH3ImageArea(request dto.ImageRequest) (string, error) {
+	raw, ok := request.Extra["area"]
+	if !ok {
+		return minimaxH3ImageArea1K, nil
+	}
+	var area string
+	if err := common.Unmarshal(raw, &area); err != nil {
+		return "", minimaxImageInvalidRequest("minimax image area must be a string")
+	}
+	switch strings.ToUpper(strings.TrimSpace(area)) {
+	case "1K":
+		return "1K", nil
+	case "2K":
+		return "2K", nil
+	case "4K":
+		return "4K", nil
+	default:
+		return "", minimaxImageInvalidRequest("minimax image area must be one of 1K, 2K, 4K, got %q", area)
+	}
+}
+
+// minimaxImageInvalidRequest 造一个渠道侧的 400：请求本身越界，重投到下一个渠道也不会变好。
+func minimaxImageInvalidRequest(format string, args ...any) error {
+	return types.NewErrorWithStatusCode(
+		fmt.Errorf(format, args...),
+		types.ErrorCodeInvalidRequest,
+		http.StatusBadRequest,
+		types.ErrOptionWithStatusCode(http.StatusBadRequest),
+		types.ErrOptionWithSkipRetry(),
+	)
 }
 
 func aspectRatioFromImageRequest(request dto.ImageRequest) string {
@@ -175,7 +318,76 @@ func responseMiniMax2OpenAIImage(response *MiniMaxImageResponse, info *relaycomm
 	return imageResponse, nil
 }
 
+// responseMiniMaxH3Image2OpenAIImage 把新端点的响应翻译成 OpenAI 形状的图像产物。
+func responseMiniMaxH3Image2OpenAIImage(responseBody []byte, info *relaycommon.RelayInfo) (*dto.ImageResponse, *types.NewAPIError) {
+	var minimaxResponse MiniMaxH3ImageResponse
+	if err := common.Unmarshal(responseBody, &minimaxResponse); err != nil {
+		return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+	if minimaxResponse.Error != nil && minimaxResponse.Error.Message != "" {
+		return nil, minimaxH3ImageUpstreamError(minimaxResponse.Error.Message, minimaxResponse.Error.Code)
+	}
+	if minimaxResponse.BaseResp.StatusCode != 0 {
+		return nil, minimaxH3ImageUpstreamError(minimaxResponse.BaseResp.StatusMsg, nil)
+	}
+
+	imageResponse := &dto.ImageResponse{
+		Created: info.StartTime.Unix(),
+	}
+	for _, item := range minimaxResponse.Data {
+		if item.Error != nil && item.Error.Message != "" {
+			return nil, minimaxH3ImageUpstreamError(item.Error.Message, item.Error.Code)
+		}
+		imageResponse.Data = append(imageResponse.Data, dto.ImageData{
+			Url:           item.URL,
+			B64Json:       item.B64Json,
+			RevisedPrompt: item.RevisedPrompt,
+		})
+	}
+
+	return imageResponse, nil
+}
+
+// minimaxH3ImageUpstreamError 造新端点的上游错误。
+// 新端点非幂等（上游可等待 600 秒），网关在通道错误时会把同一 POST 重投到下一个渠道，
+// 会造成上游重复生成与重复计费，所以带 skip-retry；
+// 错误码不能用 channel: 前缀 —— DecideRelayRetry 先判 channel: 判成 retry，再看 skip-retry。
+func minimaxH3ImageUpstreamError(message string, code json.RawMessage) *types.NewAPIError {
+	if message == "" {
+		message = "minimax image generation failed"
+	}
+	errorCode := strings.Trim(strings.TrimSpace(string(code)), `"`)
+	if errorCode == "" || errorCode == "null" {
+		errorCode = "minimax_image_error"
+	}
+	return types.WithOpenAIError(types.OpenAIError{
+		Message: message,
+		Type:    "minimax_image_error",
+		Code:    errorCode,
+	}, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+}
+
+// miniMaxImageCount 按翻译后的 OpenAI 形状统计计费张数：
+// 取有 url 的条目数与有 b64_json 的条目数中的较大者，拆分的一张图只计一次。
+func miniMaxImageCount(data []dto.ImageData) int64 {
+	var urls, b64s int64
+	for _, item := range data {
+		if item.Url != "" {
+			urls++
+		}
+		if item.B64Json != "" {
+			b64s++
+		}
+	}
+	return max(urls, b64s)
+}
+
 func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+	// 渠道做过模型映射时，上游请求体里的 model 是映射后的上游名
+	if isMiniMaxH3ImageModel(info.GetUpstreamModelName()) {
+		return miniMaxH3ImageHandler(c, resp, info)
+	}
+
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
@@ -198,6 +410,36 @@ func miniMaxImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	// 计费张数按翻译后的 OpenAI 形状条目推导：旧端点的两个数组并进同一个数组
+	info.UpdateImageCount(miniMaxImageCount(openAIResponse.Data))
+	jsonResponse, err := common.Marshal(openAIResponse)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(resp.StatusCode)
+	if _, err := c.Writer.Write(jsonResponse); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
+	}
+
+	return &dto.Usage{}, nil
+}
+
+// miniMaxH3ImageHandler 处理新端点 /v1/images/generations 的响应。
+func miniMaxH3ImageHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
+	}
+	service.CloseResponseBodyGracefully(resp)
+
+	openAIResponse, apiErr := responseMiniMaxH3Image2OpenAIImage(responseBody, info)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	// 计费张数按翻译后的 OpenAI 形状条目推导
+	info.UpdateImageCount(miniMaxImageCount(openAIResponse.Data))
 	jsonResponse, err := common.Marshal(openAIResponse)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)

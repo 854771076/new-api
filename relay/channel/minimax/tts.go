@@ -144,23 +144,26 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 		)
 	}
 
+	// 解码规则由本次请求实际发给上游的 output_format 决定，不靠猜载荷长相
+	outputFormat := c.GetString("response_format")
+
 	if strings.HasPrefix(minimaxResp.Data.Audio, "http") {
 		c.Redirect(http.StatusFound, minimaxResp.Data.Audio)
 	} else {
-		// Handle hex-encoded audio data
-		audioData, decodeErr := hex.DecodeString(minimaxResp.Data.Audio)
-		if decodeErr != nil {
-			return nil, types.NewErrorWithStatusCode(
-				fmt.Errorf("failed to decode hex audio data: %w", decodeErr),
-				types.ErrorCodeBadResponse,
-				http.StatusInternalServerError,
-			)
+		audioData := []byte(minimaxResp.Data.Audio)
+		if outputFormat == "hex" {
+			decoded, decodeErr := hex.DecodeString(minimaxResp.Data.Audio)
+			if decodeErr != nil {
+				return nil, types.NewErrorWithStatusCode(
+					fmt.Errorf("failed to decode hex audio data: %w", decodeErr),
+					types.ErrorCodeBadResponse,
+					http.StatusInternalServerError,
+				)
+			}
+			audioData = decoded
 		}
 
-		// Determine content type - default to mp3
-		contentType := "audio/mpeg"
-
-		c.Data(http.StatusOK, contentType, audioData)
+		c.Data(http.StatusOK, getContentTypeByFormat(outputFormat), audioData)
 	}
 
 	usage = &dto.Usage{
