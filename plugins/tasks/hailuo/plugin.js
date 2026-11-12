@@ -8,11 +8,11 @@ const VIDEO_SECONDS_FIELD = {
 
 const RESOLUTION_DESCRIPTION = { en: "Output video resolution", zh: "输出视频分辨率" };
 
-// MiniMax-H3 allows duration 4 to 15 and renders 768P or 2K.
+// The H3 family allows duration 4 to 15 and renders 480P, 768P or 2K.
 const H3_USAGE_SCHEMA = {
   seconds: VIDEO_SECONDS_FIELD,
   resolution: {
-    enum: ["768P", "2K"],
+    enum: ["480P", "768P", "2K"],
     description: RESOLUTION_DESCRIPTION,
   },
   // Input image count (estimated at submit, actual on completion).
@@ -53,8 +53,22 @@ const HAILUO_01_USAGE_SCHEMA = {
   seconds: VIDEO_SECONDS_FIELD,
 };
 
-// MiniMax serves MiniMax-H3 on its /v2 video API and every other model on /v1.
-const H3_MODEL = "MiniMax-H3";
+// The long-text speech task is billed on the characters of the text it speaks,
+// which the create reply reports.
+const SPEECH_USAGE_SCHEMA = {
+  characters: {
+    type: "number",
+    unit: "token",
+    description: { en: "Long text speech unit price", zh: "长文本语音单价" },
+  },
+};
+
+// MiniMax serves the H3 family on its /v2 video API and every other model on /v1.
+// The APIMart side keeps minimax-H3 and minimax-H3-Max out of its own list, so
+// these four names fold to nothing else in the gateway.
+const H3_MODELS = ["MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"];
+// The family as one readable list, for the messages that hold for all of them.
+const H3_FAMILY = H3_MODELS.join(", ");
 const V1_MODELS = [
   "MiniMax-Hailuo-2.3",
   "MiniMax-Hailuo-2.3-Fast",
@@ -66,6 +80,15 @@ const V1_MODELS = [
   "I2V-01",
   "S2V-01",
 ];
+
+// The video models the host protocols claim. The speech models come in at the
+// plugin's own speech route, so they are not part of it.
+const VIDEO_MODELS = H3_MODELS.concat(V1_MODELS);
+
+// MiniMax's long-text asynchronous speech models. They are created at
+// /v1/t2a_async_v2 and queried at /v1/query/t2a_async_query_v2, so they come
+// in at the plugin's own speech route rather than at a host protocol.
+const SPEECH_MODELS = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo"];
 
 // Vendor fields the OpenAI-style requests carry in metadata; the MiniMax body
 // has them at the top level. aigc_watermark is a field of MiniMax's China API
@@ -92,14 +115,14 @@ export const meta = {
   version: "1.4.0",
   author: { name: "QuantumNous" },
   channelTypes: [35],
-  models: [H3_MODEL].concat(V1_MODELS),
+  models: H3_MODELS.concat(V1_MODELS, SPEECH_MODELS),
   fetchMode: "per_task",
   upstreams: ["vendor", "new_api"],
   // Fallback for a channel alias that resolves to more than one model: the
   // union of every family's fields and resolutions.
   usageSchema: Object.assign({}, H3_USAGE_SCHEMA, {
     resolution: {
-      enum: ["512P", "768P", "720P", "1080P", "2K"],
+      enum: ["480P", "512P", "768P", "720P", "1080P", "2K"],
       description: RESOLUTION_DESCRIPTION,
     },
   }),
@@ -110,15 +133,17 @@ export const meta = {
     { label: "02 512P 6s", facts: { seconds: 6, resolution: "512P", input_images: 0, input_video_seconds: 0 } },
     { label: "02 512P 10s", facts: { seconds: 10, resolution: "512P", input_images: 0, input_video_seconds: 0 } },
     { label: "01-series 720P 6s", facts: { seconds: 6, resolution: "720P", input_images: 0, input_video_seconds: 0 } },
+    { label: "H3 480P 5s", facts: { seconds: 5, resolution: "480P", input_images: 0, input_video_seconds: 0 } },
     { label: "H3 768P 5s", facts: { seconds: 5, resolution: "768P", input_images: 0, input_video_seconds: 0 } },
     { label: "H3 2K 5s · 9 images", facts: { seconds: 5, resolution: "2K", input_images: 9, input_video_seconds: 0 } },
     { label: "H3 2K 5s · input video", facts: { seconds: 5, resolution: "2K", input_images: 0, input_video_seconds: 15 } },
   ],
   usageProfiles: [
     {
-      models: ["MiniMax-H3"],
+      models: H3_MODELS,
       schema: H3_USAGE_SCHEMA,
       examples: [
+        { label: "H3 480P 5s", facts: { seconds: 5, resolution: "480P", input_images: 0, input_video_seconds: 0 } },
         { label: "H3 768P 5s", facts: { seconds: 5, resolution: "768P", input_images: 0, input_video_seconds: 0 } },
         { label: "H3 2K 5s", facts: { seconds: 5, resolution: "2K", input_images: 0, input_video_seconds: 0 } },
         { label: "H3 2K 5s · 9 images", facts: { seconds: 5, resolution: "2K", input_images: 9, input_video_seconds: 0 } },
@@ -150,6 +175,14 @@ export const meta = {
       schema: HAILUO_01_USAGE_SCHEMA,
       examples: [{ label: "01-series 720P 6s", facts: { seconds: 6 } }],
     },
+    // Each speech model has its own rate, so each one keeps its own profile.
+    ...SPEECH_MODELS.map(function (model) {
+      return {
+        models: [model],
+        schema: SPEECH_USAGE_SCHEMA,
+        examples: [{ label: model + " · 1k characters", facts: { characters: 1000 } }],
+      };
+    }),
   ],
   // MiniMax request and response bodies, for clients and for a downstream New
   // API gateway, at MiniMax's own paths; the gateway also serves each under
@@ -162,10 +195,19 @@ export const meta = {
     { method: "GET", path: "/hailuo/v1/query/video_generation/:task_id", type: "query", render: "taskStatus" },
     // The video of a /v1 task, under the file id its query reports.
     { method: "GET", path: "/v1/files/retrieve", type: "query", taskIdParam: "file_id", render: "fileRetrieve" },
-    { method: "POST", path: "/v2/video_generation", type: "submit", decode: "createH3Task", render: "taskCreated", models: [H3_MODEL] },
+    { method: "POST", path: "/v2/video_generation", type: "submit", decode: "createH3Task", render: "taskCreated", models: H3_MODELS },
     { method: "GET", path: "/v2/query/video_generation/:task_id", type: "query", render: "h3TaskStatus" },
+    // The long-text speech task, at the plugin's own path: the speech models
+    // claim no host protocol, so this is where they come in.
+    { method: "POST", path: "/hailuo/v1/audio/long_text", type: "submit", decode: "createSpeechTask", render: "speechTaskCreated", models: SPEECH_MODELS },
+    { method: "GET", path: "/hailuo/v1/audio/long_text/:task_id", type: "query", taskIdParam: "task_id", render: "speechTaskStatus" },
   ],
-  protocols: [{ name: "openai_responses", supports: ["stream", "sync", "background"] }, "openai_video"],
+  // The host protocols claim the video models only: a bare protocol name claims
+  // every model of this plugin, the speech models included.
+  protocols: [
+    { name: "openai_responses", supports: ["stream", "sync", "background"], models: VIDEO_MODELS },
+    { name: "openai_video", models: VIDEO_MODELS },
+  ],
 };
 
 function trimmed(value) {
@@ -273,30 +315,94 @@ const H3_MAX_REFERENCE_AUDIOS = 3;
 const H3_MAX_INPUT_VIDEO_SECONDS = 15;
 
 // MiniMax-H3 speaks the /v2 video generation contract: a multimodal `content`
-// array instead of flat frame fields, an explicit `ratio`, 768P/2K resolutions,
-// a task id path parameter on query, and a `{task: {...}}` query envelope.
+// array instead of flat frame fields, an explicit `ratio`, 480P/768P/2K
+// resolutions, a task id path parameter on query, and a `{task: {...}}` query
+// envelope.
 function isH3(model) {
-  return model === H3_MODEL;
+  return H3_MODELS.includes(model);
 }
 
-// MiniMax-H3 renders 4 to 15 seconds; the host protocols default to 5.
-function h3Duration(raw) {
+// The long-text speech models, which come in at the plugin's own speech route
+// and are never claimed by a host protocol.
+function isSpeechModel(model) {
+  return SPEECH_MODELS.includes(model);
+}
+
+// The status names MiniMax reports for a speech task
+// (platform.minimax.io/docs/api-reference/speech-t2a-async-query).
+const SPEECH_STATUSES = { success: "SUCCESS", failed: "FAILURE", expired: "FAILURE", processing: "IN_PROGRESS" };
+
+// The character count the create reply reports; the poll replies do not carry
+// it, so it is kept in the plugin state.
+function speechCharacters(body) {
+  const source = plainObject(body) || {};
+  const value = Number(source.usage_characters);
+  if (!Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+// The text a speech task speaks, and the file that holds it when the text does
+// not come with the request. The content of the file is not known here.
+function speechTextSource(body) {
+  const source = plainObject(body) || {};
+  return { text: trimmed(source.text), textFileID: trimmed(source.text_file_id) };
+}
+
+// The four H3 variants share one endpoint and one body. Only MiniMax-H3
+// renders 2K, Max starts at five seconds, and Highspeed and Lite stop at
+// 768P (platform.minimax.io/docs/api-reference/video-generation-v2-create).
+const H3_LIMITS = {
+  "MiniMax-H3": { minDuration: 4, maxDuration: 15, resolutions: ["480P", "768P", "2K"] },
+  "MiniMax-H3-Highspeed": { minDuration: 4, maxDuration: 15, resolutions: ["480P", "768P"] },
+  "MiniMax-H3-Lite": { minDuration: 4, maxDuration: 15, resolutions: ["480P", "768P"] },
+  "MiniMax-H3-Max": { minDuration: 5, maxDuration: 15, resolutions: ["480P", "768P"] },
+};
+
+// A model's own bounds. A name outside the family falls back to the widest
+// set, so an alias is never refused for a bound the plugin cannot know.
+function h3Limits(model) {
+  return H3_LIMITS[model] || H3_LIMITS["MiniMax-H3"];
+}
+
+// The family renders 4 to 15 seconds and Max 5 to 15; the host protocols
+// default to 5.
+function h3Duration(raw, model) {
   if (raw === undefined || raw === null || raw === "") return H3_DEFAULT_DURATION;
+  const limits = h3Limits(model);
   const seconds = Number(raw);
-  if (!Number.isInteger(seconds) || seconds < H3_MIN_DURATION || seconds > H3_MAX_DURATION) {
-    throw new Error(H3_MODEL + " duration must be an integer between " + H3_MIN_DURATION + " and " + H3_MAX_DURATION + " seconds");
+  if (!Number.isInteger(seconds) || seconds < limits.minDuration || seconds > limits.maxDuration) {
+    throw new Error(model + " duration must be an integer between " + limits.minDuration + " and " + limits.maxDuration + " seconds");
   }
   return seconds;
 }
 
-function h3Resolution(req) {
+// The resolution a request names: 480P, 768P or 2K.
+function h3ResolutionValue(raw) {
+  const value = trimmed(raw).toUpperCase();
+  if (!value) return "";
+  if (value.includes("2K")) return "2K";
+  if (value.includes("768")) return "768P";
+  if (value.includes("480")) return "480P";
+  return "";
+}
+
+function h3Resolution(req, model) {
   const metadata = req.metadata || {};
   const raw = trimmed(metadata.resolution) || trimmed(req.resolution) || trimmed(req.size);
   if (!raw) return "768P";
-  const value = raw.toUpperCase();
-  if (value.includes("2K")) return "2K";
-  if (value.includes("768")) return "768P";
-  throw new Error(H3_MODEL + " resolution must be 768P or 2K");
+  const limits = h3Limits(model);
+  const value = h3ResolutionValue(raw);
+  if (value && limits.resolutions.includes(value)) return value;
+  throw new Error(model + " resolution must be " + limits.resolutions.join(", ").replace(/, ([^,]+)$/, " or $1"));
+}
+
+// A native body's own resolution when the model renders it, the model's
+// dearest when it names none or another one; MiniMax checks the body.
+function h3NativeResolution(raw, model) {
+  const limits = h3Limits(model);
+  const value = h3ResolutionValue(raw);
+  if (value && limits.resolutions.includes(value)) return value;
+  return limits.resolutions[limits.resolutions.length - 1];
 }
 
 function h3MediaItem(type, url, role) {
@@ -319,7 +425,7 @@ function h3MediaList(source, key) {
 function h3FrameImages(req) {
   const metadata = req.metadata || {};
   const images = h3MediaList(req, "images");
-  if (images.length > H3_MAX_FRAME_IMAGES) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_FRAME_IMAGES + " frame images");
+  if (images.length > H3_MAX_FRAME_IMAGES) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_FRAME_IMAGES + " frame images");
   const frames = [];
   if (metadata.first_frame_image) frames.push(h3MediaItem("image_url", metadata.first_frame_image, "first_frame"));
   if (metadata.last_frame_image) frames.push(h3MediaItem("image_url", metadata.last_frame_image, "last_frame"));
@@ -372,14 +478,14 @@ function validateH3Content(items) {
       hasReference = true;
     }
   }
-  if (!hasText) throw new Error(H3_MODEL + " requires a non-empty text item");
-  if (firstFrames > 1) throw new Error(H3_MODEL + " accepts at most one first_frame image");
-  if (lastFrames > 1) throw new Error(H3_MODEL + " accepts at most one last_frame image");
-  if (referenceImages > H3_MAX_REFERENCE_IMAGES) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_IMAGES + " reference images");
-  if (inputImages > H3_MAX_REFERENCE_IMAGES) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_IMAGES + " input images");
-  if (referenceVideos > H3_MAX_REFERENCE_VIDEOS) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_VIDEOS + " reference videos");
-  if (referenceAudios > H3_MAX_REFERENCE_AUDIOS) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_AUDIOS + " reference audios");
-  if (hasFrame && hasReference) throw new Error(H3_MODEL + " cannot mix frame images with reference media");
+  if (!hasText) throw new Error(H3_FAMILY + " requires a non-empty text item");
+  if (firstFrames > 1) throw new Error(H3_FAMILY + " accepts at most one first_frame image");
+  if (lastFrames > 1) throw new Error(H3_FAMILY + " accepts at most one last_frame image");
+  if (referenceImages > H3_MAX_REFERENCE_IMAGES) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_IMAGES + " reference images");
+  if (inputImages > H3_MAX_REFERENCE_IMAGES) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_IMAGES + " input images");
+  if (referenceVideos > H3_MAX_REFERENCE_VIDEOS) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_VIDEOS + " reference videos");
+  if (referenceAudios > H3_MAX_REFERENCE_AUDIOS) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_AUDIOS + " reference audios");
+  if (hasFrame && hasReference) throw new Error(H3_FAMILY + " cannot mix frame images with reference media");
   return items;
 }
 
@@ -395,18 +501,18 @@ function h3Content(req) {
       return item && item.type === "text" && trimmed(item.text);
     });
     if (hasText) return validateH3Content(items);
-    if (!prompt) throw new Error(H3_MODEL + " metadata.content requires a text item or a prompt");
+    if (!prompt) throw new Error(H3_FAMILY + " metadata.content requires a text item or a prompt");
     return validateH3Content([{ type: "text", text: prompt }].concat(items));
   }
   const content = prompt ? [{ type: "text", text: prompt }] : [];
   for (const frame of h3FrameImages(req)) content.push(frame);
   const videos = h3MediaList(metadata, "reference_video");
-  if (videos.length > H3_MAX_REFERENCE_VIDEOS) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_VIDEOS + " reference videos");
+  if (videos.length > H3_MAX_REFERENCE_VIDEOS) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_VIDEOS + " reference videos");
   for (const video of videos) content.push(h3MediaItem("video_url", video, "reference_video"));
   const audios = h3MediaList(metadata, "reference_audio");
-  if (audios.length > H3_MAX_REFERENCE_AUDIOS) throw new Error(H3_MODEL + " accepts at most " + H3_MAX_REFERENCE_AUDIOS + " reference audios");
+  if (audios.length > H3_MAX_REFERENCE_AUDIOS) throw new Error(H3_FAMILY + " accepts at most " + H3_MAX_REFERENCE_AUDIOS + " reference audios");
   for (const audio of audios) content.push(h3MediaItem("audio_url", audio, "reference_audio"));
-  if (!content.length) throw new Error(H3_MODEL + " requires a prompt or a media input");
+  if (!content.length) throw new Error(H3_FAMILY + " requires a prompt or a media input");
   return validateH3Content(content);
 }
 
@@ -434,18 +540,19 @@ function h3Ratio(req, content) {
   return ratio;
 }
 
-// The content, duration and resolution MiniMax-H3 renders: those the host
+// The content, duration and resolution the H3 family renders: those the host
 // protocols build from prompt, images, size and metadata, with defaults, or a
 // native body's own. MiniMax checks a native body; a duration or resolution
-// it leaves out or the plugin cannot read is reserved at the dearest.
-function h3Request(req) {
+// it leaves out or the plugin cannot read is reserved at the dearest the model
+// renders.
+function h3Request(req, model) {
   const body = req.vendorBody;
-  if (!body) return { content: h3Content(req), duration: h3Duration(req.duration), resolution: h3Resolution(req) };
+  if (!body) return { content: h3Content(req), duration: h3Duration(req.duration, model), resolution: h3Resolution(req, model) };
   const missing = body.duration === undefined || body.duration === null || body.duration === "";
   return {
     content: validateH3Content(body.content),
-    duration: missing ? H3_MAX_DURATION : h3Duration(body.duration),
-    resolution: trimmed(body.resolution).toUpperCase() === "768P" ? "768P" : "2K",
+    duration: missing ? h3Limits(model).maxDuration : h3Duration(body.duration, model),
+    resolution: h3NativeResolution(body.resolution, model),
   };
 }
 
@@ -565,8 +672,22 @@ export const native = {
     refuseCallback(body);
     if (!Array.isArray(body.content)) throw new Error("content must be an array");
     const content = validateH3Content(body.content);
-    h3Duration(body.duration);
+    h3Duration(body.duration, body.model);
     return { kind: "submit", model: body.model, action: h3HasVisualContent(content) ? "image_to_video" : "text_to_video", requestBody: { model: body.model, vendorBody: body } };
+  },
+  // MiniMax's long-text speech body, sent as is: the text (or the file holding
+  // it) and the voice that speaks it.
+  createSpeechTask: function (ctx) {
+    const body = nativeBody(ctx);
+    refuseCallback(body);
+    const model = trimmed(body.model);
+    if (!isSpeechModel(model)) throw new Error("model must be one of: " + SPEECH_MODELS.join(", "));
+    const source = speechTextSource(body);
+    if (source.text && source.textFileID) throw new Error("text and text_file_id are mutually exclusive");
+    if (!source.text && !source.textFileID) throw new Error("text or text_file_id is required");
+    const voice = plainObject(body.voice_setting);
+    if (!voice || !trimmed(voice.voice_id)) throw new Error("voice_setting.voice_id is required");
+    return { kind: "submit", model: model, action: "text_to_speech", requestBody: { model: model, vendorBody: body } };
   },
   // MiniMax answers /v1 with a base_resp envelope and /v2 with a bare task_id.
   taskCreated: function (ctx, task) {
@@ -584,6 +705,21 @@ export const native = {
     if (typeof output.file_id === "string" && trimmed(output.file_id)) output.file_id = task.task_id;
     if (task.status === "FAILURE") output.status = "Fail";
     else if (typeof data.status !== "string") output.status = task.status === "IN_PROGRESS" ? "Processing" : "Queueing";
+    return output;
+  },
+  // The create reply of a speech task, with the task id the gateway hands out.
+  speechTaskCreated: function (ctx, task) {
+    const data = plainObject(task.data) || {};
+    return Object.assign({}, data, { task_id: task.task_id });
+  },
+  // The status of a speech task, in MiniMax's own shape. Before the first poll
+  // that is the create reply, which carries no status; the task runs at
+  // MiniMax from the moment it is created.
+  speechTaskStatus: function (ctx, task) {
+    const data = plainObject(task.data) || {};
+    const output = Object.assign({}, data, { task_id: task.task_id });
+    if (task.status === "FAILURE") output.status = "failed";
+    else if (typeof data.status !== "string") output.status = "processing";
     return output;
   },
   // The /v2 query reply, {task: {...}}. Before the first poll the task holds
@@ -625,9 +761,21 @@ export const native = {
 export function buildSubmitRequest(ctx) {
   const req = ctx.requestBody || {};
   const model = ctx.upstreamModel;
+  // The speech task is created at MiniMax's own speech endpoint; a gateway
+  // upstream serves the same body at the plugin's own speech route.
+  if (isSpeechModel(ctx.model) || isSpeechModel(model)) {
+    const vendorBody = plainObject(req.vendorBody) || {};
+    return {
+      url: apiRoot(ctx) + (viaGateway(ctx) ? "/v1/audio/long_text" : "/v1/t2a_async_v2"),
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: "Bearer " + ctx.apiKey },
+      body: Object.assign({}, vendorBody, { model: model || ctx.model }),
+      action: "text_to_speech",
+    };
+  }
   const metadata = req.metadata || {};
   if (isH3(model)) {
-    const h3 = h3Request(req);
+    const h3 = h3Request(req, model);
     const content = h3.content;
     const h3Body = req.vendorBody
       ? Object.assign({}, req.vendorBody, { model: model })
@@ -671,6 +819,7 @@ export function buildSubmitRequest(ctx) {
 
 export function parseSubmitResponse(ctx, resp) {
   const body = resp.body || {};
+  const speech = isSpeechModel(ctx.upstreamModel) || isSpeechModel(ctx.model);
   const apiError = isH3(ctx.upstreamModel) ? h3APIError(body) : null;
   if (apiError) throw new Error(apiError.message);
   const base = body.base_resp;
@@ -678,10 +827,14 @@ export function parseSubmitResponse(ctx, resp) {
   // bare task_id and only adds base_resp when the call is rejected.
   if (base) {
     if (base.status_code !== 0) throw new Error(base.status_msg || "hailuo submit failed");
-  } else if (!isH3(ctx.upstreamModel)) {
+  } else if (!isH3(ctx.upstreamModel) && !speech) {
     throw new Error("hailuo submit failed");
   }
   if (!body.task_id) throw new Error("missing task_id");
+  // The speech create reply reports the characters the task is billed on; the
+  // poll replies do not, so the count is kept in the plugin state.
+  const characters = speech ? speechCharacters(body) : null;
+  if (characters !== null) return { taskId: body.task_id, taskData: body, state: { speechCharacters: characters } };
   return { taskId: body.task_id, taskData: body };
 }
 
@@ -689,8 +842,15 @@ export function extractUsage(ctx) {
   if (ctx.usagePurpose === "billing_ratios") return null;
   const req = ctx.requestBody || {};
   const model = ctx.upstreamModel || req.model;
+  // The speech task is billed on the characters of its text. They are not
+  // known when the request is sent, so the length of the request's own text
+  // reserves them; the completion hook reports the upstream count.
+  if (isSpeechModel(ctx.model) || isSpeechModel(model)) {
+    const source = speechTextSource(plainObject(req.vendorBody) || req);
+    return { characters: source.text.length };
+  }
   if (isH3(model)) {
-    const h3 = h3Request(req);
+    const h3 = h3Request(req, model);
     const content = h3.content;
     return {
       seconds: h3.duration,
@@ -716,7 +876,9 @@ export function buildQueryRequest(ctx) {
   // persisted task properties.
   const taskID = encodeURIComponent(ctx.taskId);
   let path = "/v1/query/video_generation?task_id=" + taskID;
-  if (isH3(ctx.upstreamModel || ctx.model)) path = "/v2/query/video_generation/" + taskID;
+  if (isSpeechModel(ctx.upstreamModel) || isSpeechModel(ctx.model)) {
+    path = viaGateway(ctx) ? "/v1/audio/long_text/" + taskID : "/v1/query/t2a_async_query_v2?task_id=" + taskID;
+  } else if (isH3(ctx.upstreamModel || ctx.model)) path = "/v2/query/video_generation/" + taskID;
   else if (viaGateway(ctx)) path = "/v1/query/video_generation/" + taskID;
   return {
     url: apiRoot(ctx) + path,
@@ -725,7 +887,27 @@ export function buildQueryRequest(ctx) {
   };
 }
 
+// The speech poll reply: {task_id, status, file_id, base_resp}.
+function speechTaskResult(body) {
+  const source = plainObject(body) || {};
+  const base = plainObject(source.base_resp) || {};
+  if (base.status_code !== undefined && base.status_code !== 0) {
+    return { code: base.status_code || 0, status: "FAILURE", progress: "100%", reason: base.status_msg || "" };
+  }
+  const status = SPEECH_STATUSES[source.status];
+  if (!status) {
+    return { status: "UNKNOWN", reason: "unrecognized status: " + String(source.status || "") };
+  }
+  const progress = status === "SUCCESS" || status === "FAILURE" ? "100%" : "50%";
+  const reason = status === "FAILURE" ? "task " + String(source.status || "failed") : "";
+  return { code: base.status_code || 0, status: status, progress: progress, reason: reason };
+}
+
 export function parseTaskResult(ctx, body) {
+  // The speech task reports its own status names, and the video tables below
+  // carry some of them too, so the branch is taken by the model of the task,
+  // never by the name of the status.
+  if (isSpeechModel(ctx.upstreamModel) || isSpeechModel(ctx.model)) return speechTaskResult(body);
   const apiError = h3APIError(body);
   if (apiError) {
     if (apiError.statusCode === 408 || apiError.statusCode === 429 || apiError.statusCode >= 500) throw new Error(apiError.message);
@@ -780,10 +962,37 @@ function h3ArtifactURL(ctx) {
 
 export function listArtifacts(task) {
   if (task.status !== "SUCCESS") return [];
+  // The speech task carries its own action, so its artifact is told apart
+  // without the model of the task.
+  if (trimmed(task.action) === "text_to_speech") {
+    return artifactFileID(task) ? [{ key: "audio", type: "audio" }] : [];
+  }
   return artifactFileID(task) || h3ArtifactURL(task) ? [{ key: "video", type: "video", mimeType: "video/mp4" }] : [];
 }
 
 export function buildContentRequest(ctx) {
+  if (ctx.artifactKey === "audio") {
+    const speechFileID = artifactFileID(ctx);
+    if (!speechFileID) throw new Error("artifact_not_found");
+    // The gateway resolves its own artifact, so the upstream link never
+    // reaches the client.
+    if (viaGateway(ctx)) {
+      return {
+        url: ctx.baseUrl + "/v1/tasks/" + encodeURIComponent(ctx.upstreamTaskId) + "/artifacts/audio/content",
+        method: ctx.clientRequest.method,
+        headers: { Authorization: "Bearer " + ctx.apiKey },
+        credentialless: false,
+      };
+    }
+    // MiniMax serves the speech file through its own endpoint, which needs
+    // the channel key; the link behind it expires after nine hours.
+    return {
+      url: ctx.baseUrl + "/v1/files/retrieve_content?file_id=" + encodeURIComponent(speechFileID),
+      method: "GET",
+      headers: { Authorization: "Bearer " + ctx.apiKey },
+      credentialless: false,
+    };
+  }
   if (ctx.artifactKey !== "video") throw new Error("artifact_not_found");
   const fileID = artifactFileID(ctx);
   if (!fileID) {
@@ -819,12 +1028,39 @@ export function buildContentRequest(ctx) {
   return { url: url, method: "GET", credentialless: true };
 }
 
-export function extractUsageOnComplete(_task, _taskResult, body) {
+// The speech model of a task, from the plugin context or from the task view.
+function speechTaskModel(source) {
+  const task = plainObject(source) || {};
+  if (isSpeechModel(task.upstreamModel) || isSpeechModel(task.model)) return true;
+  const properties = plainObject(task.properties) || {};
+  return isSpeechModel(properties.origin_model_name) || isSpeechModel(properties.upstream_model_name);
+}
+
+// The characters of the speech text: only the create reply knows them, and it
+// is kept in the plugin state for the polls that follow.
+function speechTaskCharacters(ctx, body) {
+  const source = plainObject(ctx) || {};
+  const state = plainObject(source.state) || {};
+  const stored = Number(state.speechCharacters);
+  if (Number.isFinite(stored) && stored >= 0) return stored;
+  const fromBody = speechCharacters(body);
+  if (fromBody !== null) return fromBody;
+  return speechCharacters(source.data);
+}
+
+export function extractUsageOnComplete(ctx, _taskResult, body) {
+  // The speech task is billed on the characters of its text, which the create
+  // reply reports and the poll replies do not.
+  if (speechTaskModel(ctx)) {
+    const characters = speechTaskCharacters(ctx, body);
+    if (characters === null) return null;
+    return { characters: characters };
+  }
   const h3Task = h3QueryTask(body);
   if (h3Task) {
     const resolution = trimmed(h3Task.resolution).toUpperCase();
     const facts = {};
-    if (resolution === "2K" || resolution === "768P") facts.resolution = resolution;
+    if (resolution === "2K" || resolution === "768P" || resolution === "480P") facts.resolution = resolution;
     const usage = h3Task.usage && typeof h3Task.usage === "object" && !Array.isArray(h3Task.usage) ? h3Task.usage : {};
     const fields = [
       { key: "seconds", value: usage.output_seconds, minimum: H3_MIN_DURATION, maximum: H3_MAX_DURATION, integer: false },

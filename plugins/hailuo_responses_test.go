@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -45,6 +47,8 @@ func TestHailuoResponsesProtocol(t *testing.T) {
 		},
 		wantUsageKeys:  []string{"input_images", "input_video_seconds", "resolution", "seconds"},
 		wantVendorName: "hailuo",
+		// The long-text speech models come in at the plugin's own route.
+		nativeOnlyModels: []string{"speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo"},
 	})
 }
 
@@ -59,9 +63,9 @@ func TestHailuoUsageProfilesPerModel(t *testing.T) {
 		resolutions []string
 	}{
 		{
-			models:      []string{"MiniMax-H3"},
+			models:      []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"},
 			fields:      []string{"input_images", "input_video_seconds", "resolution", "seconds"},
-			resolutions: []string{"768P", "2K"},
+			resolutions: []string{"480P", "768P", "2K"},
 		},
 		{
 			models:      []string{"MiniMax-Hailuo-2.3", "MiniMax-Hailuo-2.3-Fast"},
@@ -76,6 +80,22 @@ func TestHailuoUsageProfilesPerModel(t *testing.T) {
 		{
 			models: []string{"T2V-01-Director", "T2V-01", "I2V-01-Director", "I2V-01-live", "I2V-01", "S2V-01"},
 			fields: []string{"seconds"},
+		},
+		{
+			models: []string{"speech-2.8-hd"},
+			fields: []string{"characters"},
+		},
+		{
+			models: []string{"speech-2.8-turbo"},
+			fields: []string{"characters"},
+		},
+		{
+			models: []string{"speech-2.6-hd"},
+			fields: []string{"characters"},
+		},
+		{
+			models: []string{"speech-2.6-turbo"},
+			fields: []string{"characters"},
 		},
 	}
 	profiled := make([]string, 0, len(plugin.Meta.Models))
@@ -344,7 +364,7 @@ func TestHailuoH3RejectsOutOfContractRequests(t *testing.T) {
 		{"duration below the minimum", map[string]any{"prompt": "p", "duration": 3}, "duration must be an integer between 4 and 15"},
 		{"duration above the maximum", map[string]any{"prompt": "p", "duration": 16}, "duration must be an integer between 4 and 15"},
 		{"fractional duration", map[string]any{"prompt": "p", "duration": 5.5}, "duration must be an integer between 4 and 15"},
-		{"unsupported resolution", map[string]any{"prompt": "p", "size": "1080P"}, "resolution must be 768P or 2K"},
+		{"unsupported resolution", map[string]any{"prompt": "p", "size": "1080P"}, "resolution must be 480P, 768P or 2K"},
 		{"too many frame images", map[string]any{"prompt": "p", "images": []any{"a.png", "b.png", "c.png"}}, "at most 2 frame images"},
 		{"media without text", map[string]any{"images": []any{"a.png"}}, "requires a non-empty text item"},
 		{"content is not an array", map[string]any{"prompt": "p", "metadata": map[string]any{"content": "nope"}}, "metadata.content must be an array"},
@@ -1016,4 +1036,559 @@ func TestHailuoNativeFileIDIsTheTaskAndRetrieveReturnsTheGatewayDownload(t *test
 	h3Status, err := call("h3TaskStatus", map[string]any{}, h3)
 	require.NoError(t, err)
 	assert.NotContains(t, h3Status, "file_id")
+}
+
+// The H3 family is one list of four names in three places: the declared
+// models, the /v2 route, and the usage profile that prices them. The three
+// new names fold to nothing else in the gateway: a case-folded duplicate
+// fails the routing generation and the gateway then refuses to start.
+func TestHailuoH3FamilyModels(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	family := []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"}
+	assert.Subset(t, plugin.Meta.Models, family)
+
+	var routeModels []string
+	for _, route := range plugin.Meta.Routes {
+		if route.Path == "/v2/video_generation" {
+			routeModels = route.Models
+		}
+	}
+	assert.Equal(t, family, routeModels)
+
+	var profile *jsplugin.UsageProfile
+	for index := range plugin.Meta.UsageProfiles {
+		if slices.Contains(plugin.Meta.UsageProfiles[index].Models, "MiniMax-H3-Highspeed") {
+			profile = &plugin.Meta.UsageProfiles[index]
+		}
+	}
+	require.NotNil(t, profile)
+	assert.Equal(t, family, profile.Models)
+
+	generation := jsplugin.DefaultRegistry.Generation()
+	require.NotNil(t, generation)
+	for _, other := range generation.Plugins() {
+		key, meta := other.Meta.Key, other.Meta
+		if key == "hailuo" {
+			continue
+		}
+		for _, model := range meta.Models {
+			for _, own := range family {
+				assert.NotEqual(t, jsplugin.ASCIIFold(own), jsplugin.ASCIIFold(model), "%s model %q folds onto the H3 family name %q", key, model, own)
+			}
+		}
+	}
+}
+
+// Every H3 model renders its own seconds; a request outside the model's range
+// is refused with the model and the range it renders.
+func TestHailuoH3FamilyDurationBounds(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	for _, testCase := range []struct {
+		model string
+		min   int
+		max   int
+	}{
+		{"MiniMax-H3", 4, 15},
+		{"MiniMax-H3-Highspeed", 4, 15},
+		{"MiniMax-H3-Lite", 4, 15},
+		{"MiniMax-H3-Max", 5, 15},
+	} {
+		t.Run(testCase.model, func(t *testing.T) {
+			descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p"}))
+			body, ok := descriptor["body"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, float64(5), body["duration"], "the host protocols default to five seconds")
+
+			for _, seconds := range []int{testCase.min, testCase.max} {
+				descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p", "duration": seconds}))
+				body, ok := descriptor["body"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, float64(seconds), body["duration"])
+			}
+			for _, seconds := range []int{testCase.min - 1, testCase.max + 1} {
+				_, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p", "duration": seconds}))
+				require.ErrorContains(t, err, testCase.model+" duration must be an integer between "+strconv.Itoa(testCase.min)+" and "+strconv.Itoa(testCase.max)+" seconds")
+			}
+		})
+	}
+}
+
+// Each H3 model renders its own resolutions; a request outside the model's set
+// is refused with the model and the values it renders.
+func TestHailuoH3FamilyResolutionBounds(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	for _, testCase := range []struct {
+		model       string
+		resolutions []string
+	}{
+		{"MiniMax-H3", []string{"480P", "768P", "2K"}},
+		{"MiniMax-H3-Highspeed", []string{"480P", "768P"}},
+		{"MiniMax-H3-Lite", []string{"480P", "768P"}},
+		{"MiniMax-H3-Max", []string{"480P", "768P"}},
+	} {
+		t.Run(testCase.model, func(t *testing.T) {
+			descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p"}))
+			body, ok := descriptor["body"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, "768P", body["resolution"], "the host protocols default to 768P")
+
+			for _, resolution := range testCase.resolutions {
+				descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p", "size": resolution}))
+				body, ok := descriptor["body"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, resolution, body["resolution"])
+			}
+			for _, resolution := range []string{"480P", "768P", "2K", "1080P"} {
+				if slices.Contains(testCase.resolutions, resolution) {
+					continue
+				}
+				_, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", hailuoSubmitContext(testCase.model, map[string]any{"prompt": "p", "size": resolution}))
+				require.ErrorContains(t, err, testCase.model+" resolution must be "+hailuoResolutionList(testCase.resolutions))
+			}
+		})
+	}
+}
+
+// The three H3 task types carry the finished video in the same place, so each
+// of them yields the video artifact.
+func TestHailuoH3FamilyTaskTypeArtifacts(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	adaptor := taskplugin.New(plugin)
+	adaptor.Init(&relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{ApiKey: "test-ak", ChannelBaseUrl: "https://api.minimax.example"},
+	})
+	for _, taskType := range []string{"generation", "h3_context_ir", "regeneration"} {
+		t.Run(taskType, func(t *testing.T) {
+			const url = "https://cdn.example/h3.mp4"
+			data, err := common.Marshal(map[string]any{"task": map[string]any{
+				"id": "1", "status": "succeeded", "task_type": taskType, "content": map[string]any{"url": url},
+			}})
+			require.NoError(t, err)
+			task := &model.Task{TaskID: "task-public", Status: model.TaskStatusSuccess, Data: data}
+
+			artifacts, err := adaptor.ListArtifacts(task)
+			require.NoError(t, err)
+			assert.Equal(t, []channel.TaskArtifact{{Key: "video", Type: "video", MimeType: "video/mp4"}}, artifacts)
+
+			descriptor, err := adaptor.BuildContentRequest(t.Context(), task, "video", channel.TaskArtifactClientRequest{Method: http.MethodGet})
+			require.NoError(t, err)
+			require.NotNil(t, descriptor)
+			assert.Equal(t, url, descriptor.URL)
+		})
+	}
+}
+
+// The H3 profile prices the family with the resolutions the family renders,
+// and every example is a complete vector over the schema.
+func TestHailuoH3FamilyUsageProfiles(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	family := []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"}
+	profiles := 0
+	for _, profile := range plugin.Meta.UsageProfiles {
+		if slices.ContainsFunc(profile.Models, func(model string) bool { return slices.Contains(family, model) }) {
+			profiles++
+		}
+	}
+	assert.Equal(t, 1, profiles, "the family shares one usage profile")
+
+	for _, model := range family {
+		t.Run(model, func(t *testing.T) {
+			schema, examples := plugin.Meta.UsageForModel(model)
+			require.Contains(t, schema, "resolution")
+			assert.Equal(t, []string{"480P", "768P", "2K"}, schema["resolution"].Enum)
+			require.NotEmpty(t, examples)
+			for _, example := range examples {
+				assert.ElementsMatch(t, slices.Collect(maps.Keys(schema)), slices.Collect(maps.Keys(example.Facts)), example.Label)
+				if resolution, ok := example.Facts["resolution"].(string); ok {
+					assert.Contains(t, schema["resolution"].Enum, resolution, example.Label)
+				}
+			}
+		})
+	}
+	assert.Contains(t, plugin.Meta.UsageSchema["resolution"].Enum, "480P")
+}
+
+// The submit context of one H3 model.
+func hailuoSubmitContext(model string, requestBody map[string]any) map[string]any {
+	ctx := hailuoH3SubmitContext(requestBody)
+	ctx["model"] = model
+	ctx["upstreamModel"] = model
+	return ctx
+}
+
+// The allowed values as the plugin writes them: "480P or 768P".
+func hailuoResolutionList(resolutions []string) string {
+	if len(resolutions) < 2 {
+		return strings.Join(resolutions, "")
+	}
+	return strings.Join(resolutions[:len(resolutions)-1], ", ") + " or " + resolutions[len(resolutions)-1]
+}
+
+// A member of the plugin's native object, as the host calls it.
+func callHailuoNative(t *testing.T, plugin *jsplugin.LoadedPlugin, member string, args ...any) map[string]any {
+	t.Helper()
+	value, err := plugin.Engine.CallPath(t.Context(), "native", []string{member}, args...)
+	require.NoError(t, err)
+	encoded, err := common.Marshal(value)
+	require.NoError(t, err)
+	var decoded map[string]any
+	require.NoError(t, common.Unmarshal(encoded, &decoded))
+	return decoded
+}
+
+// The long-text speech task comes in at the plugin's own route: the four
+// speech models claim no host protocol, and their create, query and usage
+// paths are MiniMax's own.
+func TestHailuoAsyncSpeech(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	speechModels := []string{"speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo"}
+	videoModels := []string{
+		"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max",
+		"MiniMax-Hailuo-2.3", "MiniMax-Hailuo-2.3-Fast", "MiniMax-Hailuo-02",
+		"T2V-01-Director", "T2V-01", "I2V-01-Director", "I2V-01-live", "I2V-01", "S2V-01",
+	}
+
+	t.Run("create request body mapping", func(t *testing.T) {
+		decoded := callHailuoNative(t, plugin, "createSpeechTask", map[string]any{
+			"body": map[string]any{
+				"kind": "json",
+				"value": map[string]any{
+					"model":         "speech-2.8-hd",
+					"text":          "a long text to speak",
+					"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+				},
+			},
+		})
+		assert.Equal(t, "submit", decoded["kind"])
+		assert.Equal(t, "speech-2.8-hd", decoded["model"])
+		assert.Equal(t, "text_to_speech", decoded["action"])
+		requestBody, ok := decoded["requestBody"].(map[string]any)
+		require.True(t, ok)
+
+		descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", map[string]any{
+			"requestBody":   requestBody,
+			"model":         "speech-2.8-hd",
+			"upstreamModel": "speech-2.8-hd",
+			"baseUrl":       "https://api.minimax.example",
+			"apiKey":        "test-ak",
+		})
+		assert.Equal(t, "https://api.minimax.example/v1/t2a_async_v2", descriptor["url"])
+		assert.Equal(t, "POST", descriptor["method"])
+		body, ok := descriptor["body"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "speech-2.8-hd", body["model"])
+		assert.Equal(t, "a long text to speak", body["text"])
+		assert.Equal(t, map[string]any{"voice_id": "male-qn-qingse"}, body["voice_setting"])
+
+		// The characters of the text are reserved from the request's own text.
+		facts := callHailuoHook(t, plugin, "extractUsage", map[string]any{
+			"usagePurpose":  "facts",
+			"requestBody":   requestBody,
+			"model":         "speech-2.8-hd",
+			"upstreamModel": "speech-2.8-hd",
+		})
+		require.NotNil(t, facts)
+		require.Contains(t, facts, "characters")
+		reserved, ok := facts["characters"].(float64)
+		require.True(t, ok, "characters must be a number")
+		assert.Equal(t, float64(len("a long text to speak")), reserved)
+	})
+
+	t.Run("create response parsing", func(t *testing.T) {
+		parsed := callHailuoHook(t, plugin, "parseSubmitResponse", map[string]any{"upstreamModel": "speech-2.8-hd"},
+			map[string]any{"body": map[string]any{
+				"task_id":          "task_123",
+				"file_id":          987654,
+				"task_token":       "token",
+				"usage_characters": 2048,
+				"base_resp":        map[string]any{"status_code": 0, "status_msg": "success"},
+			}})
+		assert.Equal(t, "task_123", parsed["taskId"])
+		taskData, ok := parsed["taskData"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "task_123", taskData["task_id"])
+		state, ok := parsed["state"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, float64(2048), state["speechCharacters"])
+
+		// The characters are reported when the task completes.
+		completion := callHailuoHook(t, plugin, "extractUsageOnComplete",
+			map[string]any{"model": "speech-2.8-hd", "state": state}, nil, nil)
+		assert.Equal(t, map[string]any{"characters": float64(2048)}, completion)
+	})
+
+	t.Run("query status mapping", func(t *testing.T) {
+		query := callHailuoHook(t, plugin, "buildQueryRequest", map[string]any{
+			"taskId":        "task_123",
+			"model":         "speech-2.8-hd",
+			"upstreamModel": "speech-2.8-hd",
+			"baseUrl":       "https://api.minimax.example",
+			"apiKey":        "test-ak",
+		})
+		assert.Equal(t, "https://api.minimax.example/v1/query/t2a_async_query_v2?task_id=task_123", query["url"])
+		assert.Equal(t, "GET", query["method"])
+
+		statuses := []struct {
+			status string
+			want   string
+		}{
+			{"success", "SUCCESS"},
+			{"failed", "FAILURE"},
+			{"expired", "FAILURE"},
+			{"processing", "IN_PROGRESS"},
+			{"weird", "UNKNOWN"},
+		}
+		for _, testCase := range statuses {
+			t.Run(testCase.status, func(t *testing.T) {
+				result := callHailuoHook(t, plugin, "parseTaskResult", map[string]any{"model": "speech-2.8-hd"},
+					map[string]any{
+						"task_id":   "task_123",
+						"status":    testCase.status,
+						"file_id":   987654,
+						"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+					})
+				assert.Equal(t, testCase.want, result["status"])
+			})
+		}
+	})
+
+	t.Run("routes and native members", func(t *testing.T) {
+		source, err := builtinplugins.Source("hailuo")
+		require.NoError(t, err)
+		registry := jsplugin.NewRegistry()
+		_, err = registry.RegisterFactory(source, jsplugin.Options{Key: "hailuo"})
+		require.NoError(t, err)
+
+		// The speech models claim no host protocol.
+		for _, model := range speechModels {
+			_, found := registry.Generation().LookupEndpoint(http.MethodPost, "/v1/responses", model)
+			assert.False(t, found, model)
+			_, found = registry.Generation().LookupEndpoint(http.MethodPost, "/v1/videos", model)
+			assert.False(t, found, model)
+		}
+		// The video models keep the host protocols.
+		for _, model := range videoModels {
+			binding, found := registry.Generation().LookupEndpoint(http.MethodPost, "/v1/responses", model)
+			require.True(t, found, model)
+			assert.Equal(t, "openai_responses", binding.Protocol)
+			binding, found = registry.Generation().LookupEndpoint(http.MethodPost, "/v1/videos", model)
+			require.True(t, found, model)
+			assert.Equal(t, "openai_video", binding.Protocol)
+		}
+
+		// The speech task comes in at the plugin's own route, whose decode and
+		// render are two different members.
+		bindings := registry.Generation().LookupDeclaredRoutes(http.MethodPost, "/hailuo/v1/audio/long_text")
+		require.Len(t, bindings, 1)
+		assert.ElementsMatch(t, speechModels, bindings[0].Route.Models)
+		assert.Equal(t, "createSpeechTask", bindings[0].Route.Decode)
+		assert.Equal(t, "speechTaskCreated", bindings[0].Route.Render)
+		assert.NotEqual(t, bindings[0].Route.Decode, bindings[0].Route.Render)
+
+		query := registry.Generation().LookupDeclaredRoutes(http.MethodGet, "/hailuo/v1/audio/long_text/:task_id")
+		require.Len(t, query, 1)
+		assert.Equal(t, "speechTaskStatus", query[0].Route.Render)
+		assert.Empty(t, query[0].Route.Decode)
+	})
+}
+
+// The speech task reserves its characters from the request itself, so a
+// billing expression of the model never meets a missing fact at submission.
+func TestHailuoAsyncSpeechSubmitCharacters(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+	testCases := []struct {
+		name string
+		body map[string]any
+		want float64
+	}{
+		{
+			name: "text path",
+			body: map[string]any{
+				"model":         "speech-2.8-hd",
+				"text":          "a long text to speak",
+				"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+			},
+			want: float64(len("a long text to speak")),
+		},
+		{
+			name: "text_file_id path",
+			body: map[string]any{
+				"model":         "speech-2.8-hd",
+				"text_file_id":  "file_123",
+				"voice_setting": map[string]any{"voice_id": "male-qn-qingse"},
+			},
+			want: float64(0),
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			intent := callHailuoNative(t, plugin, "createSpeechTask", map[string]any{
+				"body": map[string]any{"kind": "json", "value": testCase.body},
+			})
+			requestBody, ok := intent["requestBody"].(map[string]any)
+			require.True(t, ok)
+
+			facts := callHailuoHook(t, plugin, "extractUsage", map[string]any{
+				"usagePurpose":  "facts",
+				"requestBody":   requestBody,
+				"model":         "speech-2.8-hd",
+				"upstreamModel": "speech-2.8-hd",
+			})
+			require.NotNil(t, facts)
+			require.Contains(t, facts, "characters")
+			characters, ok := facts["characters"].(float64)
+			require.True(t, ok, "characters must be a number")
+			assert.Equal(t, testCase.want, characters)
+		})
+	}
+}
+
+// The content array is the only shape that carries a reference image or
+// exceeds the frame limits: the assembled array yields first_frame and
+// last_frame items alone.
+func TestHailuoH3ContentRegression(t *testing.T) {
+	plugin := loadHailuoPlugin(t)
+
+	t.Run("content multimodal boundary", func(t *testing.T) {
+		accepted := []struct {
+			name       string
+			content    []any
+			wantAction string
+			wantBody   string
+		}{
+			{
+				name:       "a text item and one image keep the caller's content",
+				content:    []any{map[string]any{"type": "text", "text": "p"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "first.png"}}},
+				wantAction: "image_to_video",
+				wantBody:   `{"model":"MiniMax-H3","content":[{"type":"text","text":"p"},{"type":"image_url","image_url":{"url":"first.png"}}],"resolution":"768P","duration":5,"ratio":"adaptive"}`,
+			},
+			{
+				name:       "an image without a role and a last frame are one first and one last frame",
+				content:    []any{map[string]any{"type": "text", "text": "p"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "first.png"}}, map[string]any{"type": "image_url", "role": "last_frame", "image_url": map[string]any{"url": "last.png"}}},
+				wantAction: "image_to_video",
+				wantBody:   `{"model":"MiniMax-H3","content":[{"type":"text","text":"p"},{"type":"image_url","image_url":{"url":"first.png"}},{"type":"image_url","role":"last_frame","image_url":{"url":"last.png"}}],"resolution":"768P","duration":5,"ratio":"adaptive"}`,
+			},
+		}
+		for _, testCase := range accepted {
+			descriptor := callHailuoHook(t, plugin, "buildSubmitRequest", hailuoH3SubmitContext(map[string]any{"metadata": map[string]any{"content": testCase.content}}))
+			assert.Equal(t, testCase.wantAction, descriptor["action"], testCase.name)
+			body, err := common.Marshal(descriptor["body"])
+			require.NoError(t, err, testCase.name)
+			assert.JSONEq(t, testCase.wantBody, string(body), testCase.name)
+		}
+
+		rejected := []struct {
+			name    string
+			content []any
+			wantErr string
+		}{
+			{
+				name:    "two images without a role are two first frames",
+				content: []any{map[string]any{"type": "text", "text": "p"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "first.png"}}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "second.png"}}},
+				wantErr: "accepts at most one first_frame image",
+			},
+			{
+				name:    "two last frames exceed the one last frame limit",
+				content: []any{map[string]any{"type": "text", "text": "p"}, map[string]any{"type": "image_url", "role": "last_frame", "image_url": map[string]any{"url": "first.png"}}, map[string]any{"type": "image_url", "role": "last_frame", "image_url": map[string]any{"url": "second.png"}}},
+				wantErr: "accepts at most one last_frame image",
+			},
+			{
+				name:    "an image without a role is a frame and cannot be mixed with a reference image",
+				content: []any{map[string]any{"type": "text", "text": "p"}, map[string]any{"type": "image_url", "image_url": map[string]any{"url": "first.png"}}, map[string]any{"type": "image_url", "role": "reference_image", "image_url": map[string]any{"url": "reference.png"}}},
+				wantErr: "cannot mix frame images with reference media",
+			},
+			{
+				name:    "content without a text item and without a prompt is rejected",
+				content: []any{map[string]any{"type": "image_url", "image_url": map[string]any{"url": "first.png"}}},
+				wantErr: "metadata.content requires a text item or a prompt",
+			},
+		}
+		for _, testCase := range rejected {
+			_, err := plugin.Engine.Call(t.Context(), "buildSubmitRequest", hailuoH3SubmitContext(map[string]any{"metadata": map[string]any{"content": testCase.content}}))
+			require.ErrorContains(t, err, testCase.wantErr, testCase.name)
+		}
+	})
+}
+
+func TestHailuoAsyncSpeechArtifacts(t *testing.T) {
+	service.InitHttpClient()
+	plugin := loadHailuoPlugin(t)
+
+	const signedURL = "https://bucket.oss-cn-wulanchabu.aliyuncs.com/video.mp4?Expires=1&OSSAccessKeyId=key&Signature=sig"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "Bearer test-ak", r.Header.Get("Authorization"))
+		if r.URL.Path != "/v1/files/retrieve" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"file":{"file_id":1,"download_url":"` + signedURL + `"},"base_resp":{"status_code":0,"status_msg":"success"}}`))
+	}))
+	defer upstream.Close()
+
+	adaptor := taskplugin.New(plugin)
+	adaptor.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ApiKey: "test-ak", ChannelBaseUrl: upstream.URL}})
+
+	speechData, err := common.Marshal(map[string]any{
+		"task_id": "task_123", "status": "success", "file_id": 987654,
+		"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+	})
+	require.NoError(t, err)
+	speechTask := &model.Task{TaskID: "task-public", Status: model.TaskStatusSuccess, Action: "text_to_speech", Data: speechData}
+	videoData, err := common.Marshal(map[string]any{"file_id": 1})
+	require.NoError(t, err)
+	videoTask := &model.Task{TaskID: "task-public", Status: model.TaskStatusSuccess, Action: "text_to_video", Data: videoData}
+
+	t.Run("artifact proxy", func(t *testing.T) {
+		artifacts, err := adaptor.ListArtifacts(speechTask)
+		require.NoError(t, err)
+		assert.Equal(t, []channel.TaskArtifact{{Key: "audio", Type: "audio"}}, artifacts)
+
+		descriptor, err := adaptor.BuildContentRequest(t.Context(), speechTask, "audio", channel.TaskArtifactClientRequest{Method: http.MethodGet})
+		require.NoError(t, err)
+		assert.Equal(t, &channel.TaskContentRequest{
+			URL:     upstream.URL + "/v1/files/retrieve_content?file_id=987654",
+			Method:  http.MethodGet,
+			Headers: map[string]string{"Authorization": "Bearer test-ak"},
+		}, descriptor)
+
+		videoArtifacts, err := adaptor.ListArtifacts(videoTask)
+		require.NoError(t, err)
+		assert.Equal(t, []channel.TaskArtifact{{Key: "video", Type: "video", MimeType: "video/mp4"}}, videoArtifacts)
+
+		videoDescriptor, err := adaptor.BuildContentRequest(t.Context(), videoTask, "video", channel.TaskArtifactClientRequest{Method: http.MethodGet})
+		require.NoError(t, err)
+		assert.Equal(t, &channel.TaskContentRequest{URL: signedURL, Method: http.MethodGet, Credentialless: true}, videoDescriptor)
+
+		gateway := taskplugin.New(plugin)
+		gateway.Init(&relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType: constant.ChannelTypeNewAPI, ApiKey: "sk-gateway", ChannelBaseUrl: "https://gateway.example",
+		}})
+		gatewayTask := &model.Task{
+			TaskID: "task-public", Status: model.TaskStatusSuccess, Action: "text_to_speech", Data: speechData,
+			PrivateData: model.TaskPrivateData{UpstreamTaskID: "task_pub"},
+		}
+		gatewayDescriptor, err := gateway.BuildContentRequest(t.Context(), gatewayTask, "audio", channel.TaskArtifactClientRequest{Method: http.MethodGet})
+		require.NoError(t, err)
+		assert.Equal(t, &channel.TaskContentRequest{
+			URL:     "https://gateway.example/v1/tasks/task_pub/artifacts/audio/content",
+			Method:  http.MethodGet,
+			Headers: map[string]string{"Authorization": "Bearer sk-gateway"},
+		}, gatewayDescriptor)
+	})
+
+	t.Run("character fact", func(t *testing.T) {
+		schema, _ := plugin.Meta.UsageForModel("speech-2.8-hd")
+		require.Contains(t, schema, "characters")
+		assert.Equal(t, "token", schema["characters"].Unit)
+
+		facts := callHailuoHook(t, plugin, "extractUsageOnComplete",
+			map[string]any{"model": "speech-2.8-hd", "data": map[string]any{"task_id": "task_123", "usage_characters": 2048}},
+			nil, nil)
+		assert.Equal(t, map[string]any{"characters": float64(2048)}, facts)
+
+		missing := callHailuoHook(t, plugin, "extractUsageOnComplete",
+			map[string]any{"model": "speech-2.8-hd", "data": map[string]any{"task_id": "task_123"}}, nil, nil)
+		assert.Nil(t, missing)
+	})
 }

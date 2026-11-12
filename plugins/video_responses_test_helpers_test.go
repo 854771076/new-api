@@ -1,6 +1,7 @@
 package plugins_test
 
 import (
+	"slices"
 	"sort"
 	"testing"
 
@@ -21,6 +22,9 @@ type videoResponsesTestCase struct {
 	wantUsageKeys       []string
 	wantSubmitUsageKeys []string
 	wantVendorName      string
+	// nativeOnlyModels are declared models that reach the plugin through its
+	// own routes and therefore claim no host protocol.
+	nativeOnlyModels []string
 }
 
 func testVideoResponsesProtocol(t *testing.T, testCase videoResponsesTestCase) {
@@ -33,10 +37,28 @@ func testVideoResponsesProtocol(t *testing.T, testCase videoResponsesTestCase) {
 
 	t.Run("claims every model", func(t *testing.T) {
 		for _, model := range plugin.Meta.Models {
+			if slices.Contains(testCase.nativeOnlyModels, model) {
+				continue
+			}
 			binding, found := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
 			require.True(t, found, model)
 			assert.Same(t, plugin, binding.Plugin)
 			assert.Equal(t, "openai_responses", binding.Protocol)
+		}
+	})
+
+	// A native-only model comes in at the plugin's own route, so no host
+	// protocol may claim it.
+	t.Run("native-only models claim no host protocol", func(t *testing.T) {
+		if len(testCase.nativeOnlyModels) == 0 {
+			return
+		}
+		for _, model := range testCase.nativeOnlyModels {
+			assert.Contains(t, plugin.Meta.Models, model)
+			_, found := registry.Generation().LookupEndpoint("POST", "/v1/responses", model)
+			assert.False(t, found, model)
+			_, found = registry.Generation().LookupEndpoint("POST", "/v1/videos", model)
+			assert.False(t, found, model)
 		}
 	})
 
