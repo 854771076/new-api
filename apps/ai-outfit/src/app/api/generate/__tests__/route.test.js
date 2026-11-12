@@ -53,8 +53,8 @@ mock.module('@/lib/gateway-session', () => ({ getGatewayAccessToken: async () =>
 mock.module('@/lib/tryon/models', () => ({
   resolveTryonModel: mock(async (_db, usage) =>
     (usage === 'image'
-      ? { model: 'img-model', defaultSize: '1024x1536' }
-      : { model: 'vision-model', defaultSize: null })),
+      ? { model: 'img-model', defaultSize: '1024x1536', defaultQuality: null }
+      : { model: 'vision-model', defaultSize: null, defaultQuality: null })),
 }));
 mock.module('@/lib/tryon/pricing', () => ({
   resolveQuotePrices: mock(async () => ({ parsePrice: 3000, tryonPrice: 15000 })),
@@ -118,6 +118,16 @@ test('freezes the quote and creates a pending task with a provider snapshot', as
   });
   expect(insert.input.quote).toMatchObject({ item_count: 1, unparsed_garment_ids: [] });
   expect(insert.input.provider_snapshot).toEqual({ model: 'img-model', size: '1024x1536', vision_model: 'vision-model' });
+  expect(insert.input.pose_snapshot).toEqual({ pose_id: poseId, bucket: 'b', path: 'p' });
+});
+
+test('accepts an explicit quality and freezes it in the provider snapshot', async () => {
+  const res = await post({ ...validBody(), quality: 'high' });
+  const json = await res.json();
+  expect(res.status).toBe(200);
+
+  const insert = inserts.find((i) => i.table === 'outfit_generations');
+  expect(insert.input.provider_snapshot).toEqual({ model: 'img-model', size: '1024x1536', quality: 'high', vision_model: 'vision-model' });
 });
 
 test('a repeated idempotency key returns the original task without re-creating it', async () => {

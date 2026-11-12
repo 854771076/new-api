@@ -10,20 +10,21 @@ interface ModelRow {
   model_id: string;
   client_id: string;
   default_size: string | null;
+  default_quality: string | null;
   is_default: boolean | null;
 }
 
 /**
  * 按 usage 取一个可用模型：优先当前 client 的默认/首行，回退全局共享行（client_id=''）。
- * image 同时返回默认出图尺寸；vision 不消费尺寸。单价不再本地维护，报价走网关 /oauth/pricing。
+ * image 同时返回默认出图尺寸与质量；vision 不消费这些参数。单价不再本地维护，报价走网关 /oauth/pricing。
  */
 export async function resolveTryonModel(
   supabase: SupabaseClient,
   usage: TryonModelUsage,
-): Promise<{ model: string; defaultSize: string | null }> {
+): Promise<{ model: string; defaultSize: string | null; defaultQuality: string | null }> {
   const { data, error } = await supabase
     .from('ai_models')
-    .select('model_id, client_id, default_size, is_default')
+    .select('model_id, client_id, default_size, default_quality, is_default')
     .eq('usage', usage)
     .eq('is_active', true)
     .in('client_id', [config.gatewayClientId, ''])
@@ -41,5 +42,5 @@ export async function resolveTryonModel(
     const label = usage === 'vision' ? '视觉理解模型' : '生图模型';
     throw new GatewayError(400, `未配置可用的${label}，请联系管理员`, 'AI_TRYON_MODEL_UNAVAILABLE');
   }
-  return { model: row.model_id, defaultSize: row.default_size ?? null };
+  return { model: row.model_id, defaultSize: row.default_size ?? null, defaultQuality: row.default_quality ?? null };
 }

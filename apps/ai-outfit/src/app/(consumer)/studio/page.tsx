@@ -103,7 +103,7 @@ export default async function StudioPage({
   const currentClientId = config.gatewayClientId;
   const { data: modelRows, error: modelError } = await supabase
     .from('ai_models')
-    .select('id, model_id, display_name, provider, is_default')
+    .select('id, model_id, display_name, provider, is_default, default_size, default_quality')
     .eq('is_active', true)
     .eq('usage', 'image')
     .in('client_id', [currentClientId, ''])
@@ -114,6 +114,8 @@ export default async function StudioPage({
         display_name: m.display_name as string,
         provider: m.provider as string | null,
         is_default: Boolean(m.is_default),
+        default_size: m.default_size as string | null,
+        default_quality: m.default_quality as string | null,
       }));
 
   return (

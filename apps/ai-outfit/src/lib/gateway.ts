@@ -557,22 +557,25 @@ export interface ReferenceImageInput {
   model: string;
   /** Frozen pipeline prompt (v1 product / v2 persona / v4 try-on); sent verbatim, no role prefix. */
   prompt: string;
-  /** One or two HTTPS signed reference URLs in the exact order the prompt describes. */
+  /** One to three HTTPS signed reference URLs in the exact order the prompt describes. */
   reference_images: string[];
   size?: string;
+  /** Optional image quality (e.g. low/medium/high); omitted lets the upstream model decide. */
+  quality?: string;
   accessToken?: string;
 }
 
 /**
- * 六阶段管线专用：把冻结英文提示词原样发送，参考图固定 1–2 张（人物标准化 1 张、
- * 商品图 2 张、最终换装 2 张），不注入旧版多图角色前缀，避免覆盖 v1/v2/v4 约束。
+ * 六阶段管线专用：把冻结英文提示词原样发送，参考图固定 1–3 张（人物标准化 1 张、
+ * 商品图 2 张、最终换装 3 张），不注入旧版多图角色前缀，避免覆盖 v1/v2/v4 约束。
  */
 export async function generateReferenceImage(input: ReferenceImageInput): Promise<ImageGenerateResult> {
   const parsedInput = z.object({
     model: z.string().trim().min(1).max(200),
     prompt: z.string().trim().min(1).max(MAX_IMAGE_PROMPT_LENGTH),
-    reference_images: z.array(imageUrlSchema).min(1).max(2),
+    reference_images: z.array(imageUrlSchema).min(1).max(3),
     size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).default('auto'),
+    quality: z.string().trim().min(1).max(50).optional(),
     accessToken: z.string().optional(),
   }).strict().safeParse(input);
   if (!parsedInput.success) throw new GatewayError(400, 'Invalid image edit request.', 'BAD_REQUEST_INVALID_BODY');
@@ -582,6 +585,7 @@ export async function generateReferenceImage(input: ReferenceImageInput): Promis
   form.set('model', values.model);
   form.set('prompt', values.prompt);
   form.set('size', values.size);
+  if (values.quality) form.set('quality', values.quality);
   form.set('n', '1');
   let uploadBytes = 0;
   for (const url of values.reference_images) {

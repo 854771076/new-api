@@ -1,0 +1,32 @@
+# Build artifacts and dependencies that must never be uploaded to Vercel.
+node_modules/
+.next/
+.vercel/
+.git/
+dist/
+build/
+
+# Go build binaries and local dev state.
+*.exe
+*.exe~
+new-api
+one-api
+/__debug_bin*
+
+# Agent skill fixtures and scratch (not part of the deployable app).
+.agents/
+/supabase/
+skills-lock.json
+
+# Databases and caches.
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+logs
+.eslintcache
+.cache
+.gocache
+.gomodcache/
+.gocache-temp
+.gopath

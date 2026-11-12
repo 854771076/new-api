@@ -21,6 +21,8 @@ type ModelOption = {
   display_name: string;
   provider?: string | null;
   is_default: boolean;
+  default_size?: string | null;
+  default_quality?: string | null;
 };
 
 type QuoteData = {
@@ -61,6 +63,26 @@ type Props = {
 
 const STEPS = ['选择人物', '选择服装', '选择姿势', '确认生成'] as const;
 const MAX_OUTFITS = 6;
+
+const SIZE_OPTIONS = [
+  { value: 'auto', label: '自动' },
+  { value: '1024x1024', label: '1:1 方形（1024×1024）' },
+  { value: '1024x1536', label: '2:3 竖版（1024×1536）' },
+  { value: '1536x1024', label: '3:2 横版（1536×1024）' },
+] as const;
+const QUALITY_OPTIONS = [
+  { value: 'auto', label: '自动' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
+] as const;
+
+function defaultSizeOf(v?: string | null): string {
+  return v && SIZE_OPTIONS.some((o) => o.value === v) ? v : '1024x1536';
+}
+function defaultQualityOf(v?: string | null): string {
+  return v && v.trim() ? v.trim() : 'auto';
+}
 
 function Chip({
   active, onClick, children,
@@ -118,9 +140,10 @@ export function StudioClient({
   const [charId, setCharId] = useState<string | null>(null);
   const [outfitIds, setOutfitIds] = useState<string[]>([]);
   const [poseId, setPoseId] = useState<string | null>(null);
-  const [modelId, setModelId] = useState(
-    models.find((m) => m.is_default)?.model_id ?? models[0]?.model_id ?? '',
-  );
+  const defaultModel = models.find((m) => m.is_default) ?? models[0] ?? null;
+  const [modelId, setModelId] = useState(defaultModel?.model_id ?? '');
+  const [size, setSize] = useState(defaultSizeOf(defaultModel?.default_size));
+  const [quality, setQuality] = useState(defaultQualityOf(defaultModel?.default_quality));
   const [promptExtra, setPromptExtra] = useState('');
 
   // 服装筛选（纯本地，不再驱动 URL）
@@ -160,6 +183,14 @@ export function StudioClient({
   const selectedCharacter = characters.find((c) => c.id === charId) ?? null;
   const selectedPose = poses.find((p) => p.id === poseId) ?? null;
   const selectedOutfits = outfits.filter((o) => outfitIds.includes(o.id));
+  const selectedModel = models.find((m) => m.model_id === modelId) ?? null;
+
+  const qualityOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = QUALITY_OPTIONS.map((o) => ({ value: o.value, label: o.label }));
+    const dq = selectedModel?.default_quality?.trim();
+    if (dq && !opts.some((o) => o.value === dq)) opts.push({ value: dq, label: dq });
+    return opts;
+  }, [selectedModel]);
 
   const filteredOutfits = useMemo(() => {
     const q = outfitQ.trim().toLowerCase();
@@ -250,6 +281,8 @@ export function StudioClient({
           outfit_ids: outfitIds,
           pose_id: poseId,
           model: modelId,
+          size,
+          quality,
           prompt_extra: promptExtra.trim() || undefined,
           idempotency_key: idempotencyKey,
         }),
@@ -601,7 +634,13 @@ export function StudioClient({
 
             <fieldset className="fieldset gap-2 pt-0">
               <legend className="fieldset-legend pb-2 text-sm"><label htmlFor="studio-model">模型</label></legend>
-              <select id="studio-model" className="select w-full text-base" value={modelId} disabled={models.length === 0} onChange={(e) => setModelId(e.target.value)}>
+              <select id="studio-model" className="select w-full text-base" value={modelId} disabled={models.length === 0} onChange={(e) => {
+                const next = e.target.value;
+                setModelId(next);
+                const m = models.find((x) => x.model_id === next);
+                setSize(defaultSizeOf(m?.default_size));
+                setQuality(defaultQualityOf(m?.default_quality));
+              }}>
                 {!modelReady ? <option value={modelId}>暂无可用模型</option> : null}
                 {models.map((m) => (
                   <option key={m.id} value={m.model_id}>{m.provider ? `${m.display_name}（${m.provider}）` : m.display_name}</option>
@@ -609,6 +648,25 @@ export function StudioClient({
               </select>
               {models.length === 0 ? <div role="status" className="alert alert-warning alert-soft text-sm"><span>暂无可用模型，请联系管理员配置后再生成。</span></div> : null}
             </fieldset>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <fieldset className="fieldset gap-2 pt-0">
+                <legend className="fieldset-legend pb-2 text-sm"><label htmlFor="studio-size">图片尺寸</label></legend>
+                <select id="studio-size" className="select w-full text-base" value={size} onChange={(e) => setSize(e.target.value)}>
+                  {SIZE_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </fieldset>
+              <fieldset className="fieldset gap-2 pt-0">
+                <legend className="fieldset-legend pb-2 text-sm"><label htmlFor="studio-quality">图片质量</label></legend>
+                <select id="studio-quality" className="select w-full text-base" value={quality} onChange={(e) => setQuality(e.target.value)}>
+                  {qualityOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </fieldset>
+            </div>
 
             <fieldset className="fieldset gap-2 pt-0">
               <legend className="fieldset-legend pb-2 text-sm"><label htmlFor="studio-prompt">补充提示词</label></legend>

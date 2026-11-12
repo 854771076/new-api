@@ -26,6 +26,7 @@ const bodySchema = z.object({
   pose_id: z.string().uuid(),
   model: z.string().min(1).max(200),
   size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).optional(),
+  quality: z.string().trim().min(1).max(50).optional(),
   prompt_extra: z.string().max(500).optional(),
   // 客户端为同一组选择生成的稳定键；缺省时由服务端按入参派生，仍可去重完全相同的重复提交。
   idempotency_key: z.string().min(8).max(200).optional(),
@@ -91,6 +92,7 @@ export async function POST(req: NextRequest) {
   if (!bodySchema.shape.size.unwrap().safeParse(size).success) {
     return gatewayFailure(new GatewayError(400, '模型图片尺寸配置不可用，请联系管理员', 'INVALID_IMAGE_SIZE'));
   }
+  const quality = body.quality?.trim() || imageModelRes.defaultQuality?.trim() || undefined;
   const quote = buildQuote(candidates, await resolveQuotePrices(imageModelRes.model, visionModelRes.model));
 
   // 3. 一次性创建任务（部分唯一索引兜底并发重复提交）。
@@ -101,6 +103,7 @@ export async function POST(req: NextRequest) {
       character_id: character.id,
       outfit_ids: body.outfit_ids,
       pose_id: pose.id,
+      pose_snapshot: { pose_id: pose.id, bucket: pose.bucket, path: pose.preview_path },
       prompt: body.prompt_extra?.trim() || null,
       model: body.model,
       status: 'pending',
@@ -111,7 +114,12 @@ export async function POST(req: NextRequest) {
       parse_fee_quota: quote.parse_fee_quota,
       tryon_fee_quota: quote.tryon_fee_quota,
       pipeline_version: PIPELINE_VERSION,
-      provider_snapshot: { model: body.model, size, vision_model: visionModelRes.model },
+      provider_snapshot: {
+        model: body.model,
+        size,
+        ...(quality ? { quality } : {}),
+        vision_model: visionModelRes.model,
+      },
     }).select('id').single();
 
   if (insertErr || !pendingRow) {
@@ -135,6 +143,7 @@ function deriveIdempotencyKey(body: z.infer<typeof bodySchema>): string {
     p: body.pose_id,
     m: body.model,
     s: body.size ?? null,
+    q: body.quality ?? null,
   });
   // SHA-256 而不是短整型哈希：同一用户累积大量任务时避免生日碰撞把不同选择误判为重复提交。
   const digest = createHash('sha256').update(basis).digest('hex');

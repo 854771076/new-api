@@ -76,6 +76,7 @@ function order() {
     character: { id: 'char-1', bucket: 'media-user', image_path: 'src.png', cover_path: null, persona_status: 'pending', persona_version: 0 },
     candidates: [{ id: 'g1', source: 'user' }],
     quote: { parse_fee_quota: 0, tryon_fee_quota: 0, total_quota: 0, unparsed_garment_ids: ['g1'], item_count: 1 },
+    pose: { bucket: 'media-official', path: `${clientId}/poses/pose-1.png` },
     imageModel: 'img-model', visionModel: 'vision-model', size: '1024x1536',
   };
 }
@@ -94,7 +95,7 @@ beforeEach(() => {
   ];
 });
 
-test('happy path: stages, board storage, fixed two-image try-on, snapshots and result storage', async () => {
+test('happy path: stages, board storage, fixed three-image try-on, snapshots and result storage', async () => {
   const result = await runTryon({}, order());
 
   expect(stageUpdates).toEqual(['parsing', 'board', 'generating']);
@@ -107,9 +108,10 @@ test('happy path: stages, board storage, fixed two-image try-on, snapshots and r
   const call = referenceCalls[0];
   expect(call.model).toBe('img-model');
   expect(call.size).toBe('1024x1536');
-  expect(call.reference_images).toHaveLength(2);
+  expect(call.reference_images).toHaveLength(3);
   expect(call.reference_images[0]).toContain('persona-v1.png');
   expect(call.reference_images[1]).toContain('board.jpg');
+  expect(call.reference_images[2]).toContain('pose-1.png');
   expect(call.prompt).toContain('"cell":1');
 
   expect(result.personaSnapshot).toMatchObject({ character_id: 'char-1', persona_version: 1 });
@@ -117,6 +119,22 @@ test('happy path: stages, board storage, fixed two-image try-on, snapshots and r
   expect(result.providerSnapshot).toEqual({ model: 'img-model', size: '1024x1536' });
   expect(result.manifest).toHaveLength(1);
   expect(result.boardPath).toContain('/board.jpg');
+});
+
+test('forwards an explicit quality to the gateway call and freezes it in the provider snapshot', async () => {
+  const result = await runTryon({}, { ...order(), quality: 'high' });
+
+  expect(referenceCalls).toHaveLength(1);
+  expect(referenceCalls[0].quality).toBe('high');
+  expect(result.providerSnapshot).toEqual({ model: 'img-model', size: '1024x1536', quality: 'high' });
+});
+
+test('omits quality from the gateway call and snapshot when not provided', async () => {
+  const result = await runTryon({}, order());
+
+  expect(referenceCalls).toHaveLength(1);
+  expect(referenceCalls[0].quality).toBeUndefined();
+  expect(result.providerSnapshot).toEqual({ model: 'img-model', size: '1024x1536' });
 });
 
 test('try-on generation failure rolls back newly parsed garments and rethrows a GatewayError', async () => {

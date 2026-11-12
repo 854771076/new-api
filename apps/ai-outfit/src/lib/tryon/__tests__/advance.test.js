@@ -112,6 +112,8 @@ function taskRow(overrides = {}) {
     quote: { parse_fee_quota: 0, tryon_fee_quota: 15000, total_quota: 15000, unparsed_garment_ids: [outfitId], item_count: 1 },
     persona_snapshot: null,
     provider_snapshot: { model: 'img-model', size: '1024x1536', vision_model: 'vision-model' },
+    pose_id: 'c3333333-3333-4333-8333-333333333333',
+    pose_snapshot: { pose_id: 'c3333333-3333-4333-8333-333333333333', bucket: 'media-official', path: 'poses/pose-1.png' },
     result_bucket: null, result_path: null, error: null,
     ...overrides,
   };

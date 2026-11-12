@@ -13,7 +13,7 @@ import { parsePersonalGarment, type ParseableGarment } from './parse-garment';
 import { runBoardAndTryon, type TryonOrder } from './orchestrate';
 import { rollbackParsedGarments } from './rollback';
 import { needsParsing } from './quote';
-import type { GenerationQuote, GenerationStatus, PersonaSnapshot, ProviderSnapshot } from '@/lib/types';
+import type { GenerationQuote, GenerationStatus, PersonaSnapshot, PoseSnapshot, ProviderSnapshot } from '@/lib/types';
 
 export interface AdvanceResult {
   status: 'pending' | 'succeeded' | 'failed';
@@ -35,6 +35,8 @@ interface TaskRow {
   quote: GenerationQuote | null;
   persona_snapshot: PersonaSnapshot | null;
   provider_snapshot: ProviderSnapshot | null;
+  pose_id: string | null;
+  pose_snapshot: PoseSnapshot | null;
   result_bucket: string | null;
   result_path: string | null;
   error: string | null;
@@ -49,7 +51,7 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
   const clientId = config.gatewayClientId;
 
   const { data: task } = await admin.from('outfit_generations')
-    .select('id, client_id, user_id, character_id, outfit_ids, model, status, stage, quote, persona_snapshot, provider_snapshot, result_bucket, result_path, error')
+    .select('id, client_id, user_id, character_id, outfit_ids, model, status, stage, quote, persona_snapshot, provider_snapshot, pose_id, pose_snapshot, result_bucket, result_path, error')
     .eq('id', recordId).eq('client_id', clientId).eq('user_id', userId)
     .maybeSingle();
   if (!task) throw new GatewayError(404, '生成任务不存在', 'GENERATION_NOT_FOUND');
@@ -69,6 +71,7 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
   const imageModel = provider.model || row.model;
   const visionModel = provider.vision_model ?? '';
   const size = provider.size ?? '1024x1536';
+  const quality = typeof provider.quality === 'string' && provider.quality.trim() ? provider.quality.trim() : undefined;
 
   const [{ data: character }, { data: outfits }] = await Promise.all([
     admin.from('characters').select('id, name, bucket, image_path, cover_path, persona_status, persona_version')
@@ -121,7 +124,7 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
     }
   }
 
-  // Step 3：拼板 + 两图换装 + 落盘（单步 ~50s，合并为一个 < 60s 推进步）。
+  // Step 3：拼板 + 三图换装 + 落盘（单步 ~50s，合并为一个 < 60s 推进步）。
   if (!row.result_path) {
     const personaSnapshot = row.persona_snapshot as PersonaSnapshot;
     const persona = {
@@ -130,6 +133,17 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
       personaVersion: personaSnapshot.persona_version,
     };
     const ctx: ResolveWearContext = { clientId, userId, visionModel, imageModel };
+    // 姿势参考图优先用落库快照，缺失时按 pose_id 回查（兼容迁移前已建任务）。
+    const poseSnapshot = row.pose_snapshot ?? await (async () => {
+      if (!row.pose_id) return null;
+      const { data: pose } = await admin.from('poses')
+        .select('id, bucket, preview_path')
+        .eq('id', row.pose_id).eq('client_id', clientId).maybeSingle();
+      return pose ? { pose_id: pose.id, bucket: pose.bucket, path: pose.preview_path } : null;
+    })();
+    if (!poseSnapshot) {
+      return markFailed(admin, row, clientId, userId, new GatewayError(404, '姿势不存在', 'POSE_NOT_FOUND'));
+    }
     const order: TryonOrder = {
       recordId,
       clientId,
@@ -143,9 +157,11 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
         unparsed_garment_ids: [],
         item_count: candidates.length,
       },
+      pose: { bucket: poseSnapshot.bucket, path: poseSnapshot.path },
       imageModel,
       visionModel,
       size,
+      quality,
     };
     try {
       const wear = await resolveWearItems(admin, candidates, ctx);
