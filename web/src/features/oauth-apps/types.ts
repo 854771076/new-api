@@ -8,6 +8,7 @@ export interface OAuthApp {
   scopes: string[]
   status: number
   public_client: boolean
+  waffo_pancake_return_url?: string
   created_by: number
   created_at: number
   updated_at: number
@@ -20,6 +21,7 @@ export interface CreateOAuthAppRequest {
   post_logout_redirect_uris: string[]
   scopes: string[]
   public_client: boolean
+  waffo_pancake_return_url: string
 }
 
 export interface CreateOAuthAppResponse {

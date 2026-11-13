@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const paymentMethodSchema = z.enum(['balance', 'waffo_pancake']);
+export const paymentMethodSchema = z.enum(['balance', 'stripe', 'creem', 'epay', 'waffo_pancake']);
 export const gatewayTopupSchema = z.object({
   amount: z.number().int().min(1).max(10_000),
   payment_method: paymentMethodSchema,
@@ -16,15 +16,23 @@ const checkoutUrl = z.string().url().refine(value => {
   const url = new URL(value);
   return url.protocol === 'https:' && !url.username && !url.password;
 });
+// 易支付网关可能使用 http 地址；仅校验协议与凭据，不强制 https。
+const paymentFormUrl = z.string().url().refine(value => {
+  const url = new URL(value);
+  return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password;
+});
 export const gatewayCheckoutResultSchema = z.object({
   status: z.enum(['success', 'pending']),
   payment_method: paymentMethodSchema.optional(),
   checkout_url: checkoutUrl.optional(),
+  pay_link: checkoutUrl.optional(),
+  url: paymentFormUrl.optional(),
+  params: z.record(z.string(), z.string()).optional(),
   order_id: z.string().min(1).optional(),
   expires_at: z.union([z.string(), z.number().finite()]).optional(),
   quota: quota.optional(),
   quota_amount: quota.optional(),
-}).refine(value => value.status !== 'pending' || !!value.checkout_url, {
+}).refine(value => value.status !== 'pending' || !!value.checkout_url || !!value.pay_link || !!value.url, {
   message: 'Pending checkout requires a checkout URL',
 });
 
@@ -51,6 +59,10 @@ export const gatewayProductSchema = z.object({
   currency: z.string(),
   quota_amount: quota,
   max_purchase_per_user: z.number().int().nonnegative(),
+});
+
+export const gatewayPaymentMethodsSchema = z.object({
+  payment_methods: z.array(z.string()),
 });
 
 export type GatewayPaymentMethod = z.infer<typeof paymentMethodSchema>;

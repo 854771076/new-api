@@ -357,6 +357,7 @@ interface AppFormData {
   post_logout_redirect_uris: string[]
   scopes: string[]
   public_client: boolean
+  waffo_pancake_return_url: string
 }
 
 // Logos are stored in a TEXT column, so the encoded data URI must stay under
@@ -416,6 +417,9 @@ function AppForm({
   const [publicClient, setPublicClient] = useState(
     defaultValues?.public_client ?? false
   )
+  const [waffoPancakeReturnUrl, setWaffoPancakeReturnUrl] = useState(
+    defaultValues?.waffo_pancake_return_url ?? ''
+  )
   const publicClientId = useId()
 
   const handleLogoChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -459,6 +463,7 @@ function AppForm({
         .filter(Boolean),
       scopes,
       public_client: publicClient,
+      waffo_pancake_return_url: waffoPancakeReturnUrl.trim(),
     })
   }
 
@@ -530,6 +535,20 @@ function AppForm({
           placeholder='My App'
           disabled={loading}
         />
+      </div>
+      <div>
+        <label className='mb-1 block text-sm font-medium'>
+          {t('Payment return URL (Waffo Pancake)')}
+        </label>
+        <Input
+          value={waffoPancakeReturnUrl}
+          onChange={(e) => setWaffoPancakeReturnUrl(e.target.value)}
+          placeholder='https://example.com/payment/return'
+          disabled={loading}
+        />
+        <p className='text-muted-foreground mt-1 text-xs'>
+          {t('Leave empty to use the global return URL')}
+        </p>
       </div>
       <div>
         <label className='mb-1 block text-sm font-medium'>
@@ -695,6 +714,7 @@ function EditAppDialog({
               post_logout_redirect_uris: app.post_logout_redirect_uris,
               scopes: app.scopes,
               public_client: app.public_client,
+              waffo_pancake_return_url: app.waffo_pancake_return_url,
             }}
             onSubmit={onSubmit}
             submitLabel={t('Save')}

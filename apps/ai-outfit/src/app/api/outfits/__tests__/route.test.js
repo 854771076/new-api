@@ -23,6 +23,8 @@ function query(table) {
     select() { return builder; },
     eq(key, value) { operation.filters.push([key, value]); return builder; },
     order() { return builder; },
+    or() { return builder; },
+    range() { return builder; },
     insert(input) { operation.action = 'insert'; operation.input = input; return builder; },
     update(input) { operation.action = 'update'; operation.input = input; return builder; },
     delete() { operation.action = 'delete'; return builder; },
@@ -118,10 +120,11 @@ test('rejects a different verified App and unauthenticated upload', async () => 
 });
 
 test('GET filters to personal rows owned by the caller', async () => {
-  const response = await GET();
+  const response = await GET(new NextRequest('https://outfit.example/api/outfits?source=user'));
   const select = calls.find(call => call.action === 'select');
   expect(select.filters).toEqual([
     ['client_id', 'nac_outfit'],
+    ['is_active', true],
     ['source', 'user'],
     ['user_id', userId],
   ]);

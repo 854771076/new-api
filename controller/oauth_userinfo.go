@@ -64,10 +64,31 @@ func OAuthUserInfo(c *gin.Context) {
 				response["app_quota"] = wallet.Quota
 				response["app_used_quota"] = wallet.UsedQuota
 			}
+			response["subscription"] = oauthActiveSubscription(user.Id, appId)
 		}
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// oauthActiveSubscription returns the active subscription of a user within one
+// OAuth App, or nil when there is none. The returned object exposes only the
+// plan title, total amount and end time; it never leaks subscriptions from
+// other apps.
+func oauthActiveSubscription(userId, appId int) any {
+	subs, err := model.GetAllActiveUserSubscriptions(userId, appId)
+	if err != nil || len(subs) == 0 || subs[0].Subscription == nil {
+		return nil
+	}
+	sub := subs[0].Subscription
+	info := gin.H{
+		"total_amount": sub.AmountTotal,
+		"end_time":     sub.EndTime,
+	}
+	if planInfo, planErr := model.GetSubscriptionPlanInfoByUserSubscriptionId(sub.Id); planErr == nil && planInfo != nil {
+		info["plan_title"] = planInfo.PlanTitle
+	}
+	return info
 }
 
 // OAuthIntrospect handles POST /oauth/introspect (RFC 7662).

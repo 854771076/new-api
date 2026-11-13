@@ -143,6 +143,7 @@ func createWaffoPancakeSubscriptionOrder(ctx context.Context, user *model.User, 
 		BuyerEmail:              getWaffoPancakeBuyerEmail(user),
 		ExpiresInSeconds:        &expiresInSeconds,
 		OrderMerchantExternalID: tradeNo,
+		SuccessURL:              service.ResolveWaffoPancakeReturnURL(plan.AppId),
 	})
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create subscription checkout session user_id=%d plan_id=%d trade_no=%s error=%q", user.Id, plan.Id, tradeNo, err.Error()))

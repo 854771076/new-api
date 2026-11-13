@@ -39,13 +39,14 @@ export const PERSONA_V2_PROMPT =
   'Before output, verify silently: one person only; recognizable unchanged identity; upright frontal pose; completehead, hands, legs and shoes; unchanged clothing; no copied scenery; no props, text, border, collage, duplicate limb,cropped body part, dramatic shadow or face drift. Output exactly one photorealistic image.';
 
 /**
- * 最终换装 v4：固定两图 [人物参考, 服装板]。
+ * 最终换装 v4：固定三图 [人物参考, 服装板, 姿势参考]。
  * 占位符：{item_count} 实际服装数、{garment_manifest} 与格位同序的 JSON 清单。
  */
 export const TRYON_V4_PROMPT =
   'Create one photorealistic virtual try-on image. Image 1 is the authoritative front-view full-body person;' +
-  'Image 2 is a 3x2 product board containing every garment and wearable item to put on that same person. ' +
-  "Preserve Image 1's exact identity, face, age, skin tone, hairstyle, body build, proportions, expression, camera,pose, hand and leg positions, subject scale and complete head-to-shoe framing. Replace only clothing and wearableaccessories. " +
+  'Image 2 is a 3x2 product board containing every garment and wearable item to put on that same person;' +
+  'Image 3 is a full-body pose reference that only sets the body pose, not identity or clothing. ' +
+  "Preserve Image 1's exact identity, face, age, skin tone, hairstyle, body build, proportions, expression, camera,subject scale and complete head-to-shoe framing. Transfer Image 3's exact pose onto Image 1's person: adopt itsfull-body stance, arm and leg positions, hand placement, torso orientation, head turn and weight distribution, whilekeeping Image 1's identity, proportions and framing. Replace only clothing and wearable accessories. " +
   "Use every non-empty, non-duplicate item from Image 2 exactly once. Preserve each item's type,silhouette, fit, length, layering, exact colors, material, texture, patterns, logos, seams, closures, trim,hardware and asymmetric details. " +
   'Place items in anatomically correct positions and a physically plausible layerorder. Do not merge separate items, redesign clothing, invent absent items or copy the board background. ' +
   'Keep the same bright neutral studio presentation. No extra person, duplicate garment, altered anatomy, pose orface drift, beauty retouching, caption, border or collage. Output exactly one clean front-view full-body image. ' +

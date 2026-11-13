@@ -1,12 +1,14 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -362,6 +364,87 @@ func RequestEpay(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "success", "data": params, "url": uri})
 }
 
+// generateEpayTopUpCheckout is the pure checkout core shared by the OAuth app
+// top-up endpoint. It mirrors RequestEpay while carrying the OAuth App wallet
+// target (appId). Epay settlement credits Amount × QuotaPerUnit, so Amount is
+// stored as the normalized unit quantity that reproduces creditedQuota.
+func generateEpayTopUpCheckout(ctx context.Context, user *model.User, amount int64, appId int, paymentType string) (uri string, params map[string]string, err error) {
+	if !isEpayTopUpEnabled() {
+		return "", nil, common.NewMessage("Epay configuration is incomplete")
+	}
+	if user == nil {
+		return "", nil, common.NewMessage("User does not exist")
+	}
+	if appId < 0 {
+		return "", nil, model.ErrInvalidAppId
+	}
+	if amount < getMinTopup() {
+		return "", nil, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getMinTopup()})
+	}
+	creditedQuota, err := validateTopUpQuota(amount)
+	if err != nil {
+		return "", nil, err
+	}
+	if appId > 0 {
+		err = model.ValidateAppTopUpQuotaCapacity(user.Id, appId, creditedQuota)
+	} else {
+		err = model.ValidateTopUpQuotaCapacity(user.Id, creditedQuota)
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	if !operation_setting.ContainsPayMethod(paymentType) {
+		return "", nil, common.NewMessage("Payment method does not exist")
+	}
+	payMoney := getPayMoney(amount, user.Group)
+	if payMoney < 0.01 {
+		return "", nil, common.NewMessage("Payment amount is too low")
+	}
+
+	callBackAddress := service.GetCallbackAddress()
+	returnUrl, _ := url.Parse(paymentReturnPath("/usage-logs"))
+	notifyUrl, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
+	tradeNo := fmt.Sprintf("USR%dNO%s%d", user.Id, common.GetRandomString(6), time.Now().Unix())
+	client := GetEpayClient()
+	if client == nil {
+		return "", nil, common.NewMessage("Payment information has not been configured by administrator")
+	}
+	uri, params, err = client.Purchase(&epay.PurchaseArgs{
+		Type:           paymentType,
+		ServiceTradeNo: tradeNo,
+		Name:           fmt.Sprintf("TUC%d", amount),
+		Money:          strconv.FormatFloat(payMoney, 'f', 2, 64),
+		Device:         epay.PC,
+		NotifyUrl:      notifyUrl,
+		ReturnUrl:      returnUrl,
+	})
+	if err != nil {
+		logger.LogError(ctx, common.LogText("Epay failed to start payment user_id=%d app_id=%d trade_no=%s payment_method=%s amount=%d error=%q", user.Id, appId, tradeNo, paymentType, amount, err.Error()))
+		return "", nil, common.NewMessage("Failed to start payment")
+	}
+	normalizedAmount := amount
+	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
+		normalizedAmount = decimal.NewFromInt(amount).Div(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart()
+	}
+	topUp := &model.TopUp{
+		AppId:           appId,
+		UserId:          user.Id,
+		Amount:          normalizedAmount,
+		Money:           payMoney,
+		TradeNo:         tradeNo,
+		PaymentMethod:   paymentType,
+		PaymentProvider: model.PaymentProviderEpay,
+		CreateTime:      time.Now().Unix(),
+		Status:          common.TopUpStatusPending,
+	}
+	if err := topUp.Insert(); err != nil {
+		logger.LogError(ctx, common.LogText("Epay failed to create top-up order user_id=%d app_id=%d trade_no=%s payment_method=%s amount=%d error=%q", user.Id, appId, tradeNo, paymentType, amount, err.Error()))
+		return "", nil, common.NewMessage("Failed to create order")
+	}
+	logger.LogInfo(ctx, common.LogText("Epay top-up order created user_id=%d app_id=%d trade_no=%s payment_method=%s amount=%d money=%.2f uri=%q params=%q", user.Id, appId, tradeNo, paymentType, amount, payMoney, uri, common.GetJsonString(params)))
+	return uri, params, nil
+}
+
 // tradeNo lock
 var orderLocks sync.Map
 var createLock sync.Mutex
@@ -466,6 +549,20 @@ func EpayNotify(c *gin.Context) {
 		// 数据库行锁 + 事务内状态校验保证（多实例部署下同样安全）。
 		LockOrder(verifyInfo.ServiceTradeNo)
 		defer UnlockOrder(verifyInfo.ServiceTradeNo)
+		if strings.HasPrefix(verifyInfo.ServiceTradeNo, model.AppProductOrderTradeNoPrefix) {
+			if err := model.CompleteAppProductOrder(verifyInfo.ServiceTradeNo, common.GetJsonString(verifyInfo), model.PaymentProviderEpay, 0); err != nil {
+				logger.LogError(c.Request.Context(), common.LogText("Epay app product order processing failed trade_no=%s callback_type=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP(), err.Error()))
+				if _, writeErr := c.Writer.Write([]byte("fail")); writeErr != nil {
+					logger.LogError(c.Request.Context(), common.LogText("Epay webhook failed to write response trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), writeErr.Error()))
+				}
+				return
+			}
+			logger.LogInfo(c.Request.Context(), common.LogText("Epay app product order processed trade_no=%s callback_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP()))
+			if _, writeErr := c.Writer.Write([]byte("success")); writeErr != nil {
+				logger.LogError(c.Request.Context(), common.LogText("Epay webhook failed to write response trade_no=%s client_ip=%s error=%q", verifyInfo.ServiceTradeNo, c.ClientIP(), writeErr.Error()))
+			}
+			return
+		}
 		alreadyDone, err := model.RechargeEpay(verifyInfo.ServiceTradeNo, verifyInfo.Type, c.ClientIP())
 		if err != nil {
 			switch {
@@ -550,10 +647,20 @@ func GetUserTopUps(c *gin.Context) {
 	common.ApiSuccess(c, pageInfo)
 }
 
-// GetAllTopUps 管理员获取全平台充值记录
+// GetAllTopUps 管理员获取充值记录，支持 app_id 过滤（平台 = 0，指定应用 > 0）
 func GetAllTopUps(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	keyword := c.Query("keyword")
+
+	appId := -1
+	if rawAppId := strings.TrimSpace(c.Query("app_id")); rawAppId != "" {
+		parsed, err := strconv.Atoi(rawAppId)
+		if err != nil || parsed < 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		appId = parsed
+	}
 
 	var (
 		topups []*model.TopUp
@@ -561,9 +668,9 @@ func GetAllTopUps(c *gin.Context) {
 		err    error
 	)
 	if keyword != "" {
-		topups, total, err = model.SearchAllTopUps(keyword, pageInfo)
+		topups, total, err = model.SearchAllTopUps(appId, keyword, pageInfo)
 	} else {
-		topups, total, err = model.GetAllTopUps(pageInfo)
+		topups, total, err = model.GetAllTopUps(appId, pageInfo)
 	}
 	if err != nil {
 		common.ApiError(c, err)
@@ -572,6 +679,24 @@ func GetAllTopUps(c *gin.Context) {
 
 	pageInfo.SetTotal(int(total))
 	pageInfo.SetItems(topups)
+	common.ApiSuccess(c, pageInfo)
+}
+
+// AdminListAppWallets 管理员按 app_id 列出应用钱包（余额/已用额度）
+func AdminListAppWallets(c *gin.Context) {
+	appId, err := strconv.Atoi(strings.TrimSpace(c.Query("app_id")))
+	if err != nil || appId <= 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	pageInfo := common.GetPageQuery(c)
+	wallets, total, err := model.ListUserAppWalletsForApp(appId, pageInfo)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	pageInfo.SetTotal(int(total))
+	pageInfo.SetItems(wallets)
 	common.ApiSuccess(c, pageInfo)
 }
 

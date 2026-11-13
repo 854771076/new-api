@@ -20,6 +20,7 @@ import i18next from 'i18next'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
 
+import { useActiveApp } from '@/hooks/use-active-app'
 import { useIsAdmin } from '@/hooks/use-admin'
 import { useDebounce } from '@/hooks/use-debounce'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -46,6 +47,7 @@ interface UseBillingHistoryOptions {
 export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   const { initialPage = 1, initialPageSize = 10 } = options
   const isAdmin = useIsAdmin()
+  const { appId } = useActiveApp()
 
   const [records, setRecords] = useState<TopupRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -65,7 +67,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     setLoading(true)
     try {
       const response = isAdmin
-        ? await getAllBillingHistory(page, pageSize, debouncedKeyword)
+        ? await getAllBillingHistory(page, pageSize, debouncedKeyword, appId)
         : await getUserBillingHistory(page, pageSize, debouncedKeyword)
 
       if (requestId !== requestIdRef.current) return
@@ -88,7 +90,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
         setLoading(false)
       }
     }
-  }, [debouncedKeyword, isAdmin, page, pageSize])
+  }, [debouncedKeyword, isAdmin, appId, page, pageSize])
 
   /**
    * Complete a pending order (admin only)

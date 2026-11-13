@@ -97,6 +97,7 @@ func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount 
 		BuyerEmail:              getWaffoPancakeBuyerEmail(user),
 		ExpiresInSeconds:        &expiresInSeconds,
 		OrderMerchantExternalID: tradeNo,
+		SuccessURL:              service.ResolveWaffoPancakeReturnURL(appId),
 	})
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create checkout session user_id=%d trade_no=%s error=%q", user.Id, tradeNo, err.Error()))

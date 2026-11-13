@@ -240,6 +240,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 		if err := tx.Save(topUp).Error; err != nil {
 			return err
 		}
+		if topUp.AppId > 0 {
+			return increaseUserAppQuota(tx, topUp.UserId, topUp.AppId, quotaToAdd)
+		}
 		return creditTopUpQuota(tx, topUp.UserId, quotaToAdd, nil)
 	})
 	if err != nil {
@@ -251,7 +254,9 @@ func RechargeEpay(tradeNo string, actualPaymentMethod string, callerIp string) (
 	if alreadyDone {
 		return true, nil
 	}
-	syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, common.LogText("epay topup"))
+	if topUp.AppId == 0 {
+		syncCreditUserQuotaCache(topUp.UserId, quotaToAdd, common.LogText("epay topup"))
+	}
 
 	common.SysLog(common.LogText("Epay top-up succeeded trade_no=%s user_id=%d quota_to_add=%d money=%.2f", topUp.TradeNo, topUp.UserId, quotaToAdd, topUp.Money))
 	RecordTopupLog(topUp.UserId, common.NewMessage("Online top-up succeeded, amount added: {{quota}}, payment amount: {{amount}}", map[string]any{"quota": logger.FormatQuota(quotaToAdd), "amount": fmt.Sprintf("%f", topUp.Money)}), callerIp, topUp.PaymentMethod, PaymentProviderEpay)
@@ -298,6 +303,9 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		if err != nil || quota <= 0 {
 			return ErrInvalidTopUpQuota
 		}
+		if topUp.AppId > 0 {
+			return increaseUserAppQuota(tx, topUp.UserId, topUp.AppId, quota)
+		}
 		return creditTopUpQuota(tx, topUp.UserId, quota, map[string]any{
 			"stripe_customer": customerId,
 		})
@@ -307,7 +315,9 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		common.SysError(common.LogText("topup failed: %s", err.Error()))
 		return errors.New("top-up failed")
 	}
-	syncCreditUserQuotaCache(topUp.UserId, quota, common.LogText("stripe topup"))
+	if topUp.AppId == 0 {
+		syncCreditUserQuotaCache(topUp.UserId, quota, common.LogText("stripe topup"))
+	}
 
 	RecordTopupLog(topUp.UserId, common.NewMessage("Online top-up succeeded, amount added: {{quota}}, payment amount: {{amount}}", map[string]any{"quota": logger.FormatQuota(quota), "amount": topUp.Amount}), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
 
@@ -358,8 +368,9 @@ func GetUserTopUps(userId int, pageInfo *common.PageInfo) (topups []*TopUp, tota
 	return topups, total, nil
 }
 
-// GetAllTopUps 获取全平台的充值记录（管理员使用，不限制时间窗口）
-func GetAllTopUps(pageInfo *common.PageInfo) (topups []*TopUp, total int64, err error) {
+// GetAllTopUps 获取充值记录（管理员使用，不限制时间窗口）。
+// appId >= 0 时按 app_id 过滤（0 = 平台钱包，>0 = 指定应用）；appId < 0 表示不过滤。
+func GetAllTopUps(appId int, pageInfo *common.PageInfo) (topups []*TopUp, total int64, err error) {
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -370,12 +381,17 @@ func GetAllTopUps(pageInfo *common.PageInfo) (topups []*TopUp, total int64, err 
 		}
 	}()
 
-	if err = tx.Model(&TopUp{}).Count(&total).Error; err != nil {
+	query := tx.Model(&TopUp{})
+	if appId >= 0 {
+		query = query.Where("app_id = ?", appId)
+	}
+
+	if err = query.Count(&total).Error; err != nil {
 		tx.Rollback()
 		return nil, 0, err
 	}
 
-	if err = tx.Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Find(&topups).Error; err != nil {
+	if err = query.Order("id desc").Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Find(&topups).Error; err != nil {
 		tx.Rollback()
 		return nil, 0, err
 	}
@@ -431,8 +447,9 @@ func SearchUserTopUps(userId int, keyword string, pageInfo *common.PageInfo) (to
 	return topups, total, nil
 }
 
-// SearchAllTopUps 按订单号搜索全平台充值记录（管理员使用，不限制时间窗口）
-func SearchAllTopUps(keyword string, pageInfo *common.PageInfo) (topups []*TopUp, total int64, err error) {
+// SearchAllTopUps 按订单号搜索充值记录（管理员使用，不限制时间窗口）。
+// appId >= 0 时按 app_id 过滤（0 = 平台钱包，>0 = 指定应用）；appId < 0 表示不过滤。
+func SearchAllTopUps(appId int, keyword string, pageInfo *common.PageInfo) (topups []*TopUp, total int64, err error) {
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -444,6 +461,9 @@ func SearchAllTopUps(keyword string, pageInfo *common.PageInfo) (topups []*TopUp
 	}()
 
 	query := tx.Model(&TopUp{})
+	if appId >= 0 {
+		query = query.Where("app_id = ?", appId)
+	}
 	if keyword != "" {
 		pattern, perr := sanitizeLikePattern(keyword)
 		if perr != nil {
@@ -605,6 +625,9 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 			}
 		}
 
+		if topUp.AppId > 0 {
+			return increaseUserAppQuota(tx, topUp.UserId, topUp.AppId, quota)
+		}
 		return creditTopUpQuota(tx, topUp.UserId, quota, updateFields)
 	})
 
@@ -612,7 +635,9 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		common.SysError(common.LogText("creem topup failed: %s", err.Error()))
 		return errors.New("top-up failed")
 	}
-	syncCreditUserQuotaCache(topUp.UserId, quota, common.LogText("creem topup"))
+	if topUp.AppId == 0 {
+		syncCreditUserQuotaCache(topUp.UserId, quota, common.LogText("creem topup"))
+	}
 
 	RecordTopupLog(topUp.UserId, common.NewMessage("{{provider}} top-up succeeded, amount added: {{quota}}, payment amount: {{amount}}", map[string]any{"provider": "Creem", "quota": quota, "amount": fmt.Sprintf("%.2f", topUp.Money)}), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
 

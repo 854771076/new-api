@@ -13,7 +13,6 @@ const modelSchema = z.object({
   model_id: text, display_name: text, provider: z.string().max(200).nullable().optional(),
   usage: modelUsage.optional(), description_zh: optionalText,
   default_size: z.string().max(100).nullable().optional(), default_quality: z.string().max(100).nullable().optional(),
-  price_quota: z.number().int().min(0).max(9007199254740991).optional(),
   is_default: z.boolean().optional(), ...flags,
 }).strict();
 const promptSchema = z.object({

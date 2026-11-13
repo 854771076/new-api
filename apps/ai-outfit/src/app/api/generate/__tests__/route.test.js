@@ -14,8 +14,6 @@ const otherUser = 'e5555555-5555-4555-8555-555555555555';
 let user;
 let tables;
 let inserts;
-let runTryonShouldThrow;
-const runTryonCalls = [];
 
 function rowMatches(row, filters) {
   return filters.every(([key, value, op]) => {
@@ -55,26 +53,11 @@ mock.module('@/lib/gateway-session', () => ({ getGatewayAccessToken: async () =>
 mock.module('@/lib/tryon/models', () => ({
   resolveTryonModel: mock(async (_db, usage) =>
     (usage === 'image'
-      ? { model: 'img-model', defaultSize: '1024x1536', priceQuota: 15000 }
-      : { model: 'vision-model', defaultSize: null, priceQuota: 3000 })),
+      ? { model: 'img-model', defaultSize: '1024x1536', defaultQuality: null }
+      : { model: 'vision-model', defaultSize: null, defaultQuality: null })),
 }));
-mock.module('@/lib/tryon/orchestrate', () => ({
-  runTryon: mock(async (_db, order) => {
-    runTryonCalls.push(order);
-    if (runTryonShouldThrow) {
-      const { GatewayError } = await import('@/lib/gateway-errors');
-      throw new GatewayError(502, '生成失败', 'UPSTREAM_GENERATE_FAILED');
-    }
-    return {
-      resultBucket: 'media-user', resultPath: `p/${recordId}/result.png`,
-      boardBucket: 'media-user', boardPath: `p/${recordId}/board.jpg`,
-      manifest: [{ cell: 1, source: 'user', category: '外套', name: '夹克', semantic_hints: {} }],
-      personaSnapshot: { character_id: charId, persona_version: 1, bucket: 'b', path: 'p' },
-      wearSnapshot: [{ outfit_id: outfitId, source: 'user', category: '外套', bucket: 'b', path: 'p' }],
-      providerSnapshot: { model: 'img-model', size: '1024x1536' },
-      gatewayRequestId: 'req-1', gatewayUsage: { n: 1 }, wear: [],
-    };
-  }),
+mock.module('@/lib/tryon/pricing', () => ({
+  resolveQuotePrices: mock(async () => ({ parsePrice: 3000, tryonPrice: 15000 })),
 }));
 
 const { NextRequest } = await import('next/server');
@@ -96,8 +79,6 @@ const validBody = () => ({
 beforeEach(() => {
   user = { id: userId };
   inserts = [];
-  runTryonCalls.length = 0;
-  runTryonShouldThrow = false;
   tables = {
     characters: [{
       id: charId, client_id: clientId, user_id: userId, name: '我', bucket: 'media-user',
@@ -123,23 +104,33 @@ test('rejects requests with a disallowed origin', async () => {
   expect(res.status).toBe(403);
 });
 
-test('happy path freezes quote/snapshots and creates one succeeded task', async () => {
+test('freezes the quote and creates a pending task with a provider snapshot', async () => {
   const res = await post(validBody());
   const json = await res.json();
   expect(res.status).toBe(200);
   expect(json.success).toBe(true);
-  expect(json.data.id).toBe(recordId);
+  expect(json.data).toMatchObject({ id: recordId, status: 'pending', stage: 'quoted' });
 
   const insert = inserts.find((i) => i.table === 'outfit_generations');
   expect(insert.input).toMatchObject({
-    stage: 'quoted', idempotency_key: 'stable-key-123', pipeline_version: 'tryon-v1',
+    status: 'pending', stage: 'quoted', idempotency_key: 'stable-key-123', pipeline_version: 'tryon-v1',
     parse_fee_quota: 0, tryon_fee_quota: 15000,
   });
   expect(insert.input.quote).toMatchObject({ item_count: 1, unparsed_garment_ids: [] });
-  expect(runTryonCalls).toHaveLength(1);
+  expect(insert.input.provider_snapshot).toEqual({ model: 'img-model', size: '1024x1536', vision_model: 'vision-model' });
+  expect(insert.input.pose_snapshot).toEqual({ pose_id: poseId, bucket: 'b', path: 'p' });
 });
 
-test('a repeated idempotency key returns the original task without re-running the pipeline', async () => {
+test('accepts an explicit quality and freezes it in the provider snapshot', async () => {
+  const res = await post({ ...validBody(), quality: 'high' });
+  const json = await res.json();
+  expect(res.status).toBe(200);
+
+  const insert = inserts.find((i) => i.table === 'outfit_generations');
+  expect(insert.input.provider_snapshot).toEqual({ model: 'img-model', size: '1024x1536', quality: 'high', vision_model: 'vision-model' });
+});
+
+test('a repeated idempotency key returns the original task without re-creating it', async () => {
   tables.outfit_generations = [{
     id: recordId, client_id: clientId, user_id: userId, idempotency_key: 'stable-key-123',
     status: 'succeeded', stage: 'done', result_bucket: 'b', result_path: 'p.png',
@@ -148,7 +139,6 @@ test('a repeated idempotency key returns the original task without re-running th
   const json = await res.json();
   expect(json.data.deduped).toBe(true);
   expect(json.data.id).toBe(recordId);
-  expect(runTryonCalls).toHaveLength(0);
   expect(inserts).toHaveLength(0);
 });
 
@@ -170,15 +160,4 @@ test('a model that is not the resolved image model is rejected before task creat
   const res = await post({ ...validBody(), model: 'some-other-model' });
   expect(res.status).toBe(400);
   expect(inserts).toHaveLength(0);
-});
-
-test('orchestration failure marks the task failed and records the refunded quota', async () => {
-  runTryonShouldThrow = true;
-  const res = await post(validBody());
-  expect(res.status).toBe(502);
-  const json = await res.json();
-  expect(json.success).toBe(false);
-  // One insert for the task; the failure path does not create a second task.
-  expect(inserts).toHaveLength(1);
-  expect(runTryonCalls).toHaveLength(1);
 });

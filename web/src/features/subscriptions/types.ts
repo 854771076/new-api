@@ -59,6 +59,7 @@ export interface PlanRecord {
 
 export const userSubscriptionSchema = z.object({
   id: z.number(),
+  app_id: z.number().optional(),
   user_id: z.number(),
   plan_id: z.number(),
   status: z.string(),
@@ -74,6 +75,16 @@ export type UserSubscription = z.infer<typeof userSubscriptionSchema>
 
 export interface UserSubscriptionRecord {
   subscription: UserSubscription
+}
+
+export interface UserAppWallet {
+  id: number
+  user_id: number
+  app_id: number
+  quota: number
+  used_quota: number
+  created_at: number
+  updated_at: number
 }
 
 // ============================================================================
@@ -143,6 +154,10 @@ export interface SelfSubscriptionData {
   billing_preference: string
   subscriptions: UserSubscriptionRecord[]
   all_subscriptions: UserSubscriptionRecord[]
+  app_subscriptions?: UserSubscriptionRecord[]
+  app_wallets?: UserAppWallet[]
+  // id -> name for the app scopes referenced by app_wallets/app_subscriptions.
+  app_names?: Record<string, string>
 }
 
 // ============================================================================

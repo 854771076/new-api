@@ -62,6 +62,15 @@ func paymentComplianceError() error {
 	return nil
 }
 
+// appBalancePayDisabledError reports when OAuth app balance payment is
+// globally disabled.
+func appBalancePayDisabledError() error {
+	if operation_setting.IsAppBalancePayDisabled() {
+		return common.NewMessage("Balance payment is disabled. Please use another payment method.")
+	}
+	return nil
+}
+
 // oauthCheckoutError maps purchase failures to OAuth error responses. Business
 // messages become 400; domain ownership/disabled errors keep their meaning; any
 // other failure is reported as a server error.
@@ -130,6 +139,10 @@ func OAuthSubscriptionCheckout(c *gin.Context) {
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
 		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		if err := appBalancePayDisabledError(); err != nil {
 			oauthCheckoutError(c, err)
 			return
 		}
@@ -269,6 +282,10 @@ func OAuthProductCheckout(c *gin.Context) {
 			oauthCheckoutError(c, err)
 			return
 		}
+		if err := appBalancePayDisabledError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
 		order, err := model.PurchaseAppProductWithBalance(user.Id, app.Id, product.Id)
 		if err != nil {
 			oauthCheckoutError(c, err)
@@ -292,6 +309,48 @@ func OAuthProductCheckout(c *gin.Context) {
 			"checkout_url":   result.CheckoutURL,
 			"session_id":     result.SessionID,
 			"expires_at":     result.ExpiresAt,
+			"order_id":       result.TradeNo,
+		})
+	case model.PaymentMethodStripe:
+		result, err := CreateAppProductStripeCheckout(c.Request.Context(), user, product)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"pay_link":       result.CheckoutURL,
+			"order_id":       result.TradeNo,
+		})
+	case model.PaymentMethodCreem:
+		result, err := CreateAppProductCreemCheckout(c.Request.Context(), user, product)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"checkout_url":   result.CheckoutURL,
+			"order_id":       result.TradeNo,
+		})
+	case model.PaymentProviderEpay:
+		paymentType, err := firstConfiguredEpayMethod()
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		result, err := CreateAppProductEpayCheckout(c.Request.Context(), user, product, paymentType)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": model.PaymentProviderEpay,
+			"url":            result.URL,
+			"params":         result.Params,
 			"order_id":       result.TradeNo,
 		})
 	default:

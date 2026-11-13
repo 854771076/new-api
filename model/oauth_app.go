@@ -72,6 +72,11 @@ type OAuthApp struct {
 	// only; PKCE remains mandatory. False keeps the confidential-client
 	// behavior, so existing rows are unchanged after migration.
 	PublicClient bool `json:"public_client" gorm:"column:public_client"`
+
+	// WaffoPancakeReturnURL is an optional per-app override for the Waffo
+	// Pancake checkout success redirect. Empty means fall back to the global
+	// setting.WaffoPancakeReturnURL.
+	WaffoPancakeReturnURL string `json:"-" gorm:"type:text;column:waffo_pancake_return_url"`
 }
 
 func (OAuthApp) TableName() string {
@@ -322,6 +327,25 @@ func ListOAuthApps() ([]OAuthApp, error) {
 	apps := make([]OAuthApp, 0)
 	err := DB.Order("id DESC").Find(&apps).Error
 	return apps, err
+}
+
+// GetOAuthAppNamesByIds returns the id -> name mapping for the given app ids.
+// Only the id and name columns are read, so it is safe to use on the
+// self-service wallet view where the caller must not expose client secrets or
+// redirect URIs.
+func GetOAuthAppNamesByIds(ids []int) (map[int]string, error) {
+	result := make(map[int]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	var apps []OAuthApp
+	if err := DB.Model(&OAuthApp{}).Where("id IN ?", ids).Select("id", "name").Find(&apps).Error; err != nil {
+		return nil, err
+	}
+	for _, app := range apps {
+		result[app.Id] = app.Name
+	}
+	return result, nil
 }
 
 // CreateOAuthApp persists a new app. A confidential client must set

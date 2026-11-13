@@ -7,7 +7,7 @@ const packageDir = path.resolve(__dirname, '..');
 const sourceRoot = path.resolve(packageDir, '..', '..', '..', '.agents', 'skills');
 const targetRoot = path.join(packageDir, 'skills');
 
-const SKILLS = ['newapi-cli', 'new-api-oauth-integration'];
+const SKILLS = ['newapi-cli', 'new-api-app-framework'];
 
 // Local-only artifacts of the reference app must not ship in the package.
 const EXCLUDED = new Set(['node_modules', 'dist', '.temp', '.env', '.env.local', '.git']);

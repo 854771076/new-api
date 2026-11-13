@@ -124,6 +124,14 @@ export interface PersonaSnapshot {
   [key: string]: unknown;
 }
 
+/** 任务冻结的姿势参考快照，恢复任务时按路径取图，不读取可能已变更的现表。 */
+export interface PoseSnapshot {
+  pose_id: string;
+  bucket: string;
+  path: string;
+  [key: string]: unknown;
+}
+
 /** 任务冻结的单件服装选择快照。 */
 export interface WearSnapshotEntry {
   outfit_id: string;
@@ -140,6 +148,8 @@ export interface ProviderSnapshot {
   model: string;
   provider?: string;
   size?: string;
+  quality?: string;
+  vision_model?: string;
   [key: string]: unknown;
 }
 
@@ -161,6 +171,7 @@ export interface OutfitGeneration {
   board_bucket: string | null;
   board_path: string | null;
   persona_snapshot: PersonaSnapshot | null;
+  pose_snapshot: PoseSnapshot | null;
   wear_snapshot: WearSnapshotEntry[] | null;
   provider_snapshot: ProviderSnapshot | null;
   pipeline_version: string | null;

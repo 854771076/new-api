@@ -1,5 +1,5 @@
 // lib/tryon/orchestrate.ts — 六阶段换装管线编排：人物标准化 → 按需解析 → 服装板/清单 →
-// 固定两图 v4 换装 → 落盘作品，并冻结全部快照。整单失败回滚本次新解析服装。
+// 固定三图 v4 换装 → 落盘作品，并冻结全部快照。整单失败回滚本次新解析服装。
 import 'server-only';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { createAdminSupabase } from '@/lib/supabase/admin';
@@ -25,9 +25,13 @@ export interface TryonOrder {
   candidates: WearCandidate[];
   /** 已在报价阶段确定并冻结的报价；编排时只复核，不重新计价。 */
   quote: GenerationQuote;
+  /** 姿势参考图（poses.preview_path + bucket）；换装第三张参考图，决定最终姿态。 */
+  pose: { bucket: string; path: string };
   imageModel: string;
   visionModel: string;
   size: string;
+  /** 可选出图质量；缺省交给网关按模型默认。 */
+  quality?: string;
 }
 
 export interface TryonResult {
@@ -85,7 +89,7 @@ export async function runTryon(supabase: SupabaseClient, order: TryonOrder): Pro
   }
 }
 
-async function runBoardAndTryon(
+export async function runBoardAndTryon(
   admin: SupabaseClient,
   order: TryonOrder,
   persona: Awaited<ReturnType<typeof ensurePersona>>,
@@ -119,15 +123,20 @@ async function runBoardAndTryon(
     bucket: w.bucket,
     path: w.path,
   }));
-  const providerSnapshot: ProviderSnapshot = { model: order.imageModel, size: order.size };
+  const providerSnapshot: ProviderSnapshot = {
+    model: order.imageModel,
+    size: order.size,
+    ...(order.quality ? { quality: order.quality } : {}),
+  };
 
-  // 4. 固定两图 [人物参考, 服装板] + v4 冻结提示词换装。
+  // 4. 固定三图 [人物参考, 服装板, 姿势参考] + v4 冻结提示词换装。
   await updateStage(admin, order.recordId, order, 'generating');
-  const [personaUrl, boardUrl] = await Promise.all([
+  const [personaUrl, boardUrl, poseUrl] = await Promise.all([
     getSignedUrl(persona.bucket, persona.path),
     getSignedUrl(boardBucket, boardPath),
+    getSignedUrl(order.pose.bucket, order.pose.path),
   ]);
-  if (!personaUrl || !boardUrl) {
+  if (!personaUrl || !boardUrl || !poseUrl) {
     throw new GatewayError(503, '参考图签名失败，请稍后重试', 'UPSTREAM_STORAGE_ERROR');
   }
   const prompt = TRYON_V4_PROMPT
@@ -141,8 +150,9 @@ async function runBoardAndTryon(
     const result = await generateReferenceImage({
       model: order.imageModel,
       prompt,
-      reference_images: [personaUrl, boardUrl],
+      reference_images: [personaUrl, boardUrl, poseUrl],
       size: order.size,
+      ...(order.quality ? { quality: order.quality } : {}),
     });
     const image = result.images[0];
     if (!image) throw new Error('empty try-on image');

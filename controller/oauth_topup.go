@@ -53,6 +53,10 @@ func OAuthTopupCheckout(c *gin.Context) {
 
 	switch paymentMethod {
 	case model.PaymentMethodBalance:
+		if err := appBalancePayDisabledError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
 		quota, err := creditAppTopUpWithBalance(user.Id, app.Id, body.Amount)
 		if err != nil {
 			oauthCheckoutError(c, err)
@@ -80,7 +84,59 @@ func OAuthTopupCheckout(c *gin.Context) {
 			"order_id":       result.OrderID,
 			"expires_at":     result.ExpiresAt,
 		})
+	case model.PaymentMethodStripe:
+		payLink, orderID, err := generateStripeTopUpCheckout(c.Request.Context(), user, body.Amount, app.Id)
+		if err != nil {
+			oauthTopupCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"pay_link":       payLink,
+			"order_id":       orderID,
+		})
+	case model.PaymentMethodCreem:
+		checkoutURL, orderID, err := generateCreemTopUpCheckout(c.Request.Context(), user, body.Amount, app.Id)
+		if err != nil {
+			oauthTopupCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"checkout_url":   checkoutURL,
+			"order_id":       orderID,
+		})
+	case model.PaymentProviderEpay:
+		paymentType, err := firstConfiguredEpayMethod()
+		if err != nil {
+			oauthTopupCheckoutError(c, err)
+			return
+		}
+		uri, params, err := generateEpayTopUpCheckout(c.Request.Context(), user, body.Amount, app.Id, paymentType)
+		if err != nil {
+			oauthTopupCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": model.PaymentProviderEpay,
+			"url":            uri,
+			"params":         params,
+		})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app top-up"})
 	}
+}
+
+// oauthTopupCheckoutError maps top-up checkout failures to OAuth responses.
+// Business validation messages become 400; upstream failures become 502.
+func oauthTopupCheckoutError(c *gin.Context, err error) {
+	var msg *common.Message
+	if errors.As(err, &msg) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "checkout_failed", "error_description": msg.Error()})
+		return
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": "checkout_failed", "error_description": "checkout service temporarily unavailable"})
 }

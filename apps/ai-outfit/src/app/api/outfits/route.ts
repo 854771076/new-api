@@ -8,6 +8,7 @@ import { createAdminSupabase } from '@/lib/supabase/admin';
 import { config } from '@/lib/config';
 import { GARMENT_CATEGORIES } from '@/lib/constants';
 import { gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
+import { clampLimit, clampPage, mediaUrl } from '@/lib/list-api';
 
 export const runtime = 'nodejs';
 const MAX_SIZE = 4 * 1024 * 1024;
@@ -24,19 +25,49 @@ const patchSchema = z.object({
 }).partial().strict().refine(body => Object.keys(body).length > 0);
 const idSchema = z.string().uuid();
 
-// 个人服装仅返回当前用户自己的；官方素材由 wardrobe/studio 页面经 outfits 表的官方读策略另查。
-export async function GET() {
+// 服装分页：source 为空时经 RLS 并集返回官方素材 + 当前用户自己的个人服装；
+// source=official / user 时按来源单独过滤，user 仅限本人。
+export async function GET(req: NextRequest) {
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: 'UNAUTHENTICATED' }, { status: 401 });
 
-  const { data, error } = await supabase.from('outfits').select('*')
+  const sp = req.nextUrl.searchParams;
+  const source = sp.get('source');
+  const category = sp.get('category')?.trim();
+  const q = sp.get('q')?.trim();
+  const page = clampPage(sp.get('page'));
+  const limit = clampLimit(sp.get('limit'));
+  const from = (page - 1) * limit;
+
+  let query = supabase.from('outfits')
+    .select('id, name_zh, name_en, category, bucket, thumb_path, source, parse_status', { count: 'exact' })
     .eq('client_id', config.gatewayClientId)
-    .eq('source', 'user')
-    .eq('user_id', user.id)
-    .order('created_at', { ascending: false }).order('id');
-  if (error) return NextResponse.json({ error: 'DB_ERROR', message: '读取我的服装失败，请稍后重试' }, { status: 503 });
-  return NextResponse.json({ ok: true, data });
+    .eq('is_active', true);
+  if (source === 'official') query = query.eq('source', 'official');
+  else if (source === 'user') query = query.eq('source', 'user').eq('user_id', user.id);
+  if (category) query = query.eq('category', category);
+  if (q) {
+    const pattern = `%${q}%`.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    query = query.or(
+      `name_zh.ilike."${pattern}",name_en.ilike."${pattern}",description_zh.ilike."${pattern}",description_en.ilike."${pattern}"`,
+    );
+  }
+
+  const { data, count, error } = await query
+    .order('sort_order', { ascending: true }).order('id', { ascending: true })
+    .range(from, from + limit - 1);
+  if (error) return NextResponse.json({ error: 'DB_ERROR', message: '读取服装失败，请稍后重试' }, { status: 503 });
+
+  const items = (data ?? []).map((o) => ({
+    id: o.id,
+    name: o.name_zh ?? o.name_en ?? '未命名',
+    subtitle: o.category ?? undefined,
+    signedUrl: mediaUrl(o.bucket ?? 'media-user', o.thumb_path),
+    source: o.source === 'user' ? 'user' : 'official',
+    parseStatus: o.parse_status,
+  }));
+  return NextResponse.json({ ok: true, data: items, total: count ?? 0, page, pageSize: limit });
 }
 
 export async function POST(req: NextRequest) {

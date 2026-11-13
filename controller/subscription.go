@@ -18,6 +18,27 @@ type SubscriptionPlanDTO struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+// PublicPricingPlan is the reduced subscription-plan view exposed to anonymous
+// visitors on the /pricing page. It omits payment-provider identifiers and
+// admin-only configuration fields that must not leak to unauthenticated users.
+type PublicPricingPlan struct {
+	Id                      int     `json:"id"`
+	Title                   string  `json:"title"`
+	Subtitle                string  `json:"subtitle"`
+	PriceAmount             float64 `json:"price_amount"`
+	Currency                string  `json:"currency"`
+	DurationUnit            string  `json:"duration_unit"`
+	DurationValue           int     `json:"duration_value"`
+	CustomSeconds           int64   `json:"custom_seconds"`
+	TotalAmount             int64   `json:"total_amount"`
+	QuotaResetPeriod        string  `json:"quota_reset_period"`
+	QuotaResetCustomSeconds int64   `json:"quota_reset_custom_seconds"`
+}
+
+type PublicPricingPlanDTO struct {
+	Plan PublicPricingPlan `json:"plan"`
+}
+
 type BillingPreferenceRequest struct {
 	BillingPreference string `json:"billing_preference"`
 }
@@ -51,6 +72,44 @@ func GetSubscriptionPlans(c *gin.Context) {
 	common.ApiSuccess(c, result)
 }
 
+// GetPublicPricingPlans serves anonymous pricing-disclosure data for the
+// public /pricing page: enabled subscription plans plus the top-up amount
+// options. Unlike GetSubscriptionPlans it does not gate on payment-compliance
+// confirmation, because disclosing prices publicly is itself a compliance
+// requirement.
+func GetPublicPricingPlans(c *gin.Context) {
+	plans, err := model.ListEnabledSubscriptionPlans(0)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	result := make([]PublicPricingPlanDTO, 0, len(plans))
+	for _, p := range plans {
+		result = append(result, PublicPricingPlanDTO{
+			Plan: PublicPricingPlan{
+				Id:                      p.Id,
+				Title:                   p.Title,
+				Subtitle:                p.Subtitle,
+				PriceAmount:             p.PriceAmount,
+				Currency:                p.Currency,
+				DurationUnit:            p.DurationUnit,
+				DurationValue:           p.DurationValue,
+				CustomSeconds:           p.CustomSeconds,
+				TotalAmount:             p.TotalAmount,
+				QuotaResetPeriod:        p.QuotaResetPeriod,
+				QuotaResetCustomSeconds: p.QuotaResetCustomSeconds,
+			},
+		})
+	}
+
+	paySetting := operation_setting.GetPaymentSetting()
+	common.ApiSuccess(c, gin.H{
+		"plans":                result,
+		"topup_amount_options": paySetting.AmountOptions,
+		"topup_discount":       paySetting.AmountDiscount,
+	})
+}
+
 func GetSubscriptionSelf(c *gin.Context) {
 	userId := c.GetInt("id")
 	settingMap, _ := model.GetUserSetting(userId, false)
@@ -70,10 +129,47 @@ func GetSubscriptionSelf(c *gin.Context) {
 		activeSubscriptions = []model.SubscriptionSummary{}
 	}
 
+	// Per-app subscriptions (app_id > 0) and the user's own app wallets for the
+	// self-service "subscriptions & quota per app" view.
+	appSubscriptions, err := model.GetUserAppSubscriptions(userId)
+	if err != nil {
+		appSubscriptions = []model.SubscriptionSummary{}
+	}
+	appWallets, err := model.GetUserAppWallets(userId)
+	if err != nil {
+		appWallets = []model.UserAppWallet{}
+	}
+
+	// Resolve the app names for the user's own per-app wallets/subscriptions so
+	// the self-service view can show friendly names without the admin-only
+	// oauth-apps endpoint.
+	appIdSet := make(map[int]struct{})
+	for _, w := range appWallets {
+		if w.AppId > 0 {
+			appIdSet[w.AppId] = struct{}{}
+		}
+	}
+	for _, s := range appSubscriptions {
+		if s.Subscription != nil && s.Subscription.AppId > 0 {
+			appIdSet[s.Subscription.AppId] = struct{}{}
+		}
+	}
+	appIds := make([]int, 0, len(appIdSet))
+	for id := range appIdSet {
+		appIds = append(appIds, id)
+	}
+	appNames, err := model.GetOAuthAppNamesByIds(appIds)
+	if err != nil {
+		appNames = map[int]string{}
+	}
+
 	common.ApiSuccess(c, gin.H{
 		"billing_preference": pref,
 		"subscriptions":      activeSubscriptions, // all active subscriptions
 		"all_subscriptions":  allSubscriptions,    // all subscriptions including expired
+		"app_subscriptions":  appSubscriptions,    // subscriptions across app scopes
+		"app_wallets":        appWallets,          // the user's per-app quota pools
+		"app_names":          appNames,            // id -> name for the above app scopes
 	})
 }
 
@@ -424,7 +520,16 @@ func AdminListUserSubscriptions(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid user ID")
 		return
 	}
-	subs, err := model.GetAllUserSubscriptions(userId, 0)
+	appId := 0
+	if rawAppId := strings.TrimSpace(c.Query("app_id")); rawAppId != "" {
+		parsed, err := strconv.Atoi(rawAppId)
+		if err != nil || parsed < 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		appId = parsed
+	}
+	subs, err := model.GetAllUserSubscriptions(userId, appId)
 	if err != nil {
 		common.ApiError(c, err)
 		return

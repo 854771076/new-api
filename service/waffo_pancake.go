@@ -26,6 +26,7 @@ type WaffoPancakeCreateSessionParams struct {
 	BuyerEmail              string
 	ExpiresInSeconds        *int
 	OrderMerchantExternalID string
+	SuccessURL              string
 }
 
 // WaffoPancakeCheckoutSession is the response of CreateWaffoPancakeCheckoutSession.
@@ -121,6 +122,7 @@ func CreateWaffoPancakeCheckoutSession(ctx context.Context, params *WaffoPancake
 			BuyerEmail:              optionalString(params.BuyerEmail),
 			ExpiresInSeconds:        params.ExpiresInSeconds,
 			OrderMerchantExternalID: optionalString(params.OrderMerchantExternalID),
+			SuccessURL:              optionalString(params.SuccessURL),
 		},
 		BuyerIdentity: params.BuyerIdentity,
 	}
@@ -160,6 +162,21 @@ func optionalString(s string) *string {
 // reject identity mismatches, so both call sites must use this function.
 func WaffoPancakeBuyerIdentityFromUserID(userID int) string {
 	return fmt.Sprintf("new-api-user-%d", userID)
+}
+
+// ResolveWaffoPancakeReturnURL returns the checkout success redirect for an
+// app-scoped payment. A non-empty per-app override wins; otherwise the global
+// setting.WaffoPancakeReturnURL is used. appID <= 0 is a dashboard payment with
+// no app override, so it always returns the global value.
+func ResolveWaffoPancakeReturnURL(appID int) string {
+	if appID > 0 {
+		if app, err := model.GetOAuthAppByID(appID); err == nil && app != nil {
+			if url := strings.TrimSpace(app.WaffoPancakeReturnURL); url != "" {
+				return url
+			}
+		}
+	}
+	return setting.WaffoPancakeReturnURL
 }
 
 // VerifyConfiguredWaffoPancakeWebhook verifies the signature header. The SDK

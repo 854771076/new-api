@@ -74,6 +74,7 @@ const defaultBillingSettings: BillingSettings = {
   'payment_setting.compliance_confirmed_at': 0,
   'payment_setting.compliance_confirmed_by': 0,
   'payment_setting.compliance_confirmed_ip': '',
+  'payment_setting.disable_app_balance_pay': true,
   StripeApiSecret: '',
   StripeWebhookSecret: '',
   StripePriceId: '',
