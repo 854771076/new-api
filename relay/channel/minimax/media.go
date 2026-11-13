@@ -67,16 +67,13 @@ type MiniMaxClonePrompt struct {
 type MiniMaxVoiceCloneResponse struct {
 	VoiceID string `json:"voice_id"`
 	// DemoAudio 是上游给的试听音频地址，在响应顶层
-	DemoAudio      string                          `json:"demo_audio"`
-	InputSensitive MiniMaxVoiceCloneInputSensitive `json:"input_sensitive"`
-	ExtraInfo      MiniMaxVoiceCloneExtraInfo      `json:"extra_info"`
-	BaseResp       MiniMaxBaseResp                 `json:"base_resp"`
-}
-
-// MiniMaxVoiceCloneInputSensitive 是上游的输入敏感度信息。
-// Type 可能是数字（0..7）也可能是字符串，两种都得能解下来。
-type MiniMaxVoiceCloneInputSensitive struct {
-	Type any `json:"type"`
+	DemoAudio string `json:"demo_audio"`
+	// InputSensitive 是输入敏感度标记，上游给的是布尔值，个别版本回对象，按原样透传
+	InputSensitive any `json:"input_sensitive"`
+	// InputSensitiveType 是上游单独给的敏感度等级（0..7），在响应顶层
+	InputSensitiveType int64                      `json:"input_sensitive_type"`
+	ExtraInfo          MiniMaxVoiceCloneExtraInfo `json:"extra_info"`
+	BaseResp           MiniMaxBaseResp            `json:"base_resp"`
 }
 
 type MiniMaxVoiceCloneExtraInfo struct {

@@ -409,7 +409,7 @@ func TestMiniMaxMediaVoiceCloneNumericPromptAudio(t *testing.T) {
 	assert.Equal(t, float64(987654321), clonePrompt["prompt_audio"])
 }
 
-func TestMiniMaxMediaVoiceCloneResponseWithNumericSensitiveType(t *testing.T) {
+func TestMiniMaxMediaVoiceCloneResponseShape(t *testing.T) {
 	t.Parallel()
 
 	info := &relaycommon.RelayInfo{
@@ -417,16 +417,17 @@ func TestMiniMaxMediaVoiceCloneResponseWithNumericSensitiveType(t *testing.T) {
 		OriginModelName: "speech-02-hd",
 	}
 
-	// 上游的 input_sensitive.type 可能是数字，也可能是字符串
-	raw := `{"voice_id":"upstream-voice-id","demo_audio":"https://example.com/demo.mp3","input_sensitive":{"type":0},"extra_info":{"usage_characters":12},"base_resp":{"status_code":0,"status_msg":"success"}}`
+	// 上游给的是布尔标记 + 顶层的敏感度等级
+	raw := `{"voice_id":"upstream-voice-id","demo_audio":"https://example.com/demo.mp3","input_sensitive":false,"input_sensitive_type":0,"extra_info":{"usage_characters":12},"base_resp":{"status_code":0,"status_msg":"success"}}`
 
 	var decoded MiniMaxVoiceCloneResponse
 	require.NoError(t, common.Unmarshal([]byte(raw), &decoded))
 	assert.Equal(t, "upstream-voice-id", decoded.VoiceID)
 	assert.Equal(t, "https://example.com/demo.mp3", decoded.DemoAudio)
-	assert.Equal(t, float64(0), decoded.InputSensitive.Type)
+	assert.Equal(t, false, decoded.InputSensitive)
+	assert.Equal(t, int64(0), decoded.InputSensitiveType)
 
-	// 数字 type 不能把整份响应打崩
+	// 布尔值不能把整份响应打崩
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Set("voice_id", "caller-voice-id")
@@ -435,6 +436,11 @@ func TestMiniMaxMediaVoiceCloneResponseWithNumericSensitiveType(t *testing.T) {
 	require.NotNil(t, usage)
 	assert.Contains(t, recorder.Body.String(), `"demo_audio":"https://example.com/demo.mp3"`)
 	assert.Contains(t, recorder.Body.String(), `"voice_id":"caller-voice-id"`)
+
+	// 旧版本回对象时也不能把整份响应打崩
+	objectRaw := `{"voice_id":"upstream-voice-id","demo_audio":"","input_sensitive":{"type":0},"extra_info":{"usage_characters":12},"base_resp":{"status_code":0,"status_msg":"success"}}`
+	var objectDecoded MiniMaxVoiceCloneResponse
+	require.NoError(t, common.Unmarshal([]byte(objectRaw), &objectDecoded))
 }
 
 func TestMiniMaxMediaUsageCountsCharacters(t *testing.T) {
