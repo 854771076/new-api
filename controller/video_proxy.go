@@ -62,6 +62,21 @@ func videoProxyError(c *gin.Context, status int, errType, message string) {
 	})
 }
 
+// pickTaskMediaArtifact 挑出这个任务要代理的产物：优先视频产物；
+// 没有视频产物时（例如长文本语音任务只有 audio 产物）退回第一个产物，
+// 否则任务记录的 result_url 会指向一个取不到内容的地址。
+func pickTaskMediaArtifact(artifacts []relaychannel.TaskArtifact) (relaychannel.TaskArtifact, bool) {
+	for _, artifact := range artifacts {
+		if artifact.Type == "video" {
+			return artifact, true
+		}
+	}
+	if len(artifacts) > 0 {
+		return artifacts[0], true
+	}
+	return relaychannel.TaskArtifact{}, false
+}
+
 func VideoProxy(c *gin.Context) {
 	taskID := c.Param("task_id")
 	if taskID == "" {
@@ -89,10 +104,7 @@ func VideoProxy(c *gin.Context) {
 	if taskHasPluginExecution(task) {
 		artifacts, projectionErr := projectTaskArtifacts(task)
 		if projectionErr == nil {
-			for _, artifact := range artifacts {
-				if artifact.Type != "video" {
-					continue
-				}
+			if artifact, ok := pickTaskMediaArtifact(artifacts); ok {
 				adaptor, adaptorErr := initTaskArtifactAdaptor(task)
 				if adaptorErr == nil {
 					if provider, ok := adaptor.(relaychannel.TaskContentRequestProvider); ok {
@@ -106,7 +118,6 @@ func VideoProxy(c *gin.Context) {
 					logger.LogWarn(c.Request.Context(), common.LogText("Failed to resolve plugin video content for task %s: %v", taskID, adaptorErr))
 					descriptor = nil
 				}
-				break
 			}
 		} else {
 			logger.LogWarn(c.Request.Context(), common.LogText("Failed to project plugin video for task %s", taskID))

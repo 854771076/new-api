@@ -817,3 +817,21 @@ func TestSelfTaskMediaURLGuard(t *testing.T) {
 	assert.True(t, isTaskMediaFallbackLoop(remoteURL.String(), "task-1"))
 	assert.False(t, isTaskMediaFallbackLoop(remoteURL.String(), "task-2"))
 }
+
+// A speech task only exposes an audio artifact: the URL the gateway records for
+// the task result must still resolve to that artifact instead of a dead proxy.
+func TestPickTaskMediaArtifactFallsBackToNonVideo(t *testing.T) {
+	_, ok := pickTaskMediaArtifact(nil)
+	assert.False(t, ok)
+
+	artifact, ok := pickTaskMediaArtifact([]relaychannel.TaskArtifact{{Key: "audio", Type: "audio"}})
+	require.True(t, ok)
+	assert.Equal(t, "audio", artifact.Key)
+
+	artifact, ok = pickTaskMediaArtifact([]relaychannel.TaskArtifact{
+		{Key: "audio", Type: "audio"},
+		{Key: "video-0", Type: "video"},
+	})
+	require.True(t, ok)
+	assert.Equal(t, "video-0", artifact.Key, "视频产物优先")
+}
