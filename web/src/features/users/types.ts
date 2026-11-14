@@ -43,6 +43,7 @@ export const userSchema = z.object({
   telegram_id: z.string().optional(),
   email: z.string().optional(),
   quota: z.number(),
+  concurrency_limit: z.number().optional(),
   used_quota: z.number(),
   app_quota: z.number().optional(),
   app_used_quota: z.number().optional(),
@@ -127,6 +128,7 @@ export interface UserFormData {
   password?: string
   role?: number // Only used when creating user
   quota?: number // Only used when updating user
+  concurrency_limit?: number // Only used when updating user; 0 = unlimited
   group?: string // Only used when updating user
   remark?: string // Only used when updating user
   admin_permissions?: AdminPermissionMatrix

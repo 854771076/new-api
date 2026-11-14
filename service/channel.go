@@ -64,6 +64,15 @@ func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if err == nil {
 		return false
 	}
+	// T-02-14-04: channel saturation is a scheduling refusal, not evidence
+	// the channel is broken. Excluding it HERE covers both auto-ban trigger
+	// lines — ProcessChannelError (relay_error.go) and RecordPolicyFailure
+	// (request_policy.go) — because both consult this chokepoint; without it
+	// the busier a channel gets the faster it gets auto-disabled (secondary
+	// DoS). Real channel: fault codes below still disable as before.
+	if IsChannelConcurrencyRejection(err) {
+		return false
+	}
 	if types.IsChannelError(err) {
 		return true
 	}

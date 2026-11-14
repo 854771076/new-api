@@ -105,7 +105,7 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 	switch {
 	case types.IsChannelError(err):
 		source = "channel"
-	case err.GetErrorCode() == types.ErrorCodeDoRequestFailed:
+	case types.IsUpstreamTransportError(err.GetErrorCode()):
 		source = "transport"
 	case err.GetErrorType() == types.ErrorTypeNewAPIError:
 		source = "local"

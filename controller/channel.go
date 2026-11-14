@@ -538,6 +538,11 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if err := channel.ValidateSettings(); err != nil {
 		return common.NewMessage("Invalid channel settings format: {{error}}", map[string]any{"error": err.Error()})
 	}
+	// 校验 model mapping:该 blob 只在请求期解析,非法值过去能干净保存,随后让
+	// 每一条走该渠道的请求报 unmarshal_model_mapping_failed。
+	if err := channel.ValidateModelMapping(); err != nil {
+		return err
+	}
 	if channel.Type == constant.ChannelTypeTaskPlugin {
 		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
 		if pluginKey == "" {

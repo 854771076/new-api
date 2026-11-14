@@ -1,0 +1,2299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>/concurrency redesign — 5 variants (A–E) · design review</title>
+<style>
+/* ============================================================
+   Design-review single file — offline, no external resources.
+   Tokens copied from web/src/styles/theme.css (light + dark).
+   ============================================================ */
+
+/* ---------- tokens: light (default) ---------- */
+:root {
+  color-scheme: light;
+  --radius: 1rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.692 0.141 243.716);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.95 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.49 0 0);
+  --accent: color-mix(in oklch, var(--primary) 12%, var(--background));
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.596 0.145 163.225);
+  --warning: oklch(0.681 0.162 75.834);
+  --info: oklch(0.588 0.158 241.966);
+  --border: oklch(0.93 0 0);
+  --input: oklch(0.93 0 0);
+  --ring: oklch(0.708 0.16 249.003);
+  --chart-1: oklch(0.72 0.18 250);
+  --chart-2: oklch(0.65 0.15 200);
+  --chart-3: oklch(0.7 0.12 280);
+  --table-header: color-mix(in oklch, var(--foreground) 1.5%, var(--background));
+  --stripe: color-mix(in oklch, var(--foreground) 3.5%, var(--background));
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.05);
+  --shadow-md: 0 6px 16px rgb(0 0 0 / 0.12);
+}
+
+/* ---------- tokens: dark (applied to <html> by the toggle and to
+     any subtree carrying data-theme="dark", e.g. Variant E mock) ---------- */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: oklch(0.235 0 0);
+  --foreground: oklch(0.965 0 0);
+  --card: oklch(0.285 0 0);
+  --card-foreground: oklch(0.965 0 0);
+  --popover: oklch(0.305 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.54 0.142 248.516);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.335 0 0);
+  --muted: oklch(0.305 0 0);
+  --muted-foreground: oklch(0.78 0 0);
+  --accent: color-mix(in oklch, var(--primary) 20%, var(--background));
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.696 0.17 162.48);
+  --warning: oklch(0.769 0.188 70.08);
+  --info: oklch(0.613 0.14 239.919);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 17%);
+  --ring: oklch(0.554 0.148 250.726);
+  --chart-1: oklch(0.76 0.14 250);
+  --chart-2: oklch(0.76 0.13 200);
+  --chart-3: oklch(0.76 0.13 285);
+  --table-header: color-mix(in oklch, var(--foreground) 6%, var(--background));
+  --stripe: color-mix(in oklch, var(--foreground) 7%, var(--background));
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.25);
+  --shadow-md: 0 6px 18px rgb(0 0 0 / 0.35);
+}
+
+/* ---------- base ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4, p, ul, ol { margin: 0; }
+ul { padding: 0; list-style: none; }
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 300;
+  background: var(--card); border: 1px solid var(--border);
+  padding: 0.5rem 0.9rem; border-radius: 0.5rem; text-decoration: none; color: var(--foreground);
+}
+.skip:focus { left: 1rem; top: 1rem; }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  background: var(--muted);
+  padding: 0.1em 0.35em;
+  border-radius: 0.3em;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.75rem;
+}
+.muted { color: var(--muted-foreground); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* ---------- sticky review header ---------- */
+.rhead {
+  position: sticky; top: 0; z-index: 100;
+  background: color-mix(in oklch, var(--card) 92%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.rhead-inner {
+  max-width: 1320px; margin: 0 auto; padding: 0.7rem 1.5rem 0.6rem;
+  display: flex; flex-direction: column; gap: 0.5rem;
+}
+.rhead-top { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
+.rhead-title { font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
+.rhead-title span { color: var(--muted-foreground); font-weight: 500; }
+.rhead-spacer { flex: 1 1 auto; }
+.theme-btn {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  height: 1.9rem; padding: 0 0.7rem; border-radius: 999px;
+  border: 1px solid var(--input); background: var(--card);
+  font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+.theme-btn:hover { background: var(--muted); }
+.theme-btn .bulb {
+  width: 0.6rem; height: 0.6rem; border-radius: 999px;
+  background: var(--primary); display: inline-block;
+}
+.brief {
+  font-size: 0.75rem; color: var(--muted-foreground);
+}
+.brief strong { color: var(--foreground); }
+.fixlist { display: flex; flex-wrap: wrap; gap: 0.4rem 1.2rem; }
+.fixlist li {
+  display: flex; align-items: baseline; gap: 0.4rem;
+  font-size: 0.75rem; color: var(--muted-foreground);
+}
+.fixlist strong { color: var(--foreground); }
+.tick {
+  flex: none; display: inline-grid; place-items: center;
+  width: 1rem; height: 1rem; border-radius: 999px;
+  background: color-mix(in oklch, var(--success) 20%, transparent);
+  color: color-mix(in oklch, var(--success) 80%, var(--foreground));
+  font-size: 0.65rem; font-weight: 800; line-height: 1;
+  transform: translateY(0.15rem);
+}
+.rnav { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.rnav a {
+  font-size: 0.75rem; font-weight: 600; text-decoration: none;
+  color: var(--muted-foreground);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 0.2rem 0.65rem;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out, background-color 0.15s ease-out;
+}
+.rnav a:hover { color: var(--foreground); border-color: var(--primary); background: var(--accent); }
+.fixtures { border-top: 1px dashed var(--border); padding-top: 0.4rem; }
+.fixtures > summary {
+  list-style: none; cursor: pointer;
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted-foreground);
+}
+.fixtures > summary::-webkit-details-marker { display: none; }
+.fixtures > summary::after { content: " ▾"; }
+.fixtures[open] > summary::after { content: " ▴"; }
+.fix-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem 1.4rem; padding: 0.6rem 0 0.3rem;
+}
+.fix-grid h4 {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--foreground); margin-bottom: 0.15rem;
+}
+.fix-grid li, .fix-grid p { font-size: 0.72rem; color: var(--muted-foreground); }
+.fix-grid li::before { content: "· "; }
+
+/* ---------- page wrapper / variants ---------- */
+.wrap { max-width: 1320px; margin: 0 auto; padding: 0 1.5rem 5rem; }
+.variant { padding: 2.25rem 0 0.5rem; border-top: 2px solid var(--border); margin-top: 2.5rem; scroll-margin-top: 9.5rem; }
+.variant:first-child { margin-top: 1.5rem; }
+.vhead { display: flex; align-items: flex-start; gap: 1.1rem; flex-wrap: wrap; }
+.vcode {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 3rem; font-weight: 800; line-height: 1;
+  color: var(--primary);
+  min-width: 3.2rem; text-align: center;
+}
+.vmeta { flex: 1 1 32rem; min-width: 18rem; }
+.vmeta h2 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
+.axis {
+  display: inline-block; margin-top: 0.35rem;
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--primary);
+  background: var(--accent);
+  border-radius: 999px; padding: 0.12rem 0.6rem;
+}
+.rationale { margin-top: 0.5rem; font-size: 0.9rem; color: var(--foreground); }
+.notes-wrap {
+  margin: 0.9rem 0 1.1rem; padding: 0.75rem 1rem;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  background: color-mix(in oklch, var(--muted) 55%, transparent);
+}
+.notes-title {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted-foreground); margin-bottom: 0.4rem;
+}
+.notes { display: grid; gap: 0.3rem; }
+.notes li {
+  font-size: 0.8rem; color: var(--foreground);
+  padding-left: 1rem; position: relative;
+}
+.notes li::before {
+  content: ""; position: absolute; left: 0.15rem; top: 0.5rem;
+  width: 0.4rem; height: 0.4rem; border-radius: 999px; background: var(--primary);
+}
+.notes li .fix-tag {
+  font-size: 0.65rem; font-weight: 800; letter-spacing: 0.05em;
+  color: color-mix(in oklch, var(--success) 75%, var(--foreground));
+  margin-right: 0.3rem;
+}
+
+/* ---------- mock frame ---------- */
+.mock {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--background);
+  box-shadow: var(--shadow-sm);
+}
+.mockbar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 1rem; flex-wrap: wrap;
+  padding: 0.45rem 0.9rem;
+  background: var(--muted);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem; color: var(--muted-foreground);
+}
+.mocktag {
+  font-weight: 700; color: var(--foreground);
+  letter-spacing: 0.05em; text-transform: uppercase;
+}
+.pg { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; }
+.pg.dense { padding: 1rem; gap: 0.75rem; }
+.pg.dense .pg-title { font-size: 1.15rem; }
+.pg.dense .sub { font-size: 0.75rem; }
+.pg.dense .card-hd { padding: 0.6rem 0.8rem 0; }
+.pg.dense .card-bd { padding: 0.45rem 0.8rem 0.8rem; }
+.pg.dense .card-title { font-size: 0.8125rem; }
+.pg.dense .tbl td { padding: 0.3rem 0.6rem; }
+.pg.dense .tbl th { padding: 0.35rem 0.6rem; }
+.pg.dense .tbl-wrap { max-height: 17rem; }
+
+/* ---------- page header inside mocks ---------- */
+.pg-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 1rem; flex-wrap: wrap;
+}
+.pg-title {
+  font-size: 1.5rem; font-weight: 650; letter-spacing: -0.02em;
+  display: flex; align-items: center; gap: 0.55rem; flex-wrap: wrap;
+}
+.sub { margin-top: 0.25rem; font-size: 0.8125rem; color: var(--muted-foreground); max-width: 72ch; }
+.pg-tools { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.ctl-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-foreground); }
+.hint { font-size: 0.7rem; color: var(--muted-foreground); }
+
+/* select trigger */
+.select {
+  display: inline-flex; align-items: center; justify-content: space-between;
+  gap: 0.5rem; min-width: 9.5rem; height: 2rem;
+  padding: 0 0.6rem;
+  border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.45);
+  background: var(--card); font-size: 0.8125rem; font-weight: 500;
+  cursor: pointer;
+}
+.select:hover { border-color: color-mix(in oklch, var(--primary) 55%, var(--input)); }
+.select .caret { color: var(--muted-foreground); font-size: 0.65rem; }
+
+/* badges */
+.badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.1rem 0.55rem; border-radius: 999px;
+  font-size: 0.68rem; font-weight: 700;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.badge-warning {
+  background: color-mix(in oklch, var(--warning) 18%, var(--background));
+  border-color: color-mix(in oklch, var(--warning) 45%, transparent);
+  color: color-mix(in oklch, var(--warning) 65%, var(--foreground));
+}
+.badge-destructive {
+  background: color-mix(in oklch, var(--destructive) 14%, var(--background));
+  border-color: color-mix(in oklch, var(--destructive) 45%, transparent);
+  color: color-mix(in oklch, var(--destructive) 70%, var(--foreground));
+}
+.badge-success {
+  background: color-mix(in oklch, var(--success) 16%, var(--background));
+  border-color: color-mix(in oklch, var(--success) 45%, transparent);
+  color: color-mix(in oklch, var(--success) 75%, var(--foreground));
+}
+.badge-outline { border-color: var(--border); color: var(--muted-foreground); background: var(--card); }
+
+/* live dot */
+.live-dot {
+  width: 0.5rem; height: 0.5rem; border-radius: 999px;
+  background: var(--success); display: inline-block; flex: none;
+}
+.live-label { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.75rem; font-weight: 600; }
+
+/* ---------- verdict banner ---------- */
+.verdict {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border); border-left-width: 5px;
+  border-radius: var(--radius);
+  background: var(--card);
+}
+.verdict.danger {
+  border-color: color-mix(in oklch, var(--destructive) 42%, var(--border));
+  border-left-color: var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 8%, var(--background));
+}
+.verdict.warn {
+  border-color: color-mix(in oklch, var(--warning) 45%, var(--border));
+  border-left-color: var(--warning);
+  background: color-mix(in oklch, var(--warning) 9%, var(--background));
+}
+.verdict.ok {
+  border-color: color-mix(in oklch, var(--success) 42%, var(--border));
+  border-left-color: var(--success);
+  background: color-mix(in oklch, var(--success) 8%, var(--background));
+}
+.vicon {
+  flex: none; width: 2rem; height: 2rem; border-radius: 0.6rem;
+  display: grid; place-items: center;
+}
+.verdict.danger .vicon { background: var(--destructive); color: var(--destructive-foreground); }
+.verdict.warn .vicon { background: var(--warning); color: oklch(0.145 0 0); }
+.verdict.ok .vicon { background: var(--success); color: var(--success-foreground); }
+.vicon svg { width: 1.1rem; height: 1.1rem; }
+.vbody { flex: 1 1 22rem; min-width: 16rem; }
+.vtitle { font-size: 0.9375rem; font-weight: 700; }
+.vtext { margin-top: 0.15rem; font-size: 0.8rem; color: var(--muted-foreground); }
+.vchips { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.vchip {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.72rem; font-weight: 700;
+  padding: 0.2rem 0.55rem; border-radius: 0.5rem;
+  border: 1px solid var(--border); background: var(--card);
+  font-variant-numeric: tabular-nums;
+}
+.vchip::before { content: ""; width: 0.5rem; height: 0.5rem; border-radius: 999px; background: currentColor; }
+.vchip.t-d { color: color-mix(in oklch, var(--destructive) 72%, var(--foreground)); background: color-mix(in oklch, var(--destructive) 12%, transparent); border-color: color-mix(in oklch, var(--destructive) 35%, transparent); }
+.vchip.t-w { color: color-mix(in oklch, var(--warning) 72%, var(--foreground)); background: color-mix(in oklch, var(--warning) 14%, transparent); border-color: color-mix(in oklch, var(--warning) 38%, transparent); }
+.vchip.t-s { color: color-mix(in oklch, var(--success) 75%, var(--foreground)); background: color-mix(in oklch, var(--success) 12%, transparent); border-color: color-mix(in oklch, var(--success) 35%, transparent); }
+.vchip.t-m { color: var(--muted-foreground); }
+
+/* dense one-line verdict (Variant C) */
+.verdict.slim { padding: 0.45rem 0.8rem; gap: 0.75rem; border-left-width: 4px; }
+.verdict.slim .vicon { width: 1.4rem; height: 1.4rem; border-radius: 0.4rem; }
+.verdict.slim .vicon svg { width: 0.85rem; height: 0.85rem; }
+.verdict.slim .vtitle { font-size: 0.8125rem; }
+.verdict.slim .vtext { margin-top: 0; font-size: 0.75rem; }
+.verdict.slim .vchip { font-size: 0.68rem; padding: 0.1rem 0.45rem; }
+
+/* ---------- KPI ---------- */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 0.75rem;
+}
+.stat {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card); padding: 0.85rem 1rem;
+  display: flex; flex-direction: column; gap: 0.3rem;
+}
+.stat-top { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.stat-title { font-size: 0.72rem; font-weight: 600; color: var(--muted-foreground); letter-spacing: 0.01em; }
+.stat-ico {
+  width: 1.7rem; height: 1.7rem; border-radius: 0.5rem;
+  display: grid; place-items: center; flex: none;
+}
+.stat-ico svg { width: 0.95rem; height: 0.95rem; }
+.tint1 { background: color-mix(in oklch, var(--chart-1) 16%, transparent); color: var(--chart-1); }
+.tint2 { background: color-mix(in oklch, var(--chart-2) 18%, transparent); color: var(--chart-2); }
+.tint3 { background: color-mix(in oklch, var(--chart-3) 16%, transparent); color: var(--chart-3); }
+.stat-val { font-size: 1.7rem; font-weight: 700; line-height: 1.05; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.stat-desc { font-size: 0.68rem; line-height: 1.45; color: var(--muted-foreground); }
+.stat.row { flex-direction: row; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.55rem 0.8rem; }
+.stat.row .stat-val { font-size: 1.2rem; }
+.stat.row .stat-desc { max-width: 20rem; }
+
+/* compact KPI toolbar strip (Variant C) */
+.strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card); overflow: hidden;
+}
+.strip-cell {
+  padding: 0.5rem 0.8rem;
+  border-right: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap;
+}
+.strip-cell:last-child { border-right: none; }
+.strip-label {
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--muted-foreground);
+  display: inline-flex; align-items: center; gap: 0.3rem;
+}
+.strip-val { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---------- cards ---------- */
+.card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card);
+}
+.card-hd {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 0.75rem; flex-wrap: wrap;
+  padding: 0.85rem 1rem 0;
+}
+.card-title {
+  font-size: 0.9375rem; font-weight: 650;
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+}
+.card-title .with-tip { display: inline-flex; align-items: center; gap: 0.35rem; }
+.card-desc { margin-top: 0.25rem; font-size: 0.72rem; line-height: 1.5; color: var(--muted-foreground); max-width: 95ch; }
+.card-tools { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.card-bd { padding: 0.7rem 1rem 1rem; }
+.meta {
+  display: flex; gap: 1rem; flex-wrap: wrap;
+  font-size: 0.78rem; color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.75rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.9rem; }
+
+/* de-emphasised detail zone (Variant A) */
+.zone { display: flex; flex-direction: column; gap: 0.75rem; }
+.zone-label {
+  font-size: 0.66rem; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted-foreground);
+}
+.zone .card { border-color: color-mix(in oklch, var(--border) 60%, transparent); }
+.zone .card-title { font-size: 0.8125rem; font-weight: 600; color: color-mix(in oklch, var(--foreground) 78%, var(--muted-foreground)); }
+.zone .card-desc { font-size: 0.68rem; }
+
+/* ---------- tables ---------- */
+.tbl-wrap { overflow: auto; max-height: 24rem; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+.tbl th {
+  text-align: left; font-size: 0.7rem; font-weight: 700;
+  letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--muted-foreground);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--table-header);
+  white-space: nowrap;
+}
+.tbl.sticky th { position: sticky; top: 0; z-index: 2; }
+.tbl td { padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.tbl tbody tr:last-child td { border-bottom: none; }
+.tbl tbody tr:hover td { background: color-mix(in oklch, var(--foreground) 4%, transparent); }
+.tbl.zebra tbody tr:nth-child(even) td { background: var(--stripe); }
+.tbl.zebra tbody tr:nth-child(even):hover td { background: color-mix(in oklch, var(--foreground) 7%, transparent); }
+.tbl th.r, .tbl td.r { text-align: right; }
+
+/* utilisation bar */
+.util { display: flex; align-items: center; gap: 0.5rem; min-width: 8.5rem; }
+.prog {
+  flex: 1 1 auto; height: 0.5rem; border-radius: 999px;
+  background: var(--muted); overflow: hidden;
+}
+.prog > i { display: block; height: 100%; border-radius: 999px; background: var(--primary); }
+.prog.w > i { background: var(--warning); }
+.prog.d > i { background: var(--destructive); }
+.pchip {
+  font-size: 0.68rem; font-weight: 800; padding: 0.08rem 0.4rem;
+  border-radius: 0.35rem; font-variant-numeric: tabular-nums; flex: none;
+}
+.pchip.h { color: color-mix(in oklch, var(--success) 78%, var(--foreground)); background: color-mix(in oklch, var(--success) 14%, transparent); }
+.pchip.w { color: color-mix(in oklch, var(--warning) 72%, var(--foreground)); background: color-mix(in oklch, var(--warning) 16%, transparent); }
+.pchip.d { color: color-mix(in oklch, var(--destructive) 74%, var(--foreground)); background: color-mix(in oklch, var(--destructive) 14%, transparent); }
+.unlimited { font-size: 0.7rem; color: var(--muted-foreground); }
+
+/* multiplier (text tone = current product; chips = Variant E) */
+.m-up { color: var(--success); font-weight: 650; }
+.m-down { color: var(--warning); font-weight: 650; }
+.m-off { color: var(--muted-foreground); }
+.mchip {
+  display: inline-block; min-width: 3.2rem; text-align: center;
+  padding: 0.12rem 0.45rem; border-radius: 0.4rem;
+  font-size: 0.75rem; font-weight: 800; font-variant-numeric: tabular-nums;
+}
+.mchip.up { color: color-mix(in oklch, var(--success) 82%, var(--foreground)); background: color-mix(in oklch, var(--success) 18%, transparent); border: 1px solid color-mix(in oklch, var(--success) 40%, transparent); }
+.mchip.down { color: color-mix(in oklch, var(--warning) 78%, var(--foreground)); background: color-mix(in oklch, var(--warning) 20%, transparent); border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent); }
+.mchip.off { color: var(--muted-foreground); background: var(--muted); border: 1px solid var(--border); }
+
+/* ---------- chart ---------- */
+.chart { display: block; width: 100%; height: auto; }
+.chart.compact { max-height: 150px; }
+.svg-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* ---------- forms ---------- */
+.field { display: flex; flex-direction: column; gap: 0.25rem; }
+.lbl { font-size: 0.78rem; font-weight: 600; display: inline-flex; align-items: center; gap: 0.35rem; }
+.input {
+  height: 2rem; width: 100%; padding: 0 0.6rem;
+  border: 1px solid var(--input); border-radius: calc(var(--radius) * 0.4);
+  background: var(--background); font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+.input:hover { border-color: color-mix(in oklch, var(--primary) 45%, var(--input)); }
+.help { font-size: 0.66rem; line-height: 1.45; color: var(--muted-foreground); }
+.field-row { display: flex; flex-direction: column; gap: 0.9rem; }
+.switch-field { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.switch-field .txt { display: flex; flex-direction: column; gap: 0.15rem; }
+.switch {
+  position: relative; flex: none;
+  width: 2.3rem; height: 1.3rem; border-radius: 999px;
+  border: 1px solid var(--input); background: var(--muted);
+  cursor: pointer; padding: 0;
+  transition: background-color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.switch i {
+  position: absolute; top: 1px; left: 1px;
+  width: 1rem; height: 1rem; border-radius: 999px;
+  background: var(--primary-foreground);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+  transition: transform 0.15s ease-out;
+}
+.switch[aria-checked="true"] { background: var(--primary); border-color: var(--primary); }
+.switch[aria-checked="true"] i { transform: translateX(1rem); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  height: 2rem; padding: 0 0.85rem;
+  border-radius: calc(var(--radius) * 0.4);
+  border: 1px solid var(--input); background: var(--card);
+  font-size: 0.8125rem; font-weight: 600; cursor: pointer;
+  transition: background-color 0.15s ease-out, border-color 0.15s ease-out, filter 0.15s ease-out;
+}
+.btn:hover { background: var(--muted); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: var(--primary-foreground); }
+.btn-primary:hover { background: var(--primary); filter: brightness(1.08); }
+.btn-sm { height: 1.75rem; padding: 0 0.6rem; font-size: 0.75rem; }
+.btn-row { display: flex; gap: 0.5rem; }
+.btn-row.end { justify-content: flex-end; }
+
+/* ---------- tooltip (Variant C) ---------- */
+.tip { position: relative; display: inline-flex; }
+.tip-btn {
+  width: 1rem; height: 1rem; padding: 0;
+  border-radius: 999px; border: 1px solid var(--border);
+  background: var(--card); color: var(--muted-foreground);
+  font-size: 0.6rem; font-weight: 800; line-height: 1;
+  display: grid; place-items: center; cursor: help;
+}
+.tip-btn:hover { color: var(--foreground); border-color: var(--primary); }
+.tip-body {
+  position: absolute; bottom: calc(100% + 0.45rem); left: 0; z-index: 40;
+  width: max-content; max-width: 19rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 0.5rem;
+  background: var(--popover); color: var(--popover-foreground);
+  border: 1px solid var(--border); box-shadow: var(--shadow-md);
+  font-size: 0.68rem; line-height: 1.5; font-weight: 400;
+  text-transform: none; letter-spacing: 0;
+  opacity: 0; visibility: hidden; transform: translateY(3px);
+  transition: opacity 0.15s ease-out, transform 0.15s ease-out;
+}
+.tip:hover .tip-body, .tip:focus-within .tip-body { opacity: 1; visibility: visible; transform: none; }
+
+/* ---------- tabs (Variant B) ---------- */
+.tabs {
+  display: flex; gap: 0.25rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0.5rem;
+  margin-top: 0.6rem;
+}
+.tab {
+  appearance: none; background: none; border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.8125rem; font-weight: 600;
+  color: var(--muted-foreground); cursor: pointer;
+  transition: color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.tab:hover { color: var(--foreground); }
+.tab[aria-selected="true"] { color: var(--foreground); border-bottom-color: var(--primary); }
+.tabpanel { padding-top: 0.75rem; }
+.tabpanel[hidden] { display: none; }
+
+/* ---------- disclosure (Variant D) ---------- */
+.disc {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card);
+}
+.disc > summary {
+  list-style: none; cursor: pointer;
+  display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+  padding: 0.8rem 1rem;
+  font-size: 0.875rem; font-weight: 650;
+}
+.disc > summary::-webkit-details-marker { display: none; }
+.disc > summary::after {
+  content: "▾"; margin-left: auto;
+  color: var(--muted-foreground); font-size: 0.75rem;
+  transition: transform 0.25s ease-out;
+}
+.disc[open] > summary::after { transform: rotate(180deg); }
+.disc > summary:hover { background: color-mix(in oklch, var(--foreground) 3%, transparent); }
+.disc-sum { font-size: 0.72rem; font-weight: 400; color: var(--muted-foreground); }
+.disc-body {
+  border-top: 1px solid var(--border);
+  padding: 0.8rem 1rem 1rem;
+  display: flex; flex-direction: column; gap: 0.8rem;
+}
+
+/* ---------- two-column split (Variant B) ---------- */
+.split {
+  display: grid;
+  grid-template-columns: minmax(290px, 350px) minmax(0, 1fr);
+  gap: 1rem; align-items: start;
+}
+.col { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+.col-sticky { position: sticky; top: 8.5rem; }
+.kpi-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.depth-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem; margin-bottom: 0.85rem;
+}
+.depth-cell {
+  border: 1px solid var(--border); border-radius: calc(var(--radius) * 0.55);
+  padding: 0.45rem 0.6rem;
+  background: color-mix(in oklch, var(--muted) 50%, transparent);
+}
+.depth-cell .k { font-size: 0.63rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-foreground); }
+.depth-cell .v { font-size: 1.05rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* ---------- Variant E expression layer ---------- */
+[data-variant="E"] .card,
+[data-variant="E"] .stat,
+[data-variant="E"] .verdict {
+  transition: border-color 0.2s ease-out, box-shadow 0.2s ease-out, transform 0.2s ease-out;
+}
+[data-variant="E"] .card:hover,
+[data-variant="E"] .stat:hover {
+  border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+[data-variant="E"] .verdict {
+  border-left-width: 7px;
+  background: color-mix(in oklch, var(--destructive) 14%, var(--background));
+}
+[data-variant="E"] .vtitle { font-size: 1.05rem; }
+[data-variant="E"] .vchip { padding: 0.25rem 0.7rem; font-size: 0.78rem; }
+[data-variant="E"] .badge, [data-variant="E"] .vchip, [data-variant="E"] .mchip, [data-variant="E"] .pchip {
+  transition: transform 0.15s ease-out, filter 0.15s ease-out;
+}
+[data-variant="E"] .badge:hover, [data-variant="E"] .vchip:hover { transform: translateY(-1px); filter: brightness(1.08); }
+[data-variant="E"] .live-dot { animation: e-pulse 2.2s ease-out infinite; }
+[data-variant="E"] .tbl tbody tr { transition: background-color 0.15s ease-out; }
+[data-variant="E"] .prog > i { transition: width 0.3s ease-out; }
+@keyframes e-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--success) 65%, transparent); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.mock-forced-dark {
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+}
+
+/* ---------- footer ---------- */
+.foot {
+  max-width: 1320px; margin: 0 auto; padding: 1.5rem;
+  font-size: 0.72rem; color: var(--muted-foreground);
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- reduced motion (global guard, called out by Variant E) ---------- */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---------- responsive safety (desktop-first) ---------- */
+@media (max-width: 980px) {
+  .split { grid-template-columns: minmax(0, 1fr); }
+  .col-sticky { position: static; }
+  .grid-3 { grid-template-columns: minmax(0, 1fr); }
+}
+</style>
+<script>
+/* Theme: default follows the OS preference, the header button toggles
+   and persists. Runs before paint so there is no flash. */
+(function () {
+  try {
+    var saved = localStorage.getItem('cc-variant-theme');
+    var theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'light');
+  }
+})();
+</script>
+</head>
+<body>
+<a class="skip" href="#variants">Skip to variants</a>
+
+<!-- Shared SVG assets: one trend symbol reused by all five mocks (no JS, no external refs) -->
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="var(--chart-1)" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="var(--chart-1)" stop-opacity="0.02"/>
+    </linearGradient>
+    <symbol id="trendSym" viewBox="0 0 760 220">
+      <g stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3">
+        <line x1="44" y1="16" x2="744" y2="16"/>
+        <line x1="44" y1="57" x2="744" y2="57"/>
+        <line x1="44" y1="98" x2="744" y2="98"/>
+        <line x1="44" y1="139" x2="744" y2="139"/>
+      </g>
+      <line x1="44" y1="180" x2="744" y2="180" stroke="var(--border)" stroke-width="1"/>
+      <g fill="var(--muted-foreground)" font-size="10" text-anchor="end" font-family="system-ui, sans-serif">
+        <text x="36" y="19">20</text>
+        <text x="36" y="60">15</text>
+        <text x="36" y="101">10</text>
+        <text x="36" y="142">5</text>
+        <text x="36" y="183">0</text>
+      </g>
+      <g fill="var(--muted-foreground)" font-size="10" text-anchor="middle" font-family="system-ui, sans-serif">
+        <text x="44" y="200">12:41:00</text>
+        <text x="187.6" y="200">12:41:24</text>
+        <text x="331.2" y="200">12:41:48</text>
+        <text x="474.8" y="200">12:42:12</text>
+        <text x="618.4" y="200">12:42:36</text>
+        <text x="744" y="200" text-anchor="end">12:43:00</text>
+      </g>
+      <path fill="url(#trendFill)" d="M44,180 L61.9,180 L79.9,171.8 L97.8,171.8 L115.8,163.6 L133.7,155.4 L151.7,155.4 L169.6,147.2 L187.6,130.8 L205.5,122.6 L223.5,106.2 L241.4,89.8 L259.4,73.4 L277.3,57 L295.3,48.8 L313.2,40.6 L331.2,32.4 L349.1,32.4 L367.1,40.6 L385,48.8 L403,65.2 L420.9,81.6 L438.9,98 L456.8,106.2 L474.8,122.6 L492.7,130.8 L510.7,139 L528.6,147.2 L546.6,147.2 L564.5,155.4 L582.5,155.4 L600.4,147.2 L618.4,139 L636.3,130.8 L654.3,139 L672.2,147.2 L690.2,147.2 L708.1,155.4 L726.1,155.4 L744,155.4 L744,180 L44,180 Z"/>
+      <path fill="none" stroke="var(--chart-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" d="M44,180 L61.9,180 L79.9,171.8 L97.8,171.8 L115.8,163.6 L133.7,155.4 L151.7,155.4 L169.6,147.2 L187.6,130.8 L205.5,122.6 L223.5,106.2 L241.4,89.8 L259.4,73.4 L277.3,57 L295.3,48.8 L313.2,40.6 L331.2,32.4 L349.1,32.4 L367.1,40.6 L385,48.8 L403,65.2 L420.9,81.6 L438.9,98 L456.8,106.2 L474.8,122.6 L492.7,130.8 L510.7,139 L528.6,147.2 L546.6,147.2 L564.5,155.4 L582.5,155.4 L600.4,147.2 L618.4,139 L636.3,130.8 L654.3,139 L672.2,147.2 L690.2,147.2 L708.1,155.4 L726.1,155.4 L744,155.4"/>
+      <circle cx="349.1" cy="32.4" r="3.5" fill="var(--chart-1)"/>
+      <g>
+        <circle cx="385" cy="48.8" r="3" fill="var(--destructive)"/>
+        <text x="393" y="44" fill="var(--destructive)" font-size="10" font-weight="600" font-family="system-ui, sans-serif">+2 rejected</text>
+      </g>
+    </symbol>
+  </defs>
+</svg>
+
+<header class="rhead">
+  <div class="rhead-inner">
+    <div class="rhead-top">
+      <p class="rhead-title">/concurrency redesign <span>· 5 variants A–E · design review</span></p>
+      <span class="rhead-spacer"></span>
+      <nav class="rnav" aria-label="Variant anchors">
+        <a href="#variant-A">A · Hierarchy</a>
+        <a href="#variant-B">B · Layout</a>
+        <a href="#variant-C">C · Density</a>
+        <a href="#variant-D">D · Interaction</a>
+        <a href="#variant-E">E · Expression</a>
+      </nav>
+      <button id="themeToggle" class="theme-btn" type="button" aria-pressed="false">
+        <span class="bulb" aria-hidden="true"></span><span id="themeToggleLabel">Dark theme</span>
+      </button>
+    </div>
+    <p class="brief"><strong>Brief</strong> — Stripe / Linear inspired · utilitarian, minimal, precise · compact density · dark mode · desktop-first · no new dependencies · target <code>web/src/features/concurrency/index.tsx</code> (route /concurrency) · keep Y-3 / Y-4 / Y-5 KPI contracts.</p>
+    <ul class="fixlist">
+      <li><span class="tick" aria-hidden="true">✓</span><span><strong>#1</strong> Subtitle now covers channels: “In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.”</span></li>
+      <li><span class="tick" aria-hidden="true">✓</span><span><strong>#2</strong> Window selector governs the whole page — each variant states its Channel-load / EWMA policy below.</span></li>
+      <li><span class="tick" aria-hidden="true">✓</span><span><strong>#3</strong> “Over-limit scopes” description aligned to the sibling per-key / per-user axis wording.</span></li>
+    </ul>
+    <details class="fixtures">
+      <summary>Shared fixtures (identical data in all five mocks — Live window)</summary>
+      <div class="fix-grid">
+        <div>
+          <h4>Live KPI</h4>
+          <ul>
+            <li>Total in-flight 7</li>
+            <li>Configured caps 29</li>
+            <li>Average utilisation 24%</li>
+            <li>Over-limit scopes 1</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Window KPI (same tile set when a historical window is selected)</h4>
+          <ul>
+            <li>Peak in-flight 18</li>
+            <li>Average in-flight 6.2</li>
+            <li>Rejected in window 2</li>
+            <li>Active share 74%</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Bounded wait queue</h4>
+          <ul>
+            <li>Enabled · depth ratio 4</li>
+            <li>Depth cap 128 · max wait 10s</li>
+            <li>Queued 3 (live only)</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Routing health (4 rows)</h4>
+          <ul>
+            <li>ch3 m=2.00 n=28 lat=161</li>
+            <li>ch4 m=1.72 n=16 lat=155</li>
+            <li>ch5 m=1.00 n=8 lat=300 (warming up)</li>
+            <li>ch6 m=0.50 n=37 lat=1221</li>
+          </ul>
+        </div>
+      </div>
+    </details>
+  </div>
+</header>
+
+<main id="variants" class="wrap">
+<!-- ============ VARIANT A — Information hierarchy ============ -->
+<section class="variant" id="variant-A" data-variant="A" aria-labelledby="hA">
+  <header class="vhead">
+    <span class="vcode" aria-hidden="true">A</span>
+    <div class="vmeta">
+      <h2 id="hA">Variant A — Health verdict first</h2>
+      <span class="axis">Axis · information hierarchy</span>
+      <p class="rationale">One page-level verdict banner answers “is the gateway healthy?” before the admin reads a single number; KPI tiles become the second layer and every detail card visibly recedes.</p>
+    </div>
+  </header>
+  <div class="notes-wrap">
+    <h3 class="notes-title">Key differences</h3>
+    <ul class="notes">
+      <li>Page-top <strong>health verdict banner</strong> (destructive tone) synthesises over-limit + rejected + queued + degraded into one sentence and four chips; KPI row is demoted to the second read, detail cards live inside a muted “Details” zone with smaller titles.</li>
+      <li><span class="fix-tag">FIX #2</span>Window selector moved into the page header so it visibly governs everything below; the Channel load / EWMA card is <strong>live-only</strong> — it is hidden when a historical window is selected (same precedent as the Queued badge) and carries a “Live only” chip while Live.</li>
+      <li><span class="fix-tag">FIX #1 / #3</span>Subtitle covers channels and the Over-limit description matches its per-key / per-user siblings.</li>
+    </ul>
+  </div>
+
+  <div class="mock">
+    <div class="mockbar">
+      <span class="mocktag">Variant A · full page mock</span>
+      <span>Window: Live · shared fixtures · Stripe/Linear-inspired, compact, dark-mode ready</span>
+    </div>
+    <div class="pg">
+
+      <!-- page header -->
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Concurrency
+            <span class="badge badge-warning" title="Redis concurrency backend unavailable. Requests are being counted on local fallback buckets.">Redis degraded</span>
+          </h1>
+          <p class="sub">In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.</p>
+        </div>
+        <div class="pg-tools">
+          <span class="ctl-label">Window</span>
+          <button class="select" type="button" aria-haspopup="listbox">Live <span class="caret" aria-hidden="true">▾</span></button>
+          <span class="hint">Governs every panel on this page</span>
+        </div>
+      </div>
+
+      <!-- 1st layer: verdict -->
+      <div class="verdict danger" role="status">
+        <span class="vicon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        </span>
+        <div class="vbody">
+          <p class="vtitle">Action needed — one channel bucket over its cap</p>
+          <p class="vtext">Channel #6 runs at 125% of its cap (5/4). 2 requests were rejected in the selected window and 3 are queued behind full buckets. Per-key and per-user caps are all within limits; Redis backend is not degraded.</p>
+        </div>
+        <div class="vchips">
+          <span class="vchip t-d">Over-limit 1</span>
+          <span class="vchip t-w">Rejected 2</span>
+          <span class="vchip t-w">Queued 3</span>
+          <span class="vchip t-s">Degraded none</span>
+        </div>
+      </div>
+
+      <!-- 2nd layer: KPI -->
+      <div class="kpi-grid">
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Total in-flight requests</span>
+            <span class="stat-ico tint1" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          </div>
+          <p class="stat-val">7</p>
+          <p class="stat-desc">Unique in-flight requests across every active user bucket.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Configured concurrency caps</span>
+            <span class="stat-ico tint2" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg></span>
+          </div>
+          <p class="stat-val">29</p>
+          <p class="stat-desc">Sum of explicit per-key / per-user caps (unlimited scopes excluded).</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Average utilisation</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg></span>
+          </div>
+          <p class="stat-val">24%</p>
+          <p class="stat-desc">Mean of capped-bucket utilisation. 0% means no caps are currently in use.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Over-limit scopes</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          </div>
+          <p class="stat-val">1</p>
+          <p class="stat-desc">Number of per-key / per-user buckets currently exceeding their configured cap.</p>
+        </div>
+      </div>
+
+      <!-- 3rd layer: details, visually receded -->
+      <div class="zone">
+        <p class="zone-label">Details</p>
+
+        <div class="card">
+          <div class="card-hd">
+            <div>
+              <h3 class="card-title">Bounded wait queue</h3>
+              <p class="card-desc">When a concurrency bucket is full, requests wait in a bounded queue instead of failing immediately. Queue depth = min(depth ratio × concurrency limit, depth cap). A request that waits longer than the max wait, or finds the queue full, receives a 429 response.</p>
+            </div>
+            <div class="card-tools">
+              <span class="badge badge-outline">Queued 3</span>
+            </div>
+          </div>
+          <div class="card-bd">
+            <div class="field-row">
+              <div class="switch-field">
+                <div class="txt">
+                  <span class="lbl">Enable queueing</span>
+                  <span class="help">When disabled, requests beyond the concurrency limit are rejected immediately with 429.</span>
+                </div>
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable queueing"><i aria-hidden="true"></i></button>
+              </div>
+              <div class="grid-3">
+                <div class="field">
+                  <label class="lbl" for="qa1">Depth ratio</label>
+                  <input class="input" id="qa1" type="number" value="4" min="0" max="64" step="1">
+                  <span class="help">Queue depth before capping: this multiple of the concurrency limit. Allowed values: 0 to 64.</span>
+                </div>
+                <div class="field">
+                  <label class="lbl" for="qa2">Depth cap</label>
+                  <input class="input" id="qa2" type="number" value="128" min="1" max="1024" step="1">
+                  <span class="help">Upper bound on queued requests per bucket. Allowed values: 1 to 1024.</span>
+                </div>
+                <div class="field">
+                  <label class="lbl" for="qa3">Max wait</label>
+                  <input class="input" id="qa3" type="number" value="10" min="0" max="60" step="1">
+                  <span class="help">How long a request may wait before it is rejected with 429. Allowed values: 0 to 60.</span>
+                </div>
+              </div>
+              <div class="btn-row end">
+                <button class="btn btn-primary" type="button">Save queue settings</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-hd">
+            <h3 class="card-title">In-flight trend</h3>
+            <div class="meta">
+              <span>Queued: 3</span>
+              <span>Rejected in window: 2</span>
+            </div>
+          </div>
+          <div class="card-bd">
+            <svg class="chart" viewBox="0 0 760 220" role="img" aria-label="In-flight trend, 40 samples: rises from 0 to a peak of 18 and settles at 3, with 2 rejections marked"><use href="#trendSym"/></svg>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-hd">
+            <h3 class="card-title">Active concurrency buckets</h3>
+            <span class="hint">Sorted by utilisation, hottest first</span>
+          </div>
+          <div class="card-bd">
+            <div class="tbl-wrap">
+              <table class="tbl sticky">
+                <caption class="sr-only">Active concurrency buckets with subject, model, current over limit and utilisation</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Scope</th>
+                    <th scope="col">Subject</th>
+                    <th scope="col">Model</th>
+                    <th scope="col" class="r">Current / limit</th>
+                    <th scope="col">Utilisation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="mono">ch#6</span></td>
+                    <td>Channel #6</td>
+                    <td><span class="mono">Qwen3.6-35B</span></td>
+                    <td class="r">5 / 4</td>
+                    <td><span class="util"><span class="prog d"><i style="width:100%"></i></span></span></td>
+                  </tr>
+                  <tr>
+                    <td><span class="mono">ch#3</span></td>
+                    <td>Channel #3</td>
+                    <td><span class="mono">gpt-4o-mini</span></td>
+                    <td class="r">4 / 4</td>
+                    <td><span class="util"><span class="prog w"><i style="width:100%"></i></span></span></td>
+                  </tr>
+                  <tr>
+                    <td><span class="mono">key#7</span></td>
+                    <td>Key #7</td>
+                    <td><span class="mono">Qwen3.6-35B</span></td>
+                    <td class="r">12 / 15</td>
+                    <td><span class="util"><span class="prog"><i style="width:80%"></i></span></span></td>
+                  </tr>
+                  <tr>
+                    <td><span class="mono">ch#9</span></td>
+                    <td>Channel #9</td>
+                    <td><span class="mono">gpt-4o-mini</span></td>
+                    <td class="r">3 / 4</td>
+                    <td><span class="util"><span class="prog"><i style="width:75%"></i></span></span></td>
+                  </tr>
+                  <tr>
+                    <td><span class="mono">user#1</span></td>
+                    <td>User #1</td>
+                    <td><span class="mono">Qwen3.6-35B</span></td>
+                    <td class="r">7 / 10</td>
+                    <td><span class="util"><span class="prog"><i style="width:70%"></i></span></span></td>
+                  </tr>
+                  <tr>
+                    <td><span class="mono">key#5</span></td>
+                    <td>Key #5</td>
+                    <td><span class="mono">gpt-4o-mini</span></td>
+                    <td class="r">0 / ∞</td>
+                    <td><span class="unlimited">unlimited</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-hd">
+            <h3 class="card-title">Channel load (EWMA routing) <span class="badge badge-outline" title="Live-only state: hidden while a historical window is selected so every element on the page describes the same data.">Live only</span></h3>
+          </div>
+          <div class="card-bd">
+            <div class="tbl-wrap">
+              <table class="tbl">
+                <caption class="sr-only">Channel load with EWMA samples, success rate, latency, multiplier and last sample time</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Model</th>
+                    <th scope="col" class="r">Samples</th>
+                    <th scope="col" class="r">Success rate</th>
+                    <th scope="col" class="r">Latency EWMA (ms)</th>
+                    <th scope="col" class="r">Multiplier</th>
+                    <th scope="col">Last sample</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Channel #3</td>
+                    <td><span class="mono">Qwen3.6-35B</span></td>
+                    <td class="r">28</td>
+                    <td class="r">100.0%</td>
+                    <td class="r">161</td>
+                    <td class="r"><span class="m-up">2.00</span></td>
+                    <td class="muted">12:43:07</td>
+                  </tr>
+                  <tr>
+                    <td>Channel #4</td>
+                    <td><span class="mono">gpt-4o-mini</span></td>
+                    <td class="r">16</td>
+                    <td class="r">99.2%</td>
+                    <td class="r">155</td>
+                    <td class="r"><span class="m-up">1.72</span></td>
+                    <td class="muted">12:43:07</td>
+                  </tr>
+                  <tr>
+                    <td>Channel #5</td>
+                    <td><span class="mono">Qwen3.6-35B</span></td>
+                    <td class="r">8</td>
+                    <td class="r">96.4%</td>
+                    <td class="r">300</td>
+                    <td class="r"><span class="m-off" title="Warming up: fewer than 10 samples, multiplier pinned at 1.00">1.00</span></td>
+                    <td class="muted">12:43:05</td>
+                  </tr>
+                  <tr>
+                    <td>Channel #6</td>
+                    <td><span class="mono">gpt-4o-mini</span></td>
+                    <td class="r">37</td>
+                    <td class="r">88.1%</td>
+                    <td class="r">1221</td>
+                    <td class="r"><span class="m-down">0.50</span></td>
+                    <td class="muted">12:43:06</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="help" style="margin-top:0.5rem">Multiplier: 1.0 = inactive (channel has no slot with concurrency_limit&gt;0, or under 10 samples while warming up); &gt;1 boosted, &lt;1 penalised, range [0.2, 5.0].</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- ============ VARIANT B — Layout model (split) ============ -->
+<section class="variant" id="variant-B" data-variant="B" aria-labelledby="hB">
+  <header class="vhead">
+    <span class="vcode" aria-hidden="true">B</span>
+    <div class="vmeta">
+      <h2 id="hB">Variant B — Live rail + evidence column</h2>
+      <span class="axis">Axis · layout model</span>
+      <p class="rationale">A two-column split puts everything that answers “right now?” (verdict, KPI, queue depth) in a sticky left rail, while the right column holds the evidence: trend on top, buckets and EWMA behind tabs at equal weight.</p>
+    </div>
+  </header>
+  <div class="notes-wrap">
+    <h3 class="notes-title">Key differences</h3>
+    <ul class="notes">
+      <li><strong>Two-column split</strong>: sticky left rail = verdict + KPI list + queue depth &amp; settings; right column = trend card with the window selector at its head + a tabbed panel switching between the bucket table and the Channel load table (same card footprint, no page-length stack).</li>
+      <li><span class="fix-tag">FIX #2</span>The selector sits at the top of the reading path with the hint “Applies to every panel on this page”; the EWMA tab <strong>follows the window</strong> (window-scoped samples, no out-of-window “Last sample” timestamps) and says so on the panel.</li>
+      <li><span class="fix-tag">FIX #1 / #3</span>Subtitle covers channels; Over-limit description matches the per-key / per-user siblings.</li>
+    </ul>
+  </div>
+
+  <div class="mock">
+    <div class="mockbar">
+      <span class="mocktag">Variant B · full page mock</span>
+      <span>Window: Live · shared fixtures · left rail sticky while scrolling</span>
+    </div>
+    <div class="pg">
+
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Concurrency
+            <span class="badge badge-warning" title="Redis concurrency backend unavailable. Requests are being counted on local fallback buckets.">Redis degraded</span>
+          </h1>
+          <p class="sub">In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.</p>
+        </div>
+        <div class="pg-tools">
+          <span class="live-label"><span class="live-dot" aria-hidden="true"></span>Live snapshot · 3s poll</span>
+        </div>
+      </div>
+
+      <div class="split">
+        <!-- LEFT: realtime state -->
+        <div class="col col-sticky">
+          <div class="verdict danger" role="status">
+            <span class="vicon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+            </span>
+            <div class="vbody">
+              <p class="vtitle">Action needed — one bucket over cap</p>
+              <p class="vtext">Channel #6 at 125% (5/4) · 2 rejected in window · 3 queued. Per-key / per-user caps are within limits.</p>
+            </div>
+            <div class="vchips">
+              <span class="vchip t-d">Over-limit 1</span>
+              <span class="vchip t-w">Rejected 2</span>
+              <span class="vchip t-w">Queued 3</span>
+            </div>
+          </div>
+
+          <div class="kpi-list">
+            <div class="stat row">
+              <div>
+                <p class="stat-title">Total in-flight requests</p>
+                <p class="stat-desc">Unique in-flight requests across every active user bucket.</p>
+              </div>
+              <p class="stat-val">7</p>
+            </div>
+            <div class="stat row">
+              <div>
+                <p class="stat-title">Configured concurrency caps</p>
+                <p class="stat-desc">Sum of explicit per-key / per-user caps (unlimited scopes excluded).</p>
+              </div>
+              <p class="stat-val">29</p>
+            </div>
+            <div class="stat row">
+              <div>
+                <p class="stat-title">Average utilisation</p>
+                <p class="stat-desc">Mean of capped-bucket utilisation. 0% means no caps are currently in use.</p>
+              </div>
+              <p class="stat-val">24%</p>
+            </div>
+            <div class="stat row">
+              <div>
+                <p class="stat-title">Over-limit scopes</p>
+                <p class="stat-desc">Number of per-key / per-user buckets currently exceeding their configured cap.</p>
+              </div>
+              <p class="stat-val">1</p>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-hd">
+              <div>
+                <h3 class="card-title">Bounded wait queue <span class="badge badge-outline">Enabled</span></h3>
+                <p class="card-desc">Depth = min(depth ratio × concurrency limit, depth cap); over-wait or full queue → 429.</p>
+              </div>
+            </div>
+            <div class="card-bd">
+              <div class="depth-grid">
+                <div class="depth-cell"><p class="k">Queued (live)</p><p class="v">3</p></div>
+                <div class="depth-cell"><p class="k">Depth ratio</p><p class="v">4</p></div>
+                <div class="depth-cell"><p class="k">Depth cap</p><p class="v">128</p></div>
+                <div class="depth-cell"><p class="k">Max wait</p><p class="v">10s</p></div>
+              </div>
+              <div class="field-row">
+                <div class="switch-field">
+                  <div class="txt"><span class="lbl">Enable queueing</span></div>
+                  <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable queueing"><i aria-hidden="true"></i></button>
+                </div>
+                <div class="grid-3">
+                  <div class="field">
+                    <label class="lbl" for="qb1">Depth ratio</label>
+                    <input class="input" id="qb1" type="number" value="4" min="0" max="64" step="1">
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="qb2">Depth cap</label>
+                    <input class="input" id="qb2" type="number" value="128" min="1" max="1024" step="1">
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="qb3">Max wait</label>
+                    <input class="input" id="qb3" type="number" value="10" min="0" max="60" step="1">
+                  </div>
+                </div>
+                <div class="btn-row end">
+                  <button class="btn btn-primary" type="button">Save queue settings</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: evidence -->
+        <div class="col">
+          <div class="card">
+            <div class="card-hd">
+              <div class="card-tools">
+                <h3 class="card-title">In-flight trend</h3>
+                <span class="ctl-label">Window</span>
+                <button class="select" type="button" aria-haspopup="listbox">Live <span class="caret" aria-hidden="true">▾</span></button>
+                <span class="hint">Applies to every panel on this page</span>
+              </div>
+              <div class="meta">
+                <span>Queued: 3</span>
+                <span>Rejected in window: 2</span>
+              </div>
+            </div>
+            <div class="card-bd">
+              <svg class="chart" viewBox="0 0 760 220" role="img" aria-label="In-flight trend, 40 samples: rises from 0 to a peak of 18 and settles at 3, with 2 rejections marked"><use href="#trendSym"/></svg>
+            </div>
+          </div>
+
+          <div class="card" data-tabgroup>
+            <div class="card-hd">
+              <div class="card-tools">
+                <h3 class="card-title">Details</h3>
+                <span class="hint">One card footprint, two datasets</span>
+              </div>
+            </div>
+            <div class="tabs" role="tablist" aria-label="Detail datasets">
+              <button class="tab" type="button" role="tab" id="tabB1" aria-controls="panelB-buckets" aria-selected="true">Active concurrency buckets</button>
+              <button class="tab" type="button" role="tab" id="tabB2" aria-controls="panelB-routing" aria-selected="false" tabindex="-1">Channel load (EWMA routing)</button>
+            </div>
+            <div class="card-bd">
+              <div class="tabpanel" role="tabpanel" id="panelB-buckets" aria-labelledby="tabB1" tabindex="0">
+                <div class="tbl-wrap">
+                  <table class="tbl sticky">
+                    <caption class="sr-only">Active concurrency buckets with subject, model, current over limit and utilisation</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Scope</th>
+                        <th scope="col">Subject</th>
+                        <th scope="col">Model</th>
+                        <th scope="col" class="r">Current / limit</th>
+                        <th scope="col">Utilisation</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><span class="mono">ch#6</span></td>
+                        <td>Channel #6</td>
+                        <td><span class="mono">Qwen3.6-35B</span></td>
+                        <td class="r">5 / 4</td>
+                        <td><span class="util"><span class="prog d"><i style="width:100%"></i></span></span></td>
+                      </tr>
+                      <tr>
+                        <td><span class="mono">ch#3</span></td>
+                        <td>Channel #3</td>
+                        <td><span class="mono">gpt-4o-mini</span></td>
+                        <td class="r">4 / 4</td>
+                        <td><span class="util"><span class="prog w"><i style="width:100%"></i></span></span></td>
+                      </tr>
+                      <tr>
+                        <td><span class="mono">key#7</span></td>
+                        <td>Key #7</td>
+                        <td><span class="mono">Qwen3.6-35B</span></td>
+                        <td class="r">12 / 15</td>
+                        <td><span class="util"><span class="prog"><i style="width:80%"></i></span></span></td>
+                      </tr>
+                      <tr>
+                        <td><span class="mono">ch#9</span></td>
+                        <td>Channel #9</td>
+                        <td><span class="mono">gpt-4o-mini</span></td>
+                        <td class="r">3 / 4</td>
+                        <td><span class="util"><span class="prog"><i style="width:75%"></i></span></span></td>
+                      </tr>
+                      <tr>
+                        <td><span class="mono">user#1</span></td>
+                        <td>User #1</td>
+                        <td><span class="mono">Qwen3.6-35B</span></td>
+                        <td class="r">7 / 10</td>
+                        <td><span class="util"><span class="prog"><i style="width:70%"></i></span></span></td>
+                      </tr>
+                      <tr>
+                        <td><span class="mono">key#5</span></td>
+                        <td>Key #5</td>
+                        <td><span class="mono">gpt-4o-mini</span></td>
+                        <td class="r">0 / ∞</td>
+                        <td><span class="unlimited">unlimited</span></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="tabpanel" role="tabpanel" id="panelB-routing" aria-labelledby="tabB2" tabindex="0" hidden>
+                <p class="help" style="margin-bottom:0.5rem"><span class="badge badge-outline">Follows window</span> Samples are scoped to the selected window, so no timestamp outside the window is shown.</p>
+                <div class="tbl-wrap">
+                  <table class="tbl">
+                    <caption class="sr-only">Channel load with EWMA samples, success rate, latency, multiplier and last sample time</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">Channel</th>
+                        <th scope="col">Model</th>
+                        <th scope="col" class="r">Samples</th>
+                        <th scope="col" class="r">Success rate</th>
+                        <th scope="col" class="r">Latency EWMA (ms)</th>
+                        <th scope="col" class="r">Multiplier</th>
+                        <th scope="col">Last sample</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td>Channel #3</td>
+                        <td><span class="mono">Qwen3.6-35B</span></td>
+                        <td class="r">28</td>
+                        <td class="r">100.0%</td>
+                        <td class="r">161</td>
+                        <td class="r"><span class="m-up">2.00</span></td>
+                        <td class="muted">12:43:07</td>
+                      </tr>
+                      <tr>
+                        <td>Channel #4</td>
+                        <td><span class="mono">gpt-4o-mini</span></td>
+                        <td class="r">16</td>
+                        <td class="r">99.2%</td>
+                        <td class="r">155</td>
+                        <td class="r"><span class="m-up">1.72</span></td>
+                        <td class="muted">12:43:07</td>
+                      </tr>
+                      <tr>
+                        <td>Channel #5</td>
+                        <td><span class="mono">Qwen3.6-35B</span></td>
+                        <td class="r">8</td>
+                        <td class="r">96.4%</td>
+                        <td class="r">300</td>
+                        <td class="r"><span class="m-off" title="Warming up: fewer than 10 samples, multiplier pinned at 1.00">1.00</span></td>
+                        <td class="muted">12:43:05</td>
+                      </tr>
+                      <tr>
+                        <td>Channel #6</td>
+                        <td><span class="mono">gpt-4o-mini</span></td>
+                        <td class="r">37</td>
+                        <td class="r">88.1%</td>
+                        <td class="r">1221</td>
+                        <td class="r"><span class="m-down">0.50</span></td>
+                        <td class="muted">12:43:06</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p class="help" style="margin-top:0.5rem">Multiplier: 1.0 = inactive (channel has no slot with concurrency_limit&gt;0, or under 10 samples while warming up); &gt;1 boosted, &lt;1 penalised, range [0.2, 5.0].</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- ============ VARIANT C — Density (compact ops console) ============ -->
+<section class="variant" id="variant-C" data-variant="C" aria-labelledby="hC">
+  <header class="vhead">
+    <span class="vcode" aria-hidden="true">C</span>
+    <div class="vmeta">
+      <h2 id="hC">Variant C — Compact ops console</h2>
+      <span class="axis">Axis · density</span>
+      <p class="rationale">Same information architecture as today, but every pixel works harder: one tight single column, KPI tiles folded into a toolbar strip, zebra tables with sticky heads, and all explanatory prose parked in tooltips.</p>
+    </div>
+  </header>
+  <div class="notes-wrap">
+    <h3 class="notes-title">Key differences</h3>
+    <ul class="notes">
+      <li><strong>Compact density</strong>: page gaps 24px → 12px, card padding trimmed, KPI row becomes a divided <em>toolbar strip</em> (label + value cells, no tile chrome), one-line verdict bar instead of a banner.</li>
+      <li>Tables get <strong>zebra stripes + sticky headers</strong> and 30% shorter rows; every description (KPI, card, field help, EWMA footnote) collapses into a keyboard-reachable ⓘ tooltip, so the first screen shows ~1.5× more data.</li>
+      <li><span class="fix-tag">FIX #2</span>Window selector lives in the toolbar above everything; the EWMA card is <strong>live-only</strong> (hidden in historical windows) and labels itself “Live only”.</li>
+      <li><span class="fix-tag">FIX #1 / #3</span>Subtitle covers channels; Over-limit description matches the per-key / per-user siblings.</li>
+    </ul>
+  </div>
+
+  <div class="mock">
+    <div class="mockbar">
+      <span class="mocktag">Variant C · full page mock</span>
+      <span>Window: Live · shared fixtures · density is the only axis that changes</span>
+    </div>
+    <div class="pg dense">
+
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Concurrency
+            <span class="badge badge-warning" title="Redis concurrency backend unavailable. Requests are being counted on local fallback buckets.">Redis degraded</span>
+          </h1>
+          <p class="sub">In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.</p>
+        </div>
+        <div class="pg-tools">
+          <span class="ctl-label">Window</span>
+          <button class="select" type="button" aria-haspopup="listbox" style="min-width:8rem;height:1.75rem">Live <span class="caret" aria-hidden="true">▾</span></button>
+          <span class="hint">Governs every panel · 3s poll</span>
+          <span class="badge badge-outline">Queued 3</span>
+        </div>
+      </div>
+
+      <div class="verdict danger slim" role="status">
+        <span class="vicon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        </span>
+        <p class="vtitle">Action needed</p>
+        <p class="vtext">Channel #6 at 125% (5/4) · per-key / per-user caps healthy · Redis backend healthy</p>
+        <div class="vchips">
+          <span class="vchip t-d">Over-limit 1</span>
+          <span class="vchip t-w">Rejected 2</span>
+          <span class="vchip t-w">Queued 3</span>
+        </div>
+      </div>
+
+      <!-- KPI as a toolbar strip -->
+      <div class="strip" role="group" aria-label="Live KPI">
+        <div class="strip-cell">
+          <span class="strip-label">Total in-flight
+            <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCk1" aria-label="About total in-flight">i</button><span class="tip-body" role="tooltip" id="tCk1">Unique in-flight requests across every active user bucket.</span></span>
+          </span>
+          <span class="strip-val">7</span>
+        </div>
+        <div class="strip-cell">
+          <span class="strip-label">Configured caps
+            <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCk2" aria-label="About configured caps">i</button><span class="tip-body" role="tooltip" id="tCk2">Sum of explicit per-key / per-user caps (unlimited scopes excluded).</span></span>
+          </span>
+          <span class="strip-val">29</span>
+        </div>
+        <div class="strip-cell">
+          <span class="strip-label">Avg utilisation
+            <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCk3" aria-label="About average utilisation">i</button><span class="tip-body" role="tooltip" id="tCk3">Mean of capped-bucket utilisation. 0% means no caps are currently in use.</span></span>
+          </span>
+          <span class="strip-val">24%</span>
+        </div>
+        <div class="strip-cell">
+          <span class="strip-label">Over-limit scopes
+            <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCk4" aria-label="About over-limit scopes">i</button><span class="tip-body" role="tooltip" id="tCk4">Number of per-key / per-user buckets currently exceeding their configured cap.</span></span>
+          </span>
+          <span class="strip-val">1</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <div class="card-tools">
+            <h3 class="card-title">Bounded wait queue
+              <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCq" aria-label="About the bounded wait queue">i</button><span class="tip-body" role="tooltip" id="tCq">When a concurrency bucket is full, requests wait in a bounded queue instead of failing immediately. Queue depth = min(depth ratio × concurrency limit, depth cap). A request that waits longer than the max wait, or finds the queue full, receives a 429 response.</span></span>
+            </h3>
+            <span class="badge badge-success">Enabled</span>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div class="field-row" style="gap:0.6rem">
+            <div class="switch-field">
+              <div class="txt"><span class="lbl">Enable queueing
+                <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCq1" aria-label="About enable queueing">i</button><span class="tip-body" role="tooltip" id="tCq1">When disabled, requests beyond the concurrency limit are rejected immediately with 429.</span></span>
+              </span></div>
+              <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable queueing"><i aria-hidden="true"></i></button>
+            </div>
+            <div class="grid-3">
+              <div class="field">
+                <label class="lbl" for="qc1">Depth ratio
+                  <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCq2" aria-label="About depth ratio">i</button><span class="tip-body" role="tooltip" id="tCq2">Queue depth before capping: this multiple of the concurrency limit. Allowed values: 0 to 64.</span></span>
+                </label>
+                <input class="input" id="qc1" type="number" value="4" min="0" max="64" step="1">
+              </div>
+              <div class="field">
+                <label class="lbl" for="qc2">Depth cap
+                  <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCq3" aria-label="About depth cap">i</button><span class="tip-body" role="tooltip" id="tCq3">Upper bound on queued requests per bucket. Allowed values: 1 to 1024.</span></span>
+                </label>
+                <input class="input" id="qc2" type="number" value="128" min="1" max="1024" step="1">
+              </div>
+              <div class="field">
+                <label class="lbl" for="qc3">Max wait
+                  <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCq4" aria-label="About max wait">i</button><span class="tip-body" role="tooltip" id="tCq4">How long a request may wait before it is rejected with 429. Allowed values: 0 to 60.</span></span>
+                </label>
+                <input class="input" id="qc3" type="number" value="10" min="0" max="60" step="1">
+              </div>
+            </div>
+            <div class="btn-row end">
+              <button class="btn btn-primary btn-sm" type="button">Save queue settings</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h3 class="card-title">In-flight trend</h3>
+          <div class="meta"><span>Queued: 3</span><span>Rejected in window: 2</span></div>
+        </div>
+        <div class="card-bd">
+          <svg class="chart compact" viewBox="0 0 760 220" role="img" aria-label="In-flight trend, 40 samples: rises from 0 to a peak of 18 and settles at 3, with 2 rejections marked"><use href="#trendSym"/></svg>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h3 class="card-title">Active concurrency buckets</h3>
+          <span class="hint">6 buckets · hottest first</span>
+        </div>
+        <div class="card-bd">
+          <div class="tbl-wrap">
+            <table class="tbl sticky zebra">
+              <caption class="sr-only">Active concurrency buckets with subject, model, current over limit and utilisation</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Scope</th>
+                  <th scope="col">Subject</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Current / limit</th>
+                  <th scope="col">Utilisation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="mono">ch#6</span></td>
+                  <td>Channel #6</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">5 / 4</td>
+                  <td><span class="util"><span class="prog d"><i style="width:100%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#3</span></td>
+                  <td>Channel #3</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">4 / 4</td>
+                  <td><span class="util"><span class="prog w"><i style="width:100%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#7</span></td>
+                  <td>Key #7</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">12 / 15</td>
+                  <td><span class="util"><span class="prog"><i style="width:80%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#9</span></td>
+                  <td>Channel #9</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">3 / 4</td>
+                  <td><span class="util"><span class="prog"><i style="width:75%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">user#1</span></td>
+                  <td>User #1</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">7 / 10</td>
+                  <td><span class="util"><span class="prog"><i style="width:70%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#5</span></td>
+                  <td>Key #5</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">0 / ∞</td>
+                  <td><span class="unlimited">unlimited</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <div class="card-tools">
+            <h3 class="card-title">Channel load (EWMA routing)</h3>
+            <span class="badge badge-outline" title="Live-only state: hidden while a historical window is selected so every element on the page describes the same data.">Live only</span>
+            <span class="tip"><button class="tip-btn" type="button" aria-describedby="tCm" aria-label="About the multiplier">i</button><span class="tip-body" role="tooltip" id="tCm">Multiplier: 1.0 = inactive (channel has no slot with concurrency_limit&gt;0, or under 10 samples while warming up); &gt;1 boosted, &lt;1 penalised, range [0.2, 5.0].</span></span>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div class="tbl-wrap">
+            <table class="tbl zebra">
+              <caption class="sr-only">Channel load with EWMA samples, success rate, latency, multiplier and last sample time</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Channel</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Samples</th>
+                  <th scope="col" class="r">Success rate</th>
+                  <th scope="col" class="r">Latency EWMA (ms)</th>
+                  <th scope="col" class="r">Multiplier</th>
+                  <th scope="col">Last sample</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Channel #3</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">28</td>
+                  <td class="r">100.0%</td>
+                  <td class="r">161</td>
+                  <td class="r"><span class="m-up">2.00</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #4</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">16</td>
+                  <td class="r">99.2%</td>
+                  <td class="r">155</td>
+                  <td class="r"><span class="m-up">1.72</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #5</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">8</td>
+                  <td class="r">96.4%</td>
+                  <td class="r">300</td>
+                  <td class="r"><span class="m-off" title="Warming up: fewer than 10 samples, multiplier pinned at 1.00">1.00</span></td>
+                  <td class="muted">12:43:05</td>
+                </tr>
+                <tr>
+                  <td>Channel #6</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">37</td>
+                  <td class="r">88.1%</td>
+                  <td class="r">1221</td>
+                  <td class="r"><span class="m-down">0.50</span></td>
+                  <td class="muted">12:43:06</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- ============ VARIANT D — Progressive disclosure ============ -->
+<section class="variant" id="variant-D" data-variant="D" aria-labelledby="hD">
+  <header class="vhead">
+    <span class="vcode" aria-hidden="true">D</span>
+    <div class="vmeta">
+      <h2 id="hD">Variant D — Progressive disclosure</h2>
+      <span class="axis">Axis · interaction</span>
+      <p class="rationale">The default view answers health + trend in one screen; buckets, queue settings and EWMA routing become keyboard-native disclosure blocks that keep their state in the summary line, and queue editing happens inline with Save / Cancel.</p>
+    </div>
+  </header>
+  <div class="notes-wrap">
+    <h3 class="notes-title">Key differences</h3>
+    <ul class="notes">
+      <li><strong>Progressive disclosure</strong>: only verdict + KPI + trend are always open. Bucket table, queue settings and Channel load are <code>&lt;details&gt;</code> blocks (native keyboard / screen-reader support) whose summary line carries live numbers, so collapsing costs no information.</li>
+      <li><strong>Inline edit state</strong> for the bounded wait queue: values become inputs inside the open block with paired <em>Save</em> / <em>Cancel</em> buttons — no modal, no route change; the block summary shows “Editing” while dirty.</li>
+      <li><span class="fix-tag">FIX #2</span>Window selector sits in the page header; the EWMA disclosure is <strong>live-only</strong> — it summarises “hidden in historical windows” and its body is gated the same way as the Queued badge.</li>
+      <li><span class="fix-tag">FIX #1 / #3</span>Subtitle covers channels; Over-limit description matches the per-key / per-user siblings.</li>
+    </ul>
+  </div>
+
+  <div class="mock">
+    <div class="mockbar">
+      <span class="mocktag">Variant D · full page mock</span>
+      <span>Window: Live · shared fixtures · bucket + queue blocks open, EWMA collapsed</span>
+    </div>
+    <div class="pg">
+
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Concurrency
+            <span class="badge badge-warning" title="Redis concurrency backend unavailable. Requests are being counted on local fallback buckets.">Redis degraded</span>
+          </h1>
+          <p class="sub">In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.</p>
+        </div>
+        <div class="pg-tools">
+          <span class="ctl-label">Window</span>
+          <button class="select" type="button" aria-haspopup="listbox">Live <span class="caret" aria-hidden="true">▾</span></button>
+          <span class="hint">Governs every panel on this page</span>
+        </div>
+      </div>
+
+      <div class="verdict danger" role="status">
+        <span class="vicon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        </span>
+        <div class="vbody">
+          <p class="vtitle">Action needed — one bucket over cap</p>
+          <p class="vtext">Channel #6 at 125% (5/4); 2 rejected in window; 3 queued. Per-key / per-user caps are within limits.</p>
+        </div>
+        <div class="vchips">
+          <span class="vchip t-d">Over-limit 1</span>
+          <span class="vchip t-w">Rejected 2</span>
+          <span class="vchip t-w">Queued 3</span>
+          <span class="vchip t-s">Degraded none</span>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Total in-flight requests</span>
+            <span class="stat-ico tint1" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          </div>
+          <p class="stat-val">7</p>
+          <p class="stat-desc">Unique in-flight requests across every active user bucket.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Configured concurrency caps</span>
+            <span class="stat-ico tint2" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg></span>
+          </div>
+          <p class="stat-val">29</p>
+          <p class="stat-desc">Sum of explicit per-key / per-user caps (unlimited scopes excluded).</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Average utilisation</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg></span>
+          </div>
+          <p class="stat-val">24%</p>
+          <p class="stat-desc">Mean of capped-bucket utilisation. 0% means no caps are currently in use.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Over-limit scopes</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          </div>
+          <p class="stat-val">1</p>
+          <p class="stat-desc">Number of per-key / per-user buckets currently exceeding their configured cap.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h3 class="card-title">In-flight trend</h3>
+          <div class="meta"><span>Queued: 3</span><span>Rejected in window: 2</span></div>
+        </div>
+        <div class="card-bd">
+          <svg class="chart" viewBox="0 0 760 220" role="img" aria-label="In-flight trend, 40 samples: rises from 0 to a peak of 18 and settles at 3, with 2 rejections marked"><use href="#trendSym"/></svg>
+        </div>
+      </div>
+
+      <!-- disclosure 1: open -->
+      <details class="disc" open>
+        <summary>
+          Active concurrency buckets
+          <span class="disc-sum">6 buckets open · hottest: Channel #6 125% (5/4) · 1 per-key / per-user bucket over cap</span>
+        </summary>
+        <div class="disc-body">
+          <div class="tbl-wrap">
+            <table class="tbl sticky">
+              <caption class="sr-only">Active concurrency buckets with subject, model, current over limit and utilisation</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Scope</th>
+                  <th scope="col">Subject</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Current / limit</th>
+                  <th scope="col">Utilisation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="mono">ch#6</span></td>
+                  <td>Channel #6</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">5 / 4</td>
+                  <td><span class="util"><span class="prog d"><i style="width:100%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#3</span></td>
+                  <td>Channel #3</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">4 / 4</td>
+                  <td><span class="util"><span class="prog w"><i style="width:100%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#7</span></td>
+                  <td>Key #7</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">12 / 15</td>
+                  <td><span class="util"><span class="prog"><i style="width:80%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#9</span></td>
+                  <td>Channel #9</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">3 / 4</td>
+                  <td><span class="util"><span class="prog"><i style="width:75%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">user#1</span></td>
+                  <td>User #1</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">7 / 10</td>
+                  <td><span class="util"><span class="prog"><i style="width:70%"></i></span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#5</span></td>
+                  <td>Key #5</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">0 / ∞</td>
+                  <td><span class="unlimited">unlimited</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+
+      <!-- disclosure 2: open, inline edit state -->
+      <details class="disc" open>
+        <summary>
+          Bounded wait queue
+          <span class="disc-sum">Enabled · depth ratio 4 · cap 128 · max wait 10s · queued 3 · <span class="badge badge-outline">Editing</span></span>
+        </summary>
+        <div class="disc-body">
+          <div class="field-row">
+            <div class="switch-field">
+              <div class="txt">
+                <span class="lbl">Enable queueing</span>
+                <span class="help">When disabled, requests beyond the concurrency limit are rejected immediately with 429.</span>
+              </div>
+              <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable queueing"><i aria-hidden="true"></i></button>
+            </div>
+            <div class="grid-3">
+              <div class="field">
+                <label class="lbl" for="qd1">Depth ratio</label>
+                <input class="input" id="qd1" type="number" value="4" min="0" max="64" step="1">
+                <span class="help">Queue depth before capping: this multiple of the concurrency limit. Allowed values: 0 to 64.</span>
+              </div>
+              <div class="field">
+                <label class="lbl" for="qd2">Depth cap</label>
+                <input class="input" id="qd2" type="number" value="128" min="1" max="1024" step="1">
+                <span class="help">Upper bound on queued requests per bucket. Allowed values: 1 to 1024.</span>
+              </div>
+              <div class="field">
+                <label class="lbl" for="qd3">Max wait</label>
+                <input class="input" id="qd3" type="number" value="10" min="0" max="60" step="1">
+                <span class="help">How long a request may wait before it is rejected with 429. Allowed values: 0 to 60.</span>
+              </div>
+            </div>
+            <div class="btn-row end">
+              <button class="btn" type="button">Cancel</button>
+              <button class="btn btn-primary" type="button">Save queue settings</button>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- disclosure 3: collapsed, summary carries the data -->
+      <details class="disc">
+        <summary>
+          Channel load (EWMA routing)
+          <span class="disc-sum">4 rows · ch3 2.00 · ch4 1.72 · ch5 1.00 (warming) · ch6 0.50 · live-only: hidden while a historical window is selected</span>
+        </summary>
+        <div class="disc-body">
+          <div class="tbl-wrap">
+            <table class="tbl">
+              <caption class="sr-only">Channel load with EWMA samples, success rate, latency, multiplier and last sample time</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Channel</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Samples</th>
+                  <th scope="col" class="r">Success rate</th>
+                  <th scope="col" class="r">Latency EWMA (ms)</th>
+                  <th scope="col" class="r">Multiplier</th>
+                  <th scope="col">Last sample</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Channel #3</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">28</td>
+                  <td class="r">100.0%</td>
+                  <td class="r">161</td>
+                  <td class="r"><span class="m-up">2.00</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #4</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">16</td>
+                  <td class="r">99.2%</td>
+                  <td class="r">155</td>
+                  <td class="r"><span class="m-up">1.72</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #5</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">8</td>
+                  <td class="r">96.4%</td>
+                  <td class="r">300</td>
+                  <td class="r"><span class="m-off" title="Warming up: fewer than 10 samples, multiplier pinned at 1.00">1.00</span></td>
+                  <td class="muted">12:43:05</td>
+                </tr>
+                <tr>
+                  <td>Channel #6</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">37</td>
+                  <td class="r">88.1%</td>
+                  <td class="r">1221</td>
+                  <td class="r"><span class="m-down">0.50</span></td>
+                  <td class="muted">12:43:06</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="help">Multiplier: 1.0 = inactive (channel has no slot with concurrency_limit&gt;0, or under 10 samples while warming up); &gt;1 boosted, &lt;1 penalised, range [0.2, 5.0].</p>
+        </div>
+      </details>
+    </div>
+  </div>
+</section>
+<!-- ============ VARIANT E — Expression (dark-first console) ============ -->
+<section class="variant" id="variant-E" data-variant="E" aria-labelledby="hE">
+  <header class="vhead">
+    <span class="vcode" aria-hidden="true">E</span>
+    <div class="vmeta">
+      <h2 id="hE">Variant E — Semantic colour, console feel</h2>
+      <span class="axis">Axis · visual expression</span>
+      <p class="rationale">Same stack and order as today, but the page speaks in state colours: a full-weight verdict band, tinted status chips everywhere a number carries meaning, and 150–300ms ease-out micro-motion that respects prefers-reduced-motion.</p>
+    </div>
+  </header>
+  <div class="notes-wrap">
+    <h3 class="notes-title">Key differences</h3>
+    <ul class="notes">
+      <li><strong>Dark-first preview</strong>: this mock is pinned to the dark theme (the header toggle still controls A–D) because the console aesthetic is designed on the charcoal canvas; every semantic colour is checked against WCAG AA on both themes before shipping.</li>
+      <li><strong>Bold semantics</strong>: verdict band with 7px colour rail + tinted canvas; utilisation gets tone chips next to the bar (125% / 100% / 80% …); EWMA multipliers become filled chips (green boosted · grey warming · amber penalised); Live gets a pulsing status dot.</li>
+      <li><strong>Micro-motion</strong>: cards lift 2px on hover, badges/chips rise 1px, disclosure chevrons and progress bars ease 150–300ms — all disabled under <code>prefers-reduced-motion: reduce</code>.</li>
+      <li><span class="fix-tag">FIX #2</span>Window selector sits in the page header with an explicit scope note; the EWMA panel <strong>follows the window</strong> (window-scoped samples) and is labelled accordingly.</li>
+      <li><span class="fix-tag">FIX #1 / #3</span>Subtitle covers channels; Over-limit description matches the per-key / per-user siblings.</li>
+    </ul>
+  </div>
+
+  <div class="mock mock-forced-dark" data-theme="dark">
+    <div class="mockbar">
+      <span class="mocktag">Variant E · full page mock · forced dark preview</span>
+      <span>Window: Live · shared fixtures · light theme applies to A–D</span>
+    </div>
+    <div class="pg">
+
+      <div class="pg-head">
+        <div>
+          <h1 class="pg-title">Concurrency
+            <span class="badge badge-warning" title="Redis concurrency backend unavailable. Requests are being counted on local fallback buckets.">Redis degraded</span>
+          </h1>
+          <p class="sub">In-flight request counts per key, per user, and per channel. Refreshes every 3 seconds.</p>
+        </div>
+        <div class="pg-tools">
+          <span class="ctl-label">Window</span>
+          <button class="select" type="button" aria-haspopup="listbox">Live <span class="caret" aria-hidden="true">▾</span></button>
+          <span class="live-label"><span class="live-dot" aria-hidden="true"></span>streaming</span>
+          <span class="hint">Scope: KPI, trend, buckets and EWMA all follow this window</span>
+        </div>
+      </div>
+
+      <div class="verdict danger" role="status">
+        <span class="vicon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+        </span>
+        <div class="vbody">
+          <p class="vtitle">Action needed — Channel #6 over cap</p>
+          <p class="vtext">1 bucket over its configured cap (5/4 = 125%), 2 requests rejected in this window, 3 queued. Per-key and per-user caps are healthy; routing is penalising Channel #6 (multiplier 0.50, latency 1221ms).</p>
+        </div>
+        <div class="vchips">
+          <span class="vchip t-d">Over-limit 1</span>
+          <span class="vchip t-w">Rejected 2</span>
+          <span class="vchip t-w">Queued 3</span>
+          <span class="vchip t-s">Degraded none</span>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Total in-flight requests</span>
+            <span class="stat-ico tint1" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span>
+          </div>
+          <p class="stat-val">7</p>
+          <p class="stat-desc">Unique in-flight requests across every active user bucket.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Configured concurrency caps</span>
+            <span class="stat-ico tint2" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg></span>
+          </div>
+          <p class="stat-val">29</p>
+          <p class="stat-desc">Sum of explicit per-key / per-user caps (unlimited scopes excluded).</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Average utilisation</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg></span>
+          </div>
+          <p class="stat-val">24%</p>
+          <p class="stat-desc">Mean of capped-bucket utilisation. 0% means no caps are currently in use.</p>
+        </div>
+        <div class="stat">
+          <div class="stat-top">
+            <span class="stat-title">Over-limit scopes</span>
+            <span class="stat-ico tint3" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+          </div>
+          <p class="stat-val">1</p>
+          <p class="stat-desc">Number of per-key / per-user buckets currently exceeding their configured cap.</p>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-hd">
+            <div class="card-tools">
+              <h3 class="card-title">Bounded wait queue <span class="badge badge-success">Enabled</span></h3>
+            </div>
+            <div class="meta"><span>Queued: 3</span></div>
+          </div>
+          <div class="card-bd">
+            <div class="field-row">
+              <div class="switch-field">
+                <div class="txt">
+                  <span class="lbl">Enable queueing</span>
+                  <span class="help">When disabled, requests beyond the concurrency limit are rejected immediately with 429.</span>
+                </div>
+                <button class="switch" type="button" role="switch" aria-checked="true" aria-label="Enable queueing"><i aria-hidden="true"></i></button>
+              </div>
+              <div class="grid-3">
+                <div class="field">
+                  <label class="lbl" for="qe1">Depth ratio</label>
+                  <input class="input" id="qe1" type="number" value="4" min="0" max="64" step="1">
+                  <span class="help">This multiple of the concurrency limit. 0 to 64.</span>
+                </div>
+                <div class="field">
+                  <label class="lbl" for="qe2">Depth cap</label>
+                  <input class="input" id="qe2" type="number" value="128" min="1" max="1024" step="1">
+                  <span class="help">Upper bound per bucket. 1 to 1024.</span>
+                </div>
+                <div class="field">
+                  <label class="lbl" for="qe3">Max wait</label>
+                  <input class="input" id="qe3" type="number" value="10" min="0" max="60" step="1">
+                  <span class="help">Wait before a 429. 0 to 60 seconds.</span>
+                </div>
+              </div>
+              <div class="btn-row end">
+                <button class="btn btn-primary" type="button">Save queue settings</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-hd">
+            <h3 class="card-title">In-flight trend</h3>
+            <div class="meta"><span>Rejected in window: 2</span></div>
+          </div>
+          <div class="card-bd">
+            <svg class="chart" viewBox="0 0 760 220" role="img" aria-label="In-flight trend, 40 samples: rises from 0 to a peak of 18 and settles at 3, with 2 rejections marked"><use href="#trendSym"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <div class="card-tools">
+            <h3 class="card-title">Active concurrency buckets</h3>
+            <span class="badge badge-destructive">1 over cap</span>
+          </div>
+          <span class="hint">Sorted by utilisation, hottest first</span>
+        </div>
+        <div class="card-bd">
+          <div class="tbl-wrap">
+            <table class="tbl sticky">
+              <caption class="sr-only">Active concurrency buckets with subject, model, current over limit and utilisation</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Scope</th>
+                  <th scope="col">Subject</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Current / limit</th>
+                  <th scope="col">Utilisation</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><span class="mono">ch#6</span></td>
+                  <td>Channel #6</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">5 / 4</td>
+                  <td><span class="util"><span class="prog d"><i style="width:100%"></i></span><span class="pchip d">125%</span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#3</span></td>
+                  <td>Channel #3</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">4 / 4</td>
+                  <td><span class="util"><span class="prog w"><i style="width:100%"></i></span><span class="pchip w">100%</span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#7</span></td>
+                  <td>Key #7</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">12 / 15</td>
+                  <td><span class="util"><span class="prog"><i style="width:80%"></i></span><span class="pchip h">80%</span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">ch#9</span></td>
+                  <td>Channel #9</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">3 / 4</td>
+                  <td><span class="util"><span class="prog"><i style="width:75%"></i></span><span class="pchip h">75%</span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">user#1</span></td>
+                  <td>User #1</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">7 / 10</td>
+                  <td><span class="util"><span class="prog"><i style="width:70%"></i></span><span class="pchip h">70%</span></span></td>
+                </tr>
+                <tr>
+                  <td><span class="mono">key#5</span></td>
+                  <td>Key #5</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">0 / ∞</td>
+                  <td><span class="unlimited">unlimited</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <div class="card-tools">
+            <h3 class="card-title">Channel load (EWMA routing)</h3>
+            <span class="badge badge-outline" title="Follows the page window selector: samples are scoped to the selected window.">Follows window</span>
+            <span class="live-label"><span class="live-dot" aria-hidden="true"></span>3s poll</span>
+          </div>
+        </div>
+        <div class="card-bd">
+          <div class="tbl-wrap">
+            <table class="tbl">
+              <caption class="sr-only">Channel load with EWMA samples, success rate, latency, multiplier and last sample time</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Channel</th>
+                  <th scope="col">Model</th>
+                  <th scope="col" class="r">Samples</th>
+                  <th scope="col" class="r">Success rate</th>
+                  <th scope="col" class="r">Latency EWMA (ms)</th>
+                  <th scope="col" class="r">Multiplier</th>
+                  <th scope="col">Last sample</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Channel #3</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">28</td>
+                  <td class="r">100.0%</td>
+                  <td class="r">161</td>
+                  <td class="r"><span class="mchip up">2.00</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #4</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">16</td>
+                  <td class="r">99.2%</td>
+                  <td class="r">155</td>
+                  <td class="r"><span class="mchip up">1.72</span></td>
+                  <td class="muted">12:43:07</td>
+                </tr>
+                <tr>
+                  <td>Channel #5</td>
+                  <td><span class="mono">Qwen3.6-35B</span></td>
+                  <td class="r">8</td>
+                  <td class="r">96.4%</td>
+                  <td class="r">300</td>
+                  <td class="r"><span class="mchip off" title="Warming up: fewer than 10 samples, multiplier pinned at 1.00">1.00</span></td>
+                  <td class="muted">12:43:05</td>
+                </tr>
+                <tr>
+                  <td>Channel #6</td>
+                  <td><span class="mono">gpt-4o-mini</span></td>
+                  <td class="r">37</td>
+                  <td class="r">88.1%</td>
+                  <td class="r">1221</td>
+                  <td class="r"><span class="mchip down">0.50</span></td>
+                  <td class="muted">12:43:06</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="help" style="margin-top:0.5rem">Multiplier: 1.0 = inactive (channel has no slot with concurrency_limit&gt;0, or under 10 samples while warming up); &gt;1 boosted, &lt;1 penalised, range [0.2, 5.0].</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  Self-contained design-review artifact for the /concurrency redesign · all fixtures shared across A–E · no external fonts, scripts or styles · generated for variant selection, not shipped as product code.
+</footer>
+
+<script>
+/* Tabs (Variant B): click + arrow-key navigation, WAI-ARIA tab pattern. */
+document.querySelectorAll('[data-tabgroup]').forEach(function (group) {
+  var tabs = Array.prototype.slice.call(group.querySelectorAll('[role="tab"]'));
+  function select(tab) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      t.tabIndex = on ? 0 : -1;
+      var panel = document.getElementById(t.getAttribute('aria-controls'));
+      if (panel) panel.hidden = !on;
+    });
+  }
+  tabs.forEach(function (tab, i) {
+    tab.addEventListener('click', function () { select(tab); });
+    tab.addEventListener('keydown', function (e) {
+      var next = null;
+      if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+      if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+      if (e.key === 'Home') next = tabs[0];
+      if (e.key === 'End') next = tabs[tabs.length - 1];
+      if (next) { e.preventDefault(); select(next); next.focus(); }
+    });
+  });
+});
+
+/* Theme toggle. */
+(function () {
+  var btn = document.getElementById('themeToggle');
+  var label = document.getElementById('themeToggleLabel');
+  function sync() {
+    var theme = document.documentElement.getAttribute('data-theme') || 'light';
+    var next = theme === 'dark' ? 'light' : 'dark';
+    label.textContent = next === 'dark' ? 'Dark theme' : 'Light theme';
+    btn.setAttribute('aria-pressed', theme === 'dark' ? 'true' : 'false');
+    btn.setAttribute('aria-label', 'Switch to ' + next + ' theme');
+  }
+  btn.addEventListener('click', function () {
+    var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+    try { localStorage.setItem('cc-variant-theme', theme); } catch (e) { /* storage unavailable */ }
+    sync();
+  });
+  sync();
+})();
+</script>
+</body>
+</html>

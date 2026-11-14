@@ -2,6 +2,9 @@ package model
 
 import (
 	"errors"
+	"fmt"
+	"math/rand"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -105,12 +108,24 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
+// GetChannel is the !MemoryCacheEnabled database fallback of
+// GetRandomSatisfiedChannel. excluded mirrors the cache path's per-request
+// saturation exclusion (BCD D-3 option A): excluded channel ids are dropped
+// from the ability candidates AFTER the request-filter pass and BEFORE the
+// priority list is built, so the layer mapping and its retry clamp fall back
+// over the remaining candidates and a saturated channel is never returned.
+// An empty excluded list keeps the selection byte-for-byte as before.
 func GetChannel(
 	group string,
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	excluded ...int,
 ) (*Channel, error) {
+	// RTE-01 (02-17): refresh the dynamic effective-weight multipliers at the
+	// database-path entry, same as the cache path (never under channelSyncLock).
+	maybeRecomputeChannelRouting()
+
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
@@ -126,10 +141,30 @@ func GetChannel(
 		}
 		abilities = filterAbilitiesByConstraints(abilities, model, filters)
 	}
+	// Saturation exclusion: dropped AFTER the request-filter pass and BEFORE
+	// the priority list is built, so the layer mapping and its retry clamp stay
+	// aligned to the full priority tier list and a saturated channel is never
+	// returned. Mirrors the cache path in model/channel_cache.go.
+	if len(excluded) > 0 {
+		kept := make([]Ability, 0, len(abilities))
+		for _, ability := range abilities {
+			if !slices.Contains(excluded, ability.ChannelId) {
+				kept = append(kept, ability)
+			}
+		}
+		abilities = kept
+	}
 	if len(abilities) > 0 {
+		// originalAbilities captures the pre-exclusion ability set so the
+		// priority list (and the retry clamp) stay aligned to the full priority
+		// tier list even when the highest tier is excluded. Mirrors the cache
+		// path in model/channel_cache.go: the DB fallback must not skip
+		// intermediate priority tiers when retry=N.
+		originalAbilities := make([]Ability, len(abilities))
+		copy(originalAbilities, abilities)
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
-		for _, ability := range abilities {
+		for _, ability := range originalAbilities {
 			priority := int64(0)
 			if ability.Priority != nil {
 				priority = *ability.Priority
@@ -140,27 +175,58 @@ func GetChannel(
 			}
 		}
 		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		// Retry index is clamped against the ORIGINAL priority tier count so
+		// the retry progression stays anchored to the pre-exclusion ranking.
+		// Mirrors the cache path in model/channel_cache.go: the DB fallback
+		// must not skip intermediate priority tiers when retry=N.
 		if retry >= len(priorities) {
 			retry = len(priorities) - 1
 		}
-		targetPriority := priorities[retry]
-		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
-			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
-		})
+		// Fallback: if every channel in the targeted tier was excluded, drop
+		// down to the next surviving tier. Mirrors the cache path.
+		var remainingAbilities []Ability
+		for tierIdx := retry; tierIdx < len(priorities); tierIdx++ {
+			candidatePriority := priorities[tierIdx]
+			kept := lo.Filter(abilities, func(ability Ability, _ int) bool {
+				return ability.Priority == nil && candidatePriority == 0 || ability.Priority != nil && *ability.Priority == candidatePriority
+			})
+			if len(kept) > 0 {
+				remainingAbilities = kept
+				break
+			}
+		}
+		if remainingAbilities == nil {
+			// Every tier in sorted order is fully excluded. Mirror the cache
+			// path: the production relay loop reaches this only when the
+			// per-request exclusion set already covers every candidate, which
+			// the relay classifies as "all channels saturated" upstream.
+			return nil, nil
+		}
+		abilities = remainingAbilities
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
+		// Randomly choose one. RTE-01 (02-17): the DB-path base
+		// (Ability.Weight+10) is scaled by the candidate's recomputed EWMA
+		// multiplier — the same dynamic effective weight the cache path
+		// consumes. With every multiplier at 1.0 (the degraded default) the
+		// float arithmetic is bit-for-bit the previous integer arithmetic, so
+		// the status-quo selection is preserved exactly.
+		weightSum := 0.0
 		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
+			weightSum += channelEffectiveRoutingWeight(float64(ability_.Weight)+10, ability_.ChannelId, model)
 		}
 		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
+		weight := rand.Float64() * weightSum
+		for i, ability_ := range abilities {
+			weight -= channelEffectiveRoutingWeight(float64(ability_.Weight)+10, ability_.ChannelId, model)
 			if weight <= 0 {
+				channel.Id = ability_.ChannelId
+				break
+			}
+			if i == len(abilities)-1 {
+				// Floating-point dust guard: r < weightSum guarantees a pick;
+				// only accumulation rounding could leave a hair above zero here.
 				channel.Id = ability_.ChannelId
 				break
 			}
@@ -362,6 +428,48 @@ func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uin
 }
 
 var fixLock = sync.Mutex{}
+
+// EnsureChannelAbilities restores the routing index for enabled channels that
+// have no ability rows at all, without touching the rows that already exist.
+//
+// The routing index IS the ability table (model/channel_cache.go
+// InitChannelCache), and the write paths keep the two in sync — but not
+// atomically: Channel.Insert commits the channel row before AddAbilities, and
+// EditChannelByTag swallows an UpdateAbilities failure (model/channel.go:943).
+// A swallowed error therefore leaves an enabled channel permanently unroutable
+// with no other symptom.
+//
+// FixAbility would repair that by TRUNCATE-then-rebuild, which is the wrong tool
+// for startup: it drops and recreates every row, so on a multi-node deployment
+// each node's rebuild races the others and briefly empties the live index. This
+// only adds what is missing, and AddAbilities upserts with OnConflict
+// DoNothing, so concurrent nodes converge on the same rows.
+//
+// Returns the number of channels repaired and the number that failed.
+func EnsureChannelAbilities() (int, int, error) {
+	var orphaned []Channel
+	err := DB.Where("status = ?", common.ChannelStatusEnabled).
+		Where("NOT EXISTS (SELECT 1 FROM abilities WHERE abilities.channel_id = channels.id)").
+		Find(&orphaned).Error
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(orphaned) == 0 {
+		return 0, 0, nil
+	}
+	common.SysLog(fmt.Sprintf("EnsureChannelAbilities: repairing %d channel(s) missing ability rows", len(orphaned)))
+	repaired, failed := 0, 0
+	for idx := range orphaned {
+		if err := orphaned[idx].AddAbilities(nil); err != nil {
+			failed++
+			common.SysError(fmt.Sprintf("EnsureChannelAbilities: failed to rebuild abilities for channel #%d: %v",
+				orphaned[idx].Id, err))
+			continue
+		}
+		repaired++
+	}
+	return repaired, failed, nil
+}
 
 func FixAbility() (int, int, error) {
 	lock := fixLock.TryLock()

@@ -24,6 +24,7 @@ import {
   CreditCard,
   FileText,
   FlaskConical,
+  Gauge,
   Key,
   LayoutDashboard,
   ListTodo,
@@ -168,6 +169,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             title: t('Product Management'),
             url: '/app-products',
             icon: ShoppingBag,
+          },
+          {
+            title: t('Concurrency'),
+            url: '/concurrency',
+            icon: Gauge,
+            requiredRole: ROLE.ADMIN,
           },
           {
             title: t('System Info'),

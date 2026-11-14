@@ -40,7 +40,7 @@ import {
 } from '../lib/utils'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
-import { useUsageLogsContext } from './usage-logs-provider'
+import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 type FieldName =
   | 'model'
@@ -64,6 +64,7 @@ export function CommonLogMobileCard<TData>(props: {
 }) {
   const { t } = useTranslation()
   const context = useUsageLogsContext()
+  const { isAdminView } = useLogsViewScope()
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = parseLogOther(log.other)
@@ -209,6 +210,9 @@ export function CommonLogMobileCard<TData>(props: {
                   completionTokens={log.completion_tokens}
                   frtMs={other?.frt}
                   isStream={log.is_stream}
+                  // Admin-only latency breakdown; the backend already strips
+                  // admin_info for non-admins.
+                  timing={isAdminView ? other?.admin_info?.timing : undefined}
                   indicator='dot'
                   compact
                   className='min-h-6 max-w-full min-w-0 items-center justify-end [&>div]:justify-end'

@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
@@ -40,7 +41,7 @@ func setupRelayChannelDB(t *testing.T) *gorm.DB {
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}))
+	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Task{}))
 	model.DB = database
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	common.MemoryCacheEnabled = false
@@ -181,6 +182,100 @@ func TestApplyChannelPinPreservesOriginTasksAndRetryMode(t *testing.T) {
 	}
 }
 
+// The audio task retrieve endpoint resolves the stored task, picks the plugin
+// adaptor by platform, and answers with the host-owned transcription object.
+func TestRelayTaskFetchRendersAudioTranscriptionTask(t *testing.T) {
+	database := setupRelayChannelDB(t)
+	plugin, err := pluginruntime.DefaultRegistry.Register(relayAudioTaskPluginSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pluginruntime.DefaultRegistry.Unregister(plugin.Meta.Key)) })
+
+	task := &model.Task{
+		TaskID:     "task_audio_public",
+		Platform:   constant.TaskPlatform(plugin.Meta.Key),
+		UserId:     91,
+		Status:     model.TaskStatusSuccess,
+		Progress:   "100%",
+		CreatedAt:  1710000000,
+		FinishTime: 1710000060,
+		Properties: model.Properties{OriginModelName: "mock-asr"},
+	}
+	require.NoError(t, database.Create(task).Error)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/audio/transcriptions/tasks/task_audio_public", nil)
+	c.Params = gin.Params{{Key: "task_id", Value: "task_audio_public"}}
+	c.Set("id", 91)
+
+	require.Nil(t, RelayTaskFetch(c, relayconstant.RelayModeAudioTaskFetchByID))
+
+	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "task_audio_public", response["id"])
+	assert.Equal(t, "audio.transcription", response["object"])
+	assert.Equal(t, "succeeded", response["status"])
+	assert.Equal(t, "mock-asr", response["model"])
+	assert.Equal(t, "你好", response["text"])
+	assert.Equal(t, float64(8), response["duration"])
+	assert.Equal(t, float64(1710000000), response["created_at"])
+	assert.Equal(t, float64(1710000060), response["completed_at"])
+}
+
+// Submission renders the accepted task through the same renderer retrieval
+// uses, so a client parses the create response and later polls with one shape.
+// A pending task contributes no transcription payload of its own, which is what
+// makes the two responses identical apart from the payload.
+func TestRenderOpenAIAudioTaskPendingShapeMatchesRetrieval(t *testing.T) {
+	plugin, err := pluginruntime.DefaultRegistry.Register(relayAudioTaskPluginSource, pluginruntime.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, pluginruntime.DefaultRegistry.Unregister(plugin.Meta.Key)) })
+
+	task := &model.Task{
+		TaskID:     "task_audio_pending",
+		Platform:   constant.TaskPlatform(plugin.Meta.Key),
+		Status:     model.TaskStatusNotStart,
+		CreatedAt:  1710000000,
+		Properties: model.Properties{OriginModelName: "mock-asr"},
+	}
+
+	body, taskErr := RenderOpenAIAudioTask(task)
+	require.Nil(t, taskErr)
+
+	var response map[string]any
+	require.NoError(t, common.Unmarshal(body, &response))
+	assert.Equal(t, "task_audio_pending", response["id"])
+	assert.Equal(t, "audio.transcription", response["object"])
+	assert.Equal(t, "queued", response["status"])
+	assert.Equal(t, float64(0), response["progress"])
+	assert.Equal(t, "mock-asr", response["model"])
+	assert.Equal(t, float64(1710000000), response["created_at"])
+	assert.NotContains(t, response, "task_id")
+	assert.NotContains(t, response, "completed_at")
+	assert.NotContains(t, response, "text", "a pending task carries no transcription payload")
+}
+
+const relayAudioTaskPluginSource = `
+export const meta = {
+  apiVersion: 1, key: "audio-fetch-e2e", name: "Audio Fetch E2E", version: "1.0.0",
+  author: {name: "Test"},
+  models: ["mock-asr"], fetchMode: "per_task",
+  protocols: ["openai_audio"],
+};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+export const protocols = {openai_audio: {
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+  render: function(_ctx, task) {
+    if (String(task.status).toUpperCase() !== "SUCCESS") return {};
+    return {text: "你好", duration: 8, segments: [{id: 0, start: 0.42, end: 7.98, text: "你好"}], language: ""};
+  }
+}};
+`
+
 func TestTaskModel2DtoNormalizesLegacyAction(t *testing.T) {
 	task := &model.Task{Action: "firstTailGenerate"}
 
@@ -210,6 +305,20 @@ export function buildQueryRequest(){return {url:"https://provider.example"};}
 export function parseTaskResult(){return {status:"SUCCESS"};}
 `
 
+// audioEndpointPlugin claims the openai_audio host protocol, so it can serve
+// the asynchronous audio transcription endpoint.
+const audioEndpointPlugin = `
+export const meta = {apiVersion:1,key:"audio-endpoint",name:"Audio Endpoint",version:"1.0.0",author:{name:"Test"},models:["audio-model"],fetchMode:"per_task",protocols:["openai_audio"]};
+export function buildSubmitRequest(ctx) { return {url: ctx.baseUrl+"/submit", method:"POST"}; }
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(){return {url:"https://provider.example"};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+export const protocols = {openai_audio: {
+  decodeRequest: function(ctx) { return {kind: "submit", model: ctx.model, requestBody: ctx.body.value}; },
+  render: function() { return {status: "succeeded", text: "ok", duration: 1, segments: [], language: ""}; }
+}};
+`
+
 func pinMappingOrderPlugin(t *testing.T, c *gin.Context, source string) {
 	t.Helper()
 	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
@@ -231,6 +340,69 @@ func newTaskSubmitContext(t *testing.T, originalModel, mapping string) (*gin.Con
 	}
 	c.Set("task_request", map[string]any{"prompt": "p"})
 	return c, &relaycommon.RelayInfo{TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+}
+
+// newAudioTaskSubmitContext builds the context of a submission to the
+// asynchronous audio transcription endpoint. Unlike the video endpoint, this
+// one has no non-plugin fallback, so a request that reaches it without a
+// plugin claiming openai_audio has to be rejected on the model.
+func newAudioTaskSubmitContext(t *testing.T, originalModel string) (*gin.Context, *relaycommon.RelayInfo) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions/tasks", nil)
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, originalModel)
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://provider.example")
+	return c, &relaycommon.RelayInfo{
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
+		RelayMode:     relayconstant.RelayModeAudioTaskSubmit,
+	}
+}
+
+func TestRelayTaskSubmitRejectsAudioEndpointWithoutAudioPlugin(t *testing.T) {
+	c, info := newAudioTaskSubmitContext(t, "other-provider-model")
+	// A plugin that serves a different task shape, reached because the
+	// selected channel advertises the model for that provider.
+	pinMappingOrderPlugin(t, c, mappingOrderSubmitPlugin)
+	info.OriginModelName = "other-provider-model"
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	require.NotNil(t, taskErr)
+	assert.Equal(t, "model_not_found", taskErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, taskErr.StatusCode)
+	assert.Contains(t, taskErr.Message, "other-provider-model")
+	assert.NotContains(t, taskErr.Message, "prompt")
+}
+
+func TestRelayTaskSubmitKeepsAudioEndpointWithAudioPlugin(t *testing.T) {
+	c, info := newAudioTaskSubmitContext(t, "audio-model")
+	pinMappingOrderPlugin(t, c, audioEndpointPlugin)
+	info.OriginModelName = "audio-model"
+	c.Set("task_request", map[string]any{"model": "audio-model"})
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	// The plugin serves the protocol, so the request is not rejected on the
+	// model and continues into the usual task validation and billing.
+	require.NotNil(t, taskErr)
+	assert.NotEqual(t, "model_not_found", taskErr.Code)
+}
+
+func TestRelayTaskSubmitLeavesOtherTaskEndpointsAlone(t *testing.T) {
+	c, info := newTaskSubmitContext(t, "declared-model", "")
+	pinMappingOrderPlugin(t, c, mappingOrderSubmitPlugin)
+	info.OriginModelName = "declared-model"
+	info.RelayMode = relayconstant.RelayModeVideoSubmit
+
+	_, taskErr := RelayTaskSubmit(c, info)
+
+	// A video endpoint request on a plugin without openai_audio is unchanged:
+	// only the audio endpoint has no fallback that could serve it.
+	require.NotNil(t, taskErr)
+	assert.NotEqual(t, "model_not_found", taskErr.Code)
 }
 
 func TestRelayTaskSubmitMapsBeforeValidateWhenOriginSet(t *testing.T) {

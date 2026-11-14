@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -84,17 +85,21 @@ redis.call('HSET', KEYS[1],
   'Id', ARGV[2], 'Group', ARGV[3], 'Email', ARGV[4],
   'Status', ARGV[5], 'Role', ARGV[6], 'Username', ARGV[7],
   'Setting', ARGV[8], 'AuthVersion', ARGV[1], 'CacheSchema', ARGV[9],
-  'CacheExpiresAt', ARGV[13], 'CacheMAC', ARGV[14])
+  'ConcurrencyLimit', ARGV[13], 'CacheExpiresAt', ARGV[14], 'CacheMAC', ARGV[15])
 if ARGV[10] == '1' and not string.match(redis.call('HGET', KEYS[1], 'Quota') or '', '^-?%d+$') then
   redis.call('HSET', KEYS[1], 'Quota', ARGV[11])
 end
 redis.call('EXPIRE', KEYS[1], ARGV[12])
 return 1`
+	// ARGV layout: [1]=AuthVersion, [2..9]=identity fields + CacheSchema,
+	// [10]=includeQuota flag, [11]=Quota, [12]=TTL — all pinned in place;
+	// [13]=ConcurrencyLimit (USR-03 full rewrite on admin save, so a cache hit
+	// never serves a stale limit), [14]=CacheExpiresAt, [15]=CacheMAC.
 	result, err := common.RDB.Eval(context.Background(), script,
 		[]string{getUserCacheKey(user.Id), getUserAuthFenceKey(user.Id), getUserAuthVersionKey(user.Id)},
 		user.AuthVersion, user.Id, user.Group, user.Email, user.Status, user.Role,
 		user.Username, user.Setting, user.CacheSchema, includeQuotaArg, user.Quota, ttl,
-		user.CacheExpiresAt, mac,
+		user.ConcurrencyLimit, user.CacheExpiresAt, mac,
 	).Int()
 	if err != nil {
 		return err
@@ -268,4 +273,121 @@ func PublishUserAuthCache(userId int) error {
 // existing database. It is idempotent and portable across all supported DBs.
 func InitializeUserAuthVersions() error {
 	return DB.Model(&User{}).Where("auth_version IS NULL OR auth_version < ?", 1).Update("auth_version", 1).Error
+}
+
+// updateUserCacheFieldAtVersion writes a single user cache field without
+// rebuilding the whole hash. The cache MAC covers every field of the hash, so
+// the write must re-sign the hash it changes: the new expiry and MAC are
+// computed from the snapshot the field value is applied to, and the script
+// writes field, expiry and MAC together, so the hash never carries a stale
+// signature.
+//
+// A hash whose CacheSchema predates the current field set is left untouched:
+// the read gate rejects it forever, so stamping the current schema onto it
+// would carry it past the gate while the new fields are still missing,
+// decoding them as 0=unlimited (fail-open, CR-01). The read path re-primes
+// the full field set from the database instead.
+func updateUserCacheFieldAtVersion(userId int, field string, value any, authVersion int64) error {
+	if !common.RedisEnabled {
+		return nil
+	}
+	if userId <= 0 || authVersion <= 0 {
+		return fmt.Errorf("invalid user auth version")
+	}
+	exists, err := common.RDB.Exists(context.Background(), getUserCacheKey(userId)).Result()
+	if err != nil {
+		return err
+	}
+	if exists == 0 {
+		return nil
+	}
+	var current UserBase
+	if err := common.RedisHGetObj(getUserCacheKey(userId), &current); err != nil {
+		return err
+	}
+	if current.Id != userId || current.CacheSchema != userCacheSchemaVersion {
+		// Legacy hash: skip the partial write, the read path re-primes it.
+		return nil
+	}
+	if err := applyUserCacheField(&current, field, value); err != nil {
+		return err
+	}
+	ttl := userCacheTTLSeconds()
+	current.CacheExpiresAt = time.Now().Add(time.Duration(ttl) * time.Second).UnixMilli()
+	mac, err := current.cacheMAC()
+	if err != nil {
+		return err
+	}
+	const script = `
+local incoming = tonumber(ARGV[1])
+local pending = tonumber(redis.call('GET', KEYS[2]) or '0')
+local committed = tonumber(redis.call('GET', KEYS[3]) or '0')
+local current = tonumber(redis.call('HGET', KEYS[1], 'AuthVersion') or '0')
+if pending > incoming or committed > incoming or current > incoming then
+  return 0
+end
+if committed < incoming then
+  redis.call('SET', KEYS[3], ARGV[1])
+end
+if pending > 0 and pending <= incoming then
+  redis.call('DEL', KEYS[2])
+end
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return 1
+end
+if current ~= incoming then
+  return 1
+end
+-- A schema mismatch means this hash predates the current field set (e.g. a
+-- legacy hash with no ConcurrencyLimit). Stamping the current CacheSchema
+-- would carry it past the read gate while the new fields are still missing,
+-- decoding them as 0=unlimited (fail-open). Skip the write instead: the hash
+-- stays stale, the gate keeps rejecting it, and the read path re-primes the
+-- full field set from the database (CR-01).
+if redis.call('HGET', KEYS[1], 'CacheSchema') ~= ARGV[4] then
+  return 1
+end
+redis.call('HSET', KEYS[1], ARGV[2], ARGV[3], 'CacheExpiresAt', ARGV[5], 'CacheMAC', ARGV[6])
+return 1`
+	result, err := common.RDB.Eval(context.Background(), script,
+		[]string{getUserCacheKey(userId), getUserAuthFenceKey(userId), getUserAuthVersionKey(userId)},
+		authVersion, field, value, userCacheSchemaVersion, current.CacheExpiresAt, mac,
+	).Int()
+	if err != nil {
+		return err
+	}
+	if result == 0 {
+		return ErrUserAuthCachePending
+	}
+	return nil
+}
+
+// applyUserCacheField applies one cache field value to the snapshot the MAC
+// is computed from. The Redis hash field names are the Go field names, so the
+// caller names a UserBase field directly.
+func applyUserCacheField(user *UserBase, field string, value any) error {
+	target := reflect.ValueOf(user).Elem().FieldByName(field)
+	if !target.IsValid() || !target.CanSet() {
+		return fmt.Errorf("unknown user cache field %q", field)
+	}
+	text := fmt.Sprintf("%v", value)
+	switch target.Kind() {
+	case reflect.String:
+		target.SetString(text)
+	case reflect.Int, reflect.Int64:
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			return err
+		}
+		target.SetInt(parsed)
+	case reflect.Bool:
+		parsed, err := strconv.ParseBool(text)
+		if err != nil {
+			return err
+		}
+		target.SetBool(parsed)
+	default:
+		return fmt.Errorf("unsupported user cache field type for %q", field)
+	}
+	return nil
 }

@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -404,7 +406,7 @@ func TestBuildTaskPluginRouteRequestBodyUnion(t *testing.T) {
 			if testCase.contentType != "" {
 				c.Request.Header.Set("Content-Type", testCase.contentType)
 			}
-			requestContext, err := buildTaskPluginRouteRequest(c)
+			requestContext, err := buildTaskPluginRouteRequest(c, false)
 			require.NoError(t, err)
 			decodedBody := requestContext.Body.(map[string]any)
 			assert.Equal(t, string(testCase.kind), decodedBody["kind"])
@@ -426,7 +428,7 @@ func TestBuildTaskPluginRouteRequestBodyUnion(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(multipartBody.Bytes()))
 	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-	requestContext, err := buildTaskPluginRouteRequest(c)
+	requestContext, err := buildTaskPluginRouteRequest(c, false)
 	require.NoError(t, err)
 	decodedBody := requestContext.Body.(map[string]any)
 	assert.Equal(t, string(jsplugin.BodyMultipart), decodedBody["kind"])
@@ -435,6 +437,96 @@ func TestBuildTaskPluginRouteRequestBodyUnion(t *testing.T) {
 	require.Len(t, files, 1)
 	assert.Equal(t, "image.png", files[0]["filename"])
 	assert.NotContains(t, fmt.Sprint(files[0]), "file bytes stay in Go")
+}
+
+// taskPluginTestWAV builds a PCM wav file the host duration parser accepts.
+func taskPluginTestWAV(sampleRate, seconds int) []byte {
+	dataSize := sampleRate * seconds * 2
+	buffer := &bytes.Buffer{}
+	buffer.WriteString("RIFF")
+	_ = binary.Write(buffer, binary.LittleEndian, uint32(36+dataSize))
+	buffer.WriteString("WAVE")
+	buffer.WriteString("fmt ")
+	_ = binary.Write(buffer, binary.LittleEndian, uint32(16))
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(1))
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(1))
+	_ = binary.Write(buffer, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(buffer, binary.LittleEndian, uint32(sampleRate*2))
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(2))
+	_ = binary.Write(buffer, binary.LittleEndian, uint16(16))
+	buffer.WriteString("data")
+	_ = binary.Write(buffer, binary.LittleEndian, uint32(dataSize))
+	buffer.Write(make([]byte, dataSize))
+	return buffer.Bytes()
+}
+
+func TestBuildTaskPluginRouteRequestMeasuresMediaDuration(t *testing.T) {
+	buildRequest := func(t *testing.T, filename string, content []byte) *gin.Context {
+		t.Helper()
+		var multipartBody bytes.Buffer
+		writer := multipart.NewWriter(&multipartBody)
+		require.NoError(t, writer.WriteField("model", "m"))
+		file, err := writer.CreateFormFile("file", filename)
+		require.NoError(t, err)
+		_, err = file.Write(content)
+		require.NoError(t, err)
+		require.NoError(t, writer.Close())
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(multipartBody.Bytes()))
+		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+		return c
+	}
+	filesOf := func(t *testing.T, requestContext jsplugin.RouteRequestContext) []map[string]any {
+		t.Helper()
+		files, ok := requestContext.Body.(map[string]any)["files"].([]map[string]any)
+		require.True(t, ok)
+		return files
+	}
+
+	measured, err := buildTaskPluginRouteRequest(buildRequest(t, "audio.wav", taskPluginTestWAV(8000, 2)), true)
+	require.NoError(t, err)
+	files := filesOf(t, measured)
+	require.Len(t, files, 1)
+	assert.InDelta(t, 2.0, files[0]["durationSeconds"], 0.001)
+
+	// A plugin that does not declare the capability must not pay for the
+	// measurement.
+	unmeasured, err := buildTaskPluginRouteRequest(buildRequest(t, "audio.wav", taskPluginTestWAV(8000, 2)), false)
+	require.NoError(t, err)
+	files = filesOf(t, unmeasured)
+	require.Len(t, files, 1)
+	assert.NotContains(t, files[0], "durationSeconds")
+
+	// A format the host cannot measure is billed at the largest billable
+	// duration instead of zero, so the request still passes the balance check.
+	unsupported, err := buildTaskPluginRouteRequest(buildRequest(t, "audio.pcm", []byte("raw samples")), true)
+	require.NoError(t, err)
+	files = filesOf(t, unsupported)
+	require.Len(t, files, 1)
+	assert.Equal(t, float64(relaycommon.MaxTaskDurationSeconds), files[0]["durationSeconds"])
+
+	// A file uploaded without an extension is still measurable when the part
+	// carries the media type: clients commonly omit the extension, and treating
+	// the file as unmeasurable would reserve the full ceiling for a 2s clip.
+	var typedBody bytes.Buffer
+	typedWriter := multipart.NewWriter(&typedBody)
+	require.NoError(t, typedWriter.WriteField("model", "m"))
+	partHeader := make(textproto.MIMEHeader)
+	partHeader.Set("Content-Disposition", `form-data; name="file"; filename="audio"`)
+	partHeader.Set("Content-Type", "audio/wav")
+	part, err := typedWriter.CreatePart(partHeader)
+	require.NoError(t, err)
+	_, err = part.Write(taskPluginTestWAV(8000, 2))
+	require.NoError(t, err)
+	require.NoError(t, typedWriter.Close())
+	typedContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	typedContext.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(typedBody.Bytes()))
+	typedContext.Request.Header.Set("Content-Type", typedWriter.FormDataContentType())
+	typed, err := buildTaskPluginRouteRequest(typedContext, true)
+	require.NoError(t, err)
+	files = filesOf(t, typed)
+	require.Len(t, files, 1)
+	assert.InDelta(t, 2.0, files[0]["durationSeconds"], 0.001)
 }
 
 func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
@@ -454,7 +546,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(testCase.body))
 			c.Request.Header.Set("Content-Type", testCase.contentType)
-			_, err := buildTaskPluginRouteRequest(c)
+			_, err := buildTaskPluginRouteRequest(c, false)
 			require.ErrorContains(t, err, testCase.errorText)
 		})
 	}
@@ -463,7 +555,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/body", strings.NewReader(`{}`))
 		c.Request.Header["Content-Type"] = []string{"application/json", "application/x-www-form-urlencoded"}
-		_, err := buildTaskPluginRouteRequest(c)
+		_, err := buildTaskPluginRouteRequest(c, false)
 		require.ErrorContains(t, err, "conflicting Content-Type")
 	})
 
@@ -474,7 +566,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/body", strings.NewReader(strings.Repeat(" ", (1<<20)+1)))
 		c.Request.Header.Set("Content-Type", "application/json")
-		_, err := buildTaskPluginRouteRequest(c)
+		_, err := buildTaskPluginRouteRequest(c, false)
 		require.ErrorContains(t, err, "request body exceeds 1 MB")
 	})
 
@@ -539,7 +631,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(body.Bytes()))
 			c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-			_, err := buildTaskPluginRouteRequest(c)
+			_, err := buildTaskPluginRouteRequest(c, false)
 			require.ErrorContains(t, err, testCase.errorText)
 		})
 	}
@@ -557,7 +649,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(body.Bytes()))
 			c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-			request, err := buildTaskPluginRouteRequest(c)
+			request, err := buildTaskPluginRouteRequest(c, false)
 			decoded, _ := request.Body.(map[string]any)
 			return decoded, err
 		}
@@ -582,7 +674,7 @@ func TestBuildTaskPluginRouteRequestRejectsUnsafeBodies(t *testing.T) {
 		c, _ := gin.CreateTestContext(httptest.NewRecorder())
 		c.Request = httptest.NewRequest(http.MethodPost, "/body", bytes.NewReader(body.Bytes()))
 		c.Request.Header.Set("Content-Type", writer.FormDataContentType())
-		_, err = buildTaskPluginRouteRequest(c)
+		_, err = buildTaskPluginRouteRequest(c, false)
 		require.ErrorContains(t, err, "multipart file exceeds 1 MB")
 	})
 }
@@ -2649,7 +2741,7 @@ func TestNativeRouteCredentialRewritesOnlyTheVendorsOwnForm(t *testing.T) {
 			var query map[string][]string
 			router.Use(NativeRouteCredential(testCase.plugin), func(c *gin.Context) {
 				captured = c.Request
-				requestContext, err := buildTaskPluginRouteRequest(c)
+				requestContext, err := buildTaskPluginRouteRequest(c, false)
 				require.NoError(t, err)
 				query = requestContext.Query
 				c.Status(http.StatusNoContent)

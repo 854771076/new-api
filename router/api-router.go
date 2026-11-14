@@ -352,6 +352,13 @@ func SetApiRouter(router *gin.Engine) {
 		logRoute.GET("/self/export", middleware.UserAuth(), controller.ExportUserLogs)
 		logRoute.GET("/self/search", middleware.UserAuth(), middleware.SearchRateLimit(), controller.SearchUserLogs)
 
+		concurrencyRoute := apiRouter.Group("/concurrency")
+		concurrencyRoute.Use(middleware.AdminAuth(), middleware.RequirePermission(authz.ConcurrencyRead))
+		{
+			concurrencyRoute.GET("/snapshot", controller.GetConcurrencySnapshot)
+			concurrencyRoute.GET("/history", controller.GetConcurrencyHistory)
+			concurrencyRoute.GET("/routing-health", controller.GetChannelRoutingHealth)
+		}
 		systemTaskRoute := apiRouter.Group("/system-task")
 		systemTaskRoute.Use(middleware.RootAuth())
 		{
@@ -375,6 +382,7 @@ func SetApiRouter(router *gin.Engine) {
 		dataRoute.GET("/self", middleware.UserAuth(), controller.GetUserQuotaDates)
 		dataRoute.GET("/flow", middleware.AdminAuth(), controller.GetAllFlowQuotaDates)
 		dataRoute.GET("/flow/self", middleware.UserAuth(), controller.GetUserFlowQuotaDates)
+		dataRoute.GET("/token-keys", middleware.UserAuth(), controller.GetQuotaDataTokenKeys)
 
 		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{

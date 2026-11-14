@@ -1705,3 +1705,29 @@ func TestPostTextConsumeQuotaLogsMissingUsageAsStructuredContent(t *testing.T) {
 		map[string]any{"key": "Upstream returned no usage, so nothing was charged (possibly an upstream timeout)"},
 	}, other["content_parts"])
 }
+
+// TestAttachSettleTimingRecordsSettlementDuration 结算耗时写入 admin_info.timing。
+func TestAttachSettleTimingRecordsSettlementDuration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+
+	withoutCarrier := model.NewLogOther()
+	attachSettleTimingToOther(ctx, withoutCarrier, time.Now())
+	assert.NotContains(t, withoutCarrier.Snapshot(), "admin_info",
+		"a request without a timing collector records no settlement duration")
+
+	timing := relaycommon.RequestTimingOf(ctx)
+	timing.SetUpstreamHeaderWait(500 * time.Millisecond)
+
+	other := model.NewLogOther()
+	attachSettleTimingToOther(ctx, other, time.Now().Add(-20*time.Millisecond))
+
+	adminInfo, ok := other.Snapshot()["admin_info"].(map[string]any)
+	require.True(t, ok)
+	record, ok := adminInfo["timing"].(map[string]any)
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, record["settle_ms"], int64(20),
+		"the settlement duration covers the time since settlement started")
+	assert.EqualValues(t, 500, record["upstream_header_ms"],
+		"refreshing the settlement duration keeps the other segments")
+}

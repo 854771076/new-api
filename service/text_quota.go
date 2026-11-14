@@ -198,6 +198,18 @@ func noteQuotaClamp(relayInfo *relaycommon.RelayInfo, clamp *common.QuotaClamp) 
 	}
 }
 
+// NoteQuotaClamp records a quota saturation event onto relayInfo.
+//
+// It is the seam for billing paths outside this package (channel adaptors) that
+// saturate a quantity on their own, e.g. converting an upstream media duration
+// into tokens. The "first clamp wins" guard and the log attachment stay here:
+// callers must not write relayInfo.QuotaClamp directly, and the marker reaches
+// the consume log's admin_info.quota_saturation through attachQuotaSaturation
+// during settlement.
+func NoteQuotaClamp(relayInfo *relaycommon.RelayInfo, clamp *common.QuotaClamp) {
+	noteQuotaClamp(relayInfo, clamp)
+}
+
 func composeTieredTextQuota(relayInfo *relaycommon.RelayInfo, summary textQuotaSummary, tieredQuota int, tieredResult *billingexpr.TieredResult) int {
 	if summary.ToolCallSurchargeQuota.IsZero() {
 		return tieredQuota
@@ -397,7 +409,24 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+// attachSettleTimingToOther 记录本次结算耗时，并刷新 admin_info.timing 快照，
+// 让消费日志自带结算耗时。写日志这一行自身的数据库耗时无法写进它自己
+// （快照在写入前就已定型），属已知边界。
+func attachSettleTimingToOther(ctx *gin.Context, other *model.LogOther, settleStartedAt time.Time) {
+	if other == nil {
+		return
+	}
+	timing := relaycommon.RequestTimingFrom(ctx)
+	if timing == nil {
+		return
+	}
+	timing.SetSettle(time.Since(settleStartedAt))
+	other.SetAdmin("timing", timing.Snapshot())
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []*common.Message) {
+	// 结算耗时的计时起点：从进入结算到写日志之前。
+	settleStartedAt := time.Now()
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {
@@ -541,6 +570,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 
 	attachQuotaSaturation(ctx, relayInfo, other)
+
+	// 结算耗时落盘：写日志这一行自身的数据库耗时无法写进它自己（记录在写入
+	// 之前就已定型），属已知边界。这里刷新一次快照，让 admin_info.timing
+	// 带上刚刚测得的结算耗时。
+	attachSettleTimingToOther(ctx, other, settleStartedAt)
 
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

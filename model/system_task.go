@@ -6,6 +6,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type SystemTaskStatus string
@@ -24,6 +25,12 @@ const (
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
+
+// ErrSystemTaskAlreadyActive reports that another task of the same type is
+// already active. The active_key unique index is what keeps one active task
+// per type, so a second insert is a normal cross-node race rather than a
+// database failure.
+var ErrSystemTaskAlreadyActive = errors.New("system task already active")
 
 type SystemTask struct {
 	ID        int64            `json:"id" gorm:"primary_key"`
@@ -112,8 +119,15 @@ func CreateSystemTask(taskType string, payload any, state any) (*SystemTask, err
 		State:     stateText,
 	}
 
-	if err := DB.Create(task).Error; err != nil {
-		return nil, err
+	// The active_key unique index is what keeps one active task per type.
+	// Insert-or-ignore turns the cross-node race for that index into a
+	// reported conflict instead of a database error in the log.
+	result := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(task)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrSystemTaskAlreadyActive
 	}
 	return task, nil
 }
@@ -318,7 +332,14 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 		LockedUntil: lockUntil,
 		UpdatedAt:   now,
 	}
-	if err := DB.Create(lock).Error; err == nil {
+	// Another node may already hold the lock row for this type. Insert-or-
+	// ignore keeps that expected race out of the error log; the row read
+	// below tells whether the lock is still held.
+	result := DB.Clauses(clause.OnConflict{DoNothing: true}).Create(lock)
+	if result.Error != nil {
+		return false, "", result.Error
+	}
+	if result.RowsAffected > 0 {
 		return true, "", nil
 	}
 
@@ -334,7 +355,7 @@ func acquireSystemTaskLock(taskType string, taskID string, lockedBy string, now 
 		return false, "", nil
 	}
 
-	result := DB.Model(&SystemTaskLock{}).
+	result = DB.Model(&SystemTaskLock{}).
 		Where("type = ? AND locked_until < ?", taskType, now).
 		Updates(map[string]any{
 			"task_id":      taskID,

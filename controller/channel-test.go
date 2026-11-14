@@ -40,7 +40,16 @@ type testResult struct {
 	context     *gin.Context
 	localErr    error
 	newAPIError *types.NewAPIError
+	// responseBody 是音频转写渠道测试需要回传给前端的上游响应预览，
+	// 其它端点类型保持为空，避免把完整响应体暴露到管理接口。
+	responseBody string
 }
+
+// channelTestResponseMaxRunes 限制渠道测试回传的响应体长度。
+const channelTestResponseMaxRunes = 4000
+
+// channelTestResponseTruncatedMarker 标注回传的响应体已被截断。
+const channelTestResponseTruncatedMarker = "\n...[truncated]"
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
@@ -51,6 +60,49 @@ func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) s
 		return string(constant.EndpointTypeOpenAIResponse)
 	}
 	return normalized
+}
+
+// resolveChannelTestModel 决定渠道测试使用的模型名。
+//
+// 音频转写端点只在讯飞渠道上强制使用讯飞转写模型：该端点此前对所有渠道都改写模型，
+// 运营方给 OpenAI whisper 之类渠道选择音频转写时，请求会被改成讯飞模型名发往 OpenAI，
+// 得到 model_not_found，失败原因与「渠道不可用」无法区分。其它渠道保持运营方指定的模型
+// （为空时由调用方回落到渠道测试模型或渠道模型列表）。
+func resolveChannelTestModel(channelType int, testModel string, endpointType string) string {
+	if constant.EndpointType(endpointType) != constant.EndpointTypeAudioTranscription {
+		return testModel
+	}
+	if channelType != constant.ChannelTypeXunfei {
+		return testModel
+	}
+	return constant.XunfeiASRModelName
+}
+
+// channelTestRelayFormat 把渠道测试的端点类型映射为 relay format。
+// 未登记的端点类型回落到 OpenAI 对话格式。
+func channelTestRelayFormat(endpointType string) types.RelayFormat {
+	switch constant.EndpointType(endpointType) {
+	case constant.EndpointTypeOpenAI:
+		return types.RelayFormatOpenAI
+	case constant.EndpointTypeOpenAIResponse:
+		return types.RelayFormatOpenAIResponses
+	case constant.EndpointTypeOpenAIResponseCompact:
+		return types.RelayFormatOpenAIResponsesCompaction
+	case constant.EndpointTypeAnthropic:
+		return types.RelayFormatClaude
+	case constant.EndpointTypeGemini:
+		return types.RelayFormatGemini
+	case constant.EndpointTypeJinaRerank:
+		return types.RelayFormatRerank
+	case constant.EndpointTypeImageGeneration:
+		return types.RelayFormatOpenAIImage
+	case constant.EndpointTypeEmbeddings:
+		return types.RelayFormatEmbedding
+	case constant.EndpointTypeAudioTranscription:
+		return types.RelayFormatOpenAIAudio
+	default:
+		return types.RelayFormatOpenAI
+	}
 }
 
 func resolveChannelTestUserID(c *gin.Context) (int, error) {
@@ -95,6 +147,8 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c, _ := gin.CreateTestContext(w)
 
 	testModel = strings.TrimSpace(testModel)
+	endpointType = normalizeChannelTestEndpoint(channel, endpointType)
+	testModel = resolveChannelTestModel(channel.Type, testModel, endpointType)
 	if testModel == "" {
 		if channel.TestModel != nil && *channel.TestModel != "" {
 			testModel = strings.TrimSpace(*channel.TestModel)
@@ -108,8 +162,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			}
 		}
 	}
-
-	endpointType = normalizeChannelTestEndpoint(channel, endpointType)
+	// 自动检测时命中转写模型，说明该渠道提供音频转写能力，改走音频端点。
+	if endpointType == "" && testModel == constant.XunfeiASRModelName {
+		endpointType = string(constant.EndpointTypeAudioTranscription)
+	}
 
 	requestPath := "/v1/chat/completions"
 
@@ -163,7 +219,22 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Set("id", testUserID)
 
 	//c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
-	c.Request.Header.Set("Content-Type", "application/json")
+	if constant.EndpointType(endpointType) == constant.EndpointTypeAudioTranscription {
+		// 音频转写必须携带音频文件，请求体走 multipart 而不是 JSON。
+		body, contentType, multipartErr := buildChannelTestAudioMultipart(testModel)
+		if multipartErr != nil {
+			return testResult{
+				context:     c,
+				localErr:    multipartErr,
+				newAPIError: types.NewError(multipartErr, types.ErrorCodeInvalidRequest),
+			}
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		c.Request.ContentLength = int64(len(body))
+		c.Request.Header.Set("Content-Type", contentType)
+	} else {
+		c.Request.Header.Set("Content-Type", "application/json")
+	}
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
 	group, _ := model.GetUserGroup(testUserID, false)
@@ -182,26 +253,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	var relayFormat types.RelayFormat
 	if endpointType != "" {
 		// 根据指定的端点类型设置 relayFormat
-		switch constant.EndpointType(endpointType) {
-		case constant.EndpointTypeOpenAI:
-			relayFormat = types.RelayFormatOpenAI
-		case constant.EndpointTypeOpenAIResponse:
-			relayFormat = types.RelayFormatOpenAIResponses
-		case constant.EndpointTypeOpenAIResponseCompact:
-			relayFormat = types.RelayFormatOpenAIResponsesCompaction
-		case constant.EndpointTypeAnthropic:
-			relayFormat = types.RelayFormatClaude
-		case constant.EndpointTypeGemini:
-			relayFormat = types.RelayFormatGemini
-		case constant.EndpointTypeJinaRerank:
-			relayFormat = types.RelayFormatRerank
-		case constant.EndpointTypeImageGeneration:
-			relayFormat = types.RelayFormatOpenAIImage
-		case constant.EndpointTypeEmbeddings:
-			relayFormat = types.RelayFormatEmbedding
-		default:
-			relayFormat = types.RelayFormatOpenAI
-		}
+		relayFormat = channelTestRelayFormat(endpointType)
 	} else {
 		// 根据请求路径自动检测
 		relayFormat = types.RelayFormatOpenAI
@@ -225,6 +277,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 		if strings.HasPrefix(c.Request.URL.Path, "/v1/responses/compact") {
 			relayFormat = types.RelayFormatOpenAIResponsesCompaction
+		}
+		if c.Request.URL.Path == "/v1/audio/transcriptions" {
+			relayFormat = types.RelayFormatOpenAIAudio
 		}
 	}
 
@@ -307,6 +362,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	adaptor.Init(info)
 
 	var convertedRequest any
+	var audioRequestBody io.Reader
 	// 根据 RelayMode 选择正确的转换函数
 	switch info.RelayMode {
 	case relayconstant.RelayModeEmbeddings:
@@ -372,6 +428,17 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 				newAPIError: types.NewError(errors.New("invalid response compaction request type"), types.ErrorCodeConvertRequestFailed),
 			}
 		}
+	case relayconstant.RelayModeAudioTranscription, relayconstant.RelayModeAudioTranslation:
+		// 音频转写请求 - 转换结果就是已经组装好的请求体，不再走 JSON 序列化
+		audioReq, ok := request.(*dto.AudioRequest)
+		if !ok {
+			return testResult{
+				context:     c,
+				localErr:    errors.New("invalid audio request type"),
+				newAPIError: types.NewError(errors.New("invalid audio request type"), types.ErrorCodeConvertRequestFailed),
+			}
+		}
+		audioRequestBody, err = adaptor.ConvertAudioRequest(c, info, *audioReq)
 	default:
 		switch req := request.(type) {
 		case *dto.GeneralOpenAIRequest:
@@ -396,44 +463,50 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewError(err, types.ErrorCodeConvertRequestFailed),
 		}
 	}
-	jsonData, err := common.Marshal(convertedRequest)
-	if err != nil {
-		return testResult{
-			context:     c,
-			localErr:    err,
-			newAPIError: types.NewError(err, types.ErrorCodeJsonMarshalFailed),
-		}
-	}
 
-	//jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings)
-	//if err != nil {
-	//	return testResult{
-	//		context:     c,
-	//		localErr:    err,
-	//		newAPIError: types.NewError(err, types.ErrorCodeConvertRequestFailed),
-	//	}
-	//}
-
-	if len(info.ParamOverride) > 0 {
-		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
+	requestBody := audioRequestBody
+	if info.RelayMode != relayconstant.RelayModeAudioTranscription && info.RelayMode != relayconstant.RelayModeAudioTranslation {
+		// 非音频路径：请求体是 JSON。
+		jsonData, err := common.Marshal(convertedRequest)
 		if err != nil {
-			if fixedErr, ok := relaycommon.AsParamOverrideReturnError(err); ok {
-				return testResult{
-					context:     c,
-					localErr:    fixedErr,
-					newAPIError: relaycommon.NewAPIErrorFromParamOverride(fixedErr),
-				}
-			}
 			return testResult{
 				context:     c,
 				localErr:    err,
-				newAPIError: types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid),
+				newAPIError: types.NewError(err, types.ErrorCodeJsonMarshalFailed),
 			}
 		}
+
+		//jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings)
+		//if err != nil {
+		//	return testResult{
+		//		context:     c,
+		//		localErr:    err,
+		//		newAPIError: types.NewError(err, types.ErrorCodeConvertRequestFailed),
+		//	}
+		//}
+
+		if len(info.ParamOverride) > 0 {
+			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
+			if err != nil {
+				if fixedErr, ok := relaycommon.AsParamOverrideReturnError(err); ok {
+					return testResult{
+						context:     c,
+						localErr:    fixedErr,
+						newAPIError: relaycommon.NewAPIErrorFromParamOverride(fixedErr),
+					}
+				}
+				return testResult{
+					context:     c,
+					localErr:    err,
+					newAPIError: types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid),
+				}
+			}
+		}
+
+		requestBody = bytes.NewBuffer(jsonData)
+		c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 	}
 
-	requestBody := bytes.NewBuffer(jsonData)
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return testResult{
@@ -518,9 +591,10 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	})
 	common.SysLog(common.LogText("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
 	return testResult{
-		context:     c,
-		localErr:    nil,
-		newAPIError: nil,
+		context:      c,
+		localErr:     nil,
+		newAPIError:  nil,
+		responseBody: channelTestResponsePreview(endpointType, respBody),
 	}
 }
 
@@ -603,6 +677,21 @@ func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
 		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
 	}
 	return io.ReadAll(body)
+}
+
+// channelTestResponsePreview 生成渠道测试回传给前端的响应体预览。
+// 只有音频转写端点会回传，因为转写结果本身就是用户需要核对的内容；
+// 其它端点的响应体可能很大，不进入管理接口。超长内容按字符截断并追加标记。
+func channelTestResponsePreview(endpointType string, respBody []byte) string {
+	if constant.EndpointType(endpointType) != constant.EndpointTypeAudioTranscription {
+		return ""
+	}
+	body := string(respBody)
+	runes := []rune(body)
+	if len(runes) <= channelTestResponseMaxRunes {
+		return body
+	}
+	return string(runes[:channelTestResponseMaxRunes]) + channelTestResponseTruncatedMarker
 }
 
 func detectErrorFromTestResponseBody(respBody []byte) error {
@@ -726,6 +815,12 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Query:     "What is Deep Learning?",
 				Documents: []any{"Deep Learning is a subset of machine learning.", "Machine learning is a field of artificial intelligence."},
 				TopN:      lo.ToPtr(2),
+			}
+		case constant.EndpointTypeAudioTranscription:
+			// 返回 AudioRequest，音频文件由 multipart 请求体携带
+			return &dto.AudioRequest{
+				Model:          model,
+				ResponseFormat: "json",
 			}
 		case constant.EndpointTypeOpenAIResponse:
 			// 返回 OpenAIResponsesRequest
@@ -901,11 +996,21 @@ func TestChannel(c *gin.Context) {
 		})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, channelTestSuccessPayload(result, consumedTime))
+}
+
+// channelTestSuccessPayload 组装渠道测试成功响应。response 字段只在
+// testResult 带回响应预览时出现（目前仅音频转写端点），其它端点保持原结构。
+func channelTestSuccessPayload(result testResult, consumedTime float64) gin.H {
+	payload := gin.H{
 		"success": true,
 		"message": "",
 		"time":    consumedTime,
-	})
+	}
+	if result.responseBody != "" {
+		payload["response"] = result.responseBody
+	}
+	return payload
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the

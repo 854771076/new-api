@@ -57,6 +57,7 @@ export const channelSchema = z.object({
   status_code_mapping: z.string().nullish(),
   priority: z.number().nullish(),
   auto_ban: z.number().nullish(),
+  concurrency_limit: z.number().nullish(),
   other_info: z.string().default(''),
   tag: z.string().nullish(),
   setting: z.string().nullish(),
@@ -201,6 +202,8 @@ export interface ChannelTestResponse {
   message?: string
   error_code?: string
   time?: number
+  /** Upstream response preview; only present for audio transcription tests. */
+  response?: string
   data?: {
     response_time?: number
     error?: string
@@ -368,6 +371,7 @@ export interface ChannelFormData {
   weight?: number
   test_model?: string
   auto_ban?: number
+  concurrency_limit?: number
   status: number
   status_code_mapping?: string
   tag?: string

@@ -250,10 +250,56 @@ func TestDoTaskApiRequest_KeepsReplayableGetBody(t *testing.T) {
 	}
 }
 
+// TestNewClientAPIRequest_KeepsDerivedGetBody pins the replay contract for the
+// client relay request builder: NewRequestWithContext derives the same
+// snapshot-based GetBody as NewRequest, so cancellation and transport-level
+// retries can never replay an empty body from a consumed *bytes.Reader.
+func TestNewClientAPIRequest_KeepsDerivedGetBody(t *testing.T) {
+	payload := []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	req, err := newClientAPIRequest(c, "https://provider.example/v1/chat/completions", bytes.NewReader(payload))
+	require.NoError(t, err)
+	require.NotNil(t, req.GetBody, "net/http must derive GetBody for the *bytes.Reader payload")
+
+	// Drain the primary body as the transport does on the first attempt, then
+	// make sure GetBody can replay the complete payload repeatedly.
+	sent, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	assert.Equal(t, payload, sent)
+
+	for i := range 2 {
+		rc, err := req.GetBody()
+		require.NoError(t, err)
+		replay, err := io.ReadAll(rc)
+		require.NoError(t, err)
+		require.NoError(t, rc.Close())
+		assert.Equal(t, payload, replay, "replay %d must equal the original payload", i+1)
+	}
+}
+
 type h2ServerResult struct {
 	err           error
 	streamCount   int
 	attemptBodies [][]byte
+}
+
+// closeH2ConnGracefully half-closes the connection, drains any pending
+// inbound frames and then closes it, so the peer observes the frames this
+// harness already wrote followed by a clean EOF. On Windows an abrupt Close
+// with unread inbound data sends RST, which can race the client past the
+// GOAWAY / RST_STREAM frame the surrounding tests exist to deliver and turn
+// them into intermittent "An existing connection was forcibly closed" flakes.
+func closeH2ConnGracefully(conn net.Conn) {
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _ = io.Copy(io.Discard, conn)
+	conn.Close()
 }
 
 func acceptH2TestConnection(ln net.Listener) (net.Conn, *http2.Framer, error) {
@@ -361,7 +407,7 @@ func runResetOnFirstStreamServer(ln net.Listener, expectRetry bool) <-chan h2Ser
 			res.err = err
 			return
 		}
-		defer conn.Close()
+		defer closeH2ConnGracefully(conn)
 
 	attempts:
 		for attempt := 0; ; attempt++ {
@@ -416,7 +462,9 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 
 			if attempt == 0 {
 				err = framer.WriteGoAway(0, http2.ErrCodeNo, nil)
-				conn.Close()
+				// Close the GOAWAY'd connection asynchronously: the client
+				// retries on a fresh connection while this one drains.
+				go closeH2ConnGracefully(conn)
 				if err != nil {
 					res.err = err
 					return
@@ -425,7 +473,7 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 			}
 
 			err = writeH2TestResponse(framer, streamID)
-			conn.Close()
+			closeH2ConnGracefully(conn)
 			if err != nil {
 				res.err = err
 			}

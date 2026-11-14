@@ -3,6 +3,10 @@ package jsplugin
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -61,6 +65,42 @@ export const meta = { apiVersion: 1, key: "mock" };
 	meta, err := engine.Export(context.Background(), "meta")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"apiVersion": int64(1), "key": "mock"}, meta)
+}
+
+// hmacSHA1Base64 must return the standard Base64 of the HMAC-SHA1 digest.
+// The fixed vector comes from relay/channel/xunfei/asr_signature_test.go
+// (the IFASR signature baseline), which was cross-checked with independent
+// Node crypto and OpenSSL implementations.
+func TestEngineHmacSHA1Base64MatchesXfyunSignatureVector(t *testing.T) {
+	t.Parallel()
+	const (
+		secret = "test-access-key-secret"
+		base   = "accessKeyId=a296be0df88f701ec2e4882be7727568" +
+			"&appId=37f3f2b5" +
+			"&dateTime=2025-09-08T22%3A58%3A29%2B0800" +
+			"&duration=56352" +
+			"&fileName=lfasr_%E6%B6%89%E6%94%BF.wav" +
+			"&fileSize=3136940" +
+			"&language=autodialect" +
+			"&signatureRandom=moI5WkopgjL1EL5Y"
+		want = "DHIRXj5x8fHHXINrVoXKH3Zeu3I="
+	)
+	engine, err := Compile(`
+export function sign(ctx) { return utils.hmacSHA1Base64(ctx.message, ctx.secret); }
+export const meta = { apiVersion: 1, key: "hmac-sha1" };
+`, Options{})
+	require.NoError(t, err)
+
+	value, err := engine.Call(context.Background(), "sign", map[string]any{"message": base, "secret": secret})
+	require.NoError(t, err)
+	assert.Equal(t, want, value, "message is the first argument and secret the second, matching hmacSHA256")
+
+	mac := hmac.New(sha1.New, []byte(secret))
+	_, err = mac.Write([]byte(base))
+	require.NoError(t, err)
+	digest := mac.Sum(nil)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(digest), want, "crypto/hmac agrees with the fixed vector")
+	assert.NotEqual(t, hex.EncodeToString(digest), value, "the host returns Base64, not a hexadecimal digest")
 }
 
 func TestEngineJSONCloneProducesIndependentNativeContainers(t *testing.T) {

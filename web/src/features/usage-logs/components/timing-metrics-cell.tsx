@@ -33,8 +33,17 @@ import {
 import { formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { getFirstResponseTimeColor, getResponseTimeColor } from '../lib/format'
-import type { LogOtherData } from '../types'
+import {
+  formatTimingDuration,
+  getFirstResponseTimeColor,
+  getResponseTimeColor,
+} from '../lib/format'
+import {
+  TIMING_SEGMENT_KEYS,
+  TIMING_SEGMENT_LABELS,
+  unattributedTimingMs,
+} from '../lib/timing'
+import type { LogOtherData, RequestTimingInfo } from '../types'
 
 /**
  * Softened fills for the full-height timing bar. The bar sits directly beside
@@ -64,6 +73,82 @@ interface TimingMetricsCellProps {
    */
   indicator?: 'bar' | 'dot'
   compact?: boolean
+  /**
+   * Admin-only latency breakdown written by the backend into
+   * `other.admin_info.timing`. Without it the cell renders exactly as
+   * before: First token + Duration and the two-tone bar.
+   */
+  timing?: RequestTimingInfo
+}
+
+/** One measured latency segment, in milliseconds. */
+interface TimingSegment {
+  key: string
+  label: string
+  ms: number
+}
+
+/**
+ * The measured segments of one request, in the order an operator reads them:
+ * gateway queue wait, channel selection, upstream header wait, upstream
+ * response body, upstream first byte, upstream stream, settlement. Only
+ * segments that were actually measured (greater than zero) are listed.
+ */
+function collectTimingSegments(
+  timing: RequestTimingInfo | undefined,
+  t: (key: string) => string
+): TimingSegment[] {
+  if (!timing) return []
+  return TIMING_SEGMENT_KEYS.map((key) => ({
+    key,
+    label: t(TIMING_SEGMENT_LABELS[key]),
+    ms: timing[key] ?? 0,
+  })).filter((segment) => segment.ms > 0)
+}
+
+/**
+ * The color bar groups the measured segments into three tiers — the gateway's
+ * own queue wait, everything the upstream cost, and the rest — so the bar
+ * shows which side of the gateway the time went to. Widths follow the share
+ * of each tier.
+ *
+ * The tiers alone would always fill the whole bar, which hides how much of
+ * the request no segment accounts for. The unattributed remainder is therefore
+ * drawn as its own muted tier, so a request where only 0.05% of the time is
+ * attributed no longer looks fully explained.
+ */
+function collectTimingBarSegments(
+  timing: RequestTimingInfo | undefined,
+  totalSeconds: number
+): Array<{ key: string; className: string; ms: number }> {
+  if (!timing) return []
+  const tiers = [
+    {
+      key: 'queue',
+      className: barColorMap.warning,
+      ms: timing.queue_wait_ms ?? 0,
+    },
+    {
+      key: 'upstream',
+      className: barColorMap.success,
+      ms:
+        (timing.upstream_header_ms ?? 0) +
+        (timing.upstream_body_ms ?? 0) +
+        (timing.upstream_first_byte_ms ?? 0) +
+        (timing.upstream_stream_ms ?? 0),
+    },
+    {
+      key: 'other',
+      className: barColorMap.neutral,
+      ms: (timing.channel_select_ms ?? 0) + (timing.settle_ms ?? 0),
+    },
+    {
+      key: 'unattributed',
+      className: 'bg-muted',
+      ms: unattributedTimingMs(timing, totalSeconds),
+    },
+  ]
+  return tiers.filter((tier) => tier.ms > 0)
 }
 
 export function TimingMetricsCell(props: TimingMetricsCellProps) {
@@ -83,6 +168,12 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
   const firstTokenLabel =
     firstTokenSeconds == null ? t('N/A') : formatUseTime(firstTokenSeconds)
   const totalTimeLabel = formatUseTime(props.useTimeSec)
+  const timingSegments = collectTimingSegments(props.timing, t)
+  const timingBarSegments = collectTimingBarSegments(
+    props.timing,
+    props.useTimeSec
+  )
+  const millisecondUnit = t('ms')
 
   const labels = (
     <div
@@ -126,6 +217,25 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
           {totalTimeLabel}
         </span>
       </div>
+      {timingSegments.length > 0 && (
+        <div
+          className={cn(
+            'flex min-w-0 flex-col gap-0.5',
+            props.compact && 'flex-row flex-wrap items-center gap-x-2.5 gap-y-1'
+          )}
+        >
+          {timingSegments.map((segment) => (
+            <div key={segment.key} className='flex items-baseline gap-1.5'>
+              <span className='text-muted-foreground shrink-0'>
+                {segment.label}
+              </span>
+              <span className='text-muted-foreground tabular-nums'>
+                {formatTimingDuration(segment.ms, millisecondUnit)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 
@@ -135,8 +245,21 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
     )
   }
 
-  return (
-    <div className={cn('flex items-stretch gap-2', props.className)}>
+  const bar =
+    timingBarSegments.length > 0 ? (
+      <span
+        aria-hidden
+        className='flex w-1 shrink-0 flex-col overflow-hidden rounded-full'
+      >
+        {timingBarSegments.map((tier) => (
+          <span
+            key={tier.key}
+            className={cn('min-h-px', tier.className)}
+            style={{ flexGrow: tier.ms, flexBasis: 0 }}
+          />
+        ))}
+      </span>
+    ) : (
       <span
         aria-hidden
         className={cn(
@@ -151,6 +274,11 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
           </>
         )}
       </span>
+    )
+
+  return (
+    <div className={cn('flex items-stretch gap-2', props.className)}>
+      {bar}
       {labels}
     </div>
   )

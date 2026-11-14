@@ -244,6 +244,78 @@ test('cancelling after configuring a rule does not apply mappings', async () => 
   expect(onApply).not.toHaveBeenCalled()
 })
 
+test('stripping a prefix from upstream names keeps the upstream name as the target', async () => {
+  const user = userEvent.setup()
+  const onApply = vi.fn()
+  render(
+    <ModelMappingBatchDialog
+      open
+      onOpenChange={vi.fn()}
+      upstreamModels={['openai/gpt-4o', 'gpt-4o']}
+      channelModels={[]}
+      onApply={onApply}
+    />
+  )
+  await user.click(screen.getByRole('checkbox', { name: 'openai/gpt-4o' }))
+  await user.click(screen.getByRole('combobox', { name: 'Rule' }))
+  await user.click(screen.getByRole('option', { name: 'Strip prefix' }))
+  await user.type(screen.getByRole('textbox', { name: 'Prefix' }), 'openai/')
+  const preview = within(screen.getByRole('list', { name: 'Preview' }))
+  expect(preview.getByRole('listitem')).toHaveTextContent('gpt-4oopenai/gpt-4o')
+  await user.click(screen.getByRole('button', { name: 'Add 1 mapping(s)' }))
+  expect(onApply).toHaveBeenCalledWith({
+    pairs: [{ from: 'gpt-4o', to: 'openai/gpt-4o' }],
+    syncModels: true,
+  })
+})
+
+test('switching the task keeps the selected models but resets the naming rule', async () => {
+  const user = userEvent.setup()
+  const onApply = vi.fn()
+  render(
+    <ModelMappingBatchDialog
+      open
+      onOpenChange={vi.fn()}
+      upstreamModels={['gpt-4o-all']}
+      channelModels={[]}
+      onApply={onApply}
+    />
+  )
+  await user.click(screen.getByRole('checkbox', { name: 'gpt-4o-all' }))
+  await user.type(screen.getByRole('textbox', { name: 'Suffix' }), '-all')
+  expect(screen.getByRole('button', { name: 'Add 1 mapping(s)' })).toBeEnabled()
+
+  await user.click(
+    screen.getByRole('radio', { name: 'Change upstream model names' })
+  )
+
+  expect(screen.getByRole('combobox', { name: 'Rule' })).toHaveTextContent(
+    'Add suffix'
+  )
+  expect(screen.getByRole('textbox', { name: 'Suffix' })).toHaveValue('')
+  expect(screen.getByText('Enter a rule to preview mappings.')).toBeVisible()
+  expect(screen.getByRole('checkbox', { name: 'gpt-4o-all' })).toBeChecked()
+  expect(onApply).not.toHaveBeenCalled()
+})
+
+test('the batch dialog offers no mapping when neither model list has a candidate', () => {
+  render(
+    <ModelMappingBatchDialog
+      open
+      onOpenChange={vi.fn()}
+      upstreamModels={[]}
+      channelModels={[]}
+      onApply={vi.fn()}
+    />
+  )
+  expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+  expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  expect(screen.getByText('No matching items')).toBeVisible()
+  expect(
+    screen.getByRole('button', { name: 'Add 0 mapping(s)' })
+  ).toBeDisabled()
+})
+
 test('long translated source labels wrap inside their row without covering the model search', async () => {
   const i18n = createInstance()
   await i18n.init({ lng: 'fr', resources: { fr }, keySeparator: false })

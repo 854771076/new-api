@@ -1,3 +1,11 @@
+// FORK-LOCAL-EXTENSION: 2026-10-19 model_mapping centralization note; remove-when: upstream lands the same doc-comment on the duplicate ModelMappedHelper call site.
+//
+// ModelMappedHelper is centralized in controller.Relay(); on HTTP Responses
+// this call is the second invocation of an idempotent helper (idempotency
+// is the helper's contract, not a new guarantee). On the WS Responses
+// buildResponsesWSCreatePayload path it is the only call site, so deleting
+// it would break WS Responses mapping — comment kept load-bearing here.
+
 package relay
 
 import (
@@ -37,6 +45,13 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 	if err != nil {
 		return nil, nil, nil, types.NewError(fmt.Errorf("failed to copy responses request: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
+	// Apply the channel's model_mapping here. WS Responses builds through
+	// buildResponsesWSCreatePayload and never enters controller.Relay(); the
+	// HTTP Responses path runs through controller.Relay()'s retry loop where
+	// ModelMappedHelper has already been called per attempt, so this call is
+	// idempotent there (the helper re-reads model_mapping from the gin context
+	// and resolves to the same upstream name). Keeping it here is the only way
+	// the WS path gets a mapped model name without duplicating controller logic.
 	if err := helper.ModelMappedHelper(c, info, request); err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
@@ -50,6 +65,11 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 	}
 	adaptor.Init(info)
 	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+		// model_mapping is addressing, not protocol conversion: put the mapped
+		// name on the wire even though the raw body shape is preserved.
+		if _, err := common.RewriteBodyJSONModel(c, info.UpstreamModelName); err != nil {
+			return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return nil, nil, nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())

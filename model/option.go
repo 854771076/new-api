@@ -133,6 +133,10 @@ func InitOptionMap() {
 	common.OptionMap["AutoGroups"] = setting.AutoGroups2JsonString()
 	common.OptionMap["DefaultUseAutoGroup"] = strconv.FormatBool(setting.DefaultUseAutoGroup)
 	common.OptionMap["MaxTokenAutoGroups"] = strconv.Itoa(setting.GetMaxTokenAutoGroups())
+	// 网关内有界等待队列的 4 个 option：GET /api/option/ 靠这里读到默认值。
+	for key, value := range setting.ConcurrencyQueueOptionDefaults() {
+		common.OptionMap[key] = value
+	}
 	common.OptionMap["PayMethods"] = operation_setting.PayMethods2JsonString()
 	common.OptionMap["GitHubClientId"] = ""
 	common.OptionMap["GitHubClientSecret"] = ""
@@ -238,6 +242,9 @@ func validateOptionValue(key string, value string) error {
 	if err := operation_setting.ValidateQuotaOption(key, value); err != nil {
 		return err
 	}
+	if err := operation_setting.ValidateEpaySignOption(key, value); err != nil {
+		return err
+	}
 	if key == "EmailProvider" || key == "ResendApiKey" || key == "ResendFrom" {
 		if key == "EmailProvider" && value != "smtp" && value != "resend" {
 			return common.NewMessage("Email sending method must be SMTP or Resend")
@@ -270,6 +277,9 @@ func validateOptionValue(key string, value string) error {
 	}
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
+	}
+	if strings.HasPrefix(key, "concurrency.") {
+		return setting.ValidateConcurrencyQueueOption(key, value)
 	}
 	return nil
 }
@@ -527,6 +537,9 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateAutoGroupsByJsonString(value)
 	case "MaxTokenAutoGroups":
 		err = setting.UpdateMaxTokenAutoGroups(value)
+	case setting.ConcurrencyQueueEnabledKey, setting.ConcurrencyQueueDepthRatioKey,
+		setting.ConcurrencyQueueDepthCapKey, setting.ConcurrencyQueueMaxWaitSecondsKey:
+		err = setting.UpdateConcurrencyQueueOption(key, value)
 	case "CustomCallbackAddress":
 		operation_setting.CustomCallbackAddress = value
 	case "EpayId":

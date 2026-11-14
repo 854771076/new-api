@@ -45,12 +45,23 @@ type Channel struct {
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
 	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
-	OtherInfo         string  `json:"other_info"`
-	Tag               *string `json:"tag" gorm:"index"`
-	Setting           *string `json:"setting" gorm:"type:text"` // 渠道额外设置
-	ParamOverride     *string `json:"param_override" gorm:"type:text"`
-	HeaderOverride    *string `json:"header_override" gorm:"type:text"`
-	Remark            *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
+	// ConcurrencyLimit caps in-flight requests for this channel; 0 = unlimited.
+	// C-2 decision (02-09): the *int pointer form mirrors Weight/Priority/AutoBan
+	// and is an explicit deviation from ARCHITECTURE Decision D ("plain int is
+	// correct here") and ROADMAP leg C SC-2 ("mirror Token's explicit Select
+	// list"): Channel.Update() is a Select-less struct Updates that skips
+	// zero-valued fields, so a plain int could never persist an explicit 0
+	// ("clear limit" would silently keep the old value). Three-state semantics:
+	// nil = payload omitted (column untouched), non-nil 0 = unlimited persisted,
+	// non-nil positive = limit persisted — pinned by TestChannelUpdate* in
+	// channel_update_test.go.
+	ConcurrencyLimit *int    `json:"concurrency_limit" gorm:"default:0"`
+	OtherInfo        string  `json:"other_info"`
+	Tag              *string `json:"tag" gorm:"index"`
+	Setting          *string `json:"setting" gorm:"type:text"` // 渠道额外设置
+	ParamOverride    *string `json:"param_override" gorm:"type:text"`
+	HeaderOverride   *string `json:"header_override" gorm:"type:text"`
+	Remark           *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
 	// add after v0.8.5
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
@@ -528,6 +539,16 @@ func (channel *Channel) GetWeight() int {
 	return int(*channel.Weight)
 }
 
+// GetConcurrencyLimit returns the channel-wide concurrency cap; 0 means
+// unlimited. Mirrors GetPriority's nil-safe dereference so relay consumers
+// (02-14) never see a nil pointer.
+func (channel *Channel) GetConcurrencyLimit() int {
+	if channel.ConcurrencyLimit == nil {
+		return 0
+	}
+	return *channel.ConcurrencyLimit
+}
+
 func (channel *Channel) GetBaseURL() string {
 	if channel.BaseURL == nil {
 		return ""
@@ -544,6 +565,41 @@ func (channel *Channel) GetModelMapping() string {
 		return ""
 	}
 	return *channel.ModelMapping
+}
+
+// ValidateModelMapping rejects a channel model_mapping blob that could never
+// work, at the point an administrator saves it.
+//
+// The blob is otherwise consumed only per request (relay/helper/model_mapped.go),
+// so an unparsable object failed on EVERY request that hit the channel with
+// "unmarshal_model_mapping_failed", and an empty target was silently skipped
+// (model_mapped.go treats an empty mapped value as "no mapping") — in both
+// cases the channel saved without complaint and then misbehaved in
+// production. An empty or "{}" blob means "no mapping" and stays valid.
+func (channel *Channel) ValidateModelMapping() error {
+	blob := strings.TrimSpace(channel.GetModelMapping())
+	if blob == "" || blob == "{}" {
+		return nil
+	}
+	mapping := map[string]string{}
+	if err := common.UnmarshalJsonStr(blob, &mapping); err != nil {
+		return fmt.Errorf("model mapping must be a JSON object like {\"gpt-4\":\"Azure-GPT4\"}: %w", err)
+	}
+	if len(mapping) == 0 {
+		// A non-"{}" blob that decodes to no entries is still a valid,
+		// explicit "no mapping" — nothing to reject.
+		return nil
+	}
+	for from, to := range mapping {
+		source := strings.TrimSpace(from)
+		if source == "" {
+			return fmt.Errorf("model mapping keys must be a non-empty model name")
+		}
+		if strings.TrimSpace(to) == "" {
+			return fmt.Errorf("model mapping for %q must name a non-empty upstream model", source)
+		}
+	}
+	return nil
 }
 
 func (channel *Channel) GetStatusCodeMapping() string {
@@ -1055,9 +1111,12 @@ func (channel *Channel) GetSetting() dto.ChannelSettings {
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {
-			common.SysLog(common.LogText("failed to unmarshal setting: channel_id=%d, error=%v", channel.Id, err))
-			channel.Setting = nil // 清空设置以避免后续错误
-			_ = channel.Save()    // 保存修改
+			// Report and fall back to defaults, but never rewrite the row.
+			// This runs on every read (selection, relay, admin list); the old
+			// write-back destroyed the operator's settings on the first request
+			// that happened to read a channel carrying a legacy or hand-edited
+			// blob — an irreversible loss triggered by a mere read.
+			common.SysError(common.LogText("channel %d has an unparsable setting blob; using defaults without overwriting it: %v", channel.Id, err))
 		}
 	}
 	return setting
@@ -1077,9 +1136,8 @@ func (channel *Channel) GetOtherSettings() dto.ChannelOtherSettings {
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, &setting)
 		if err != nil {
-			common.SysLog(common.LogText("failed to unmarshal setting: channel_id=%d, error=%v", channel.Id, err))
-			channel.OtherSettings = "{}" // 清空设置以避免后续错误
-			_ = channel.Save()           // 保存修改
+			// Same contract as GetSetting: report and fall back, never write.
+			common.SysError(common.LogText("channel %d has an unparsable other_settings blob; using defaults without overwriting it: %v", channel.Id, err))
 		}
 	}
 	if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {

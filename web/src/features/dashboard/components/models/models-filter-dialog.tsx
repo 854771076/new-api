@@ -17,12 +17,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Filter, RotateCcw, Calendar, Search } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { DateTimePicker } from '@/components/datetime-picker'
 import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
+import { Combobox } from '@/components/ui/combobox'
+import type { ComboboxInputOption } from '@/components/ui/combobox-input'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -34,6 +37,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { getTokenKeys } from '@/features/dashboard/api'
 import {
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
@@ -111,6 +115,79 @@ export function ModelsFilter(props: ModelsFilterProps) {
     detectQuickRangeDays(props.currentFilters)
   )
 
+  // 拉取 quota_data 表里 distinct token_key 列表，仅 admin 看板需要
+  // autocomplete 选择。普通用户也可以看自己的历史 token keys。
+  // 统计口径跟随对话框里选择的时间范围：下拉项展示该窗口内的
+  // 名称 + 调用次数 + 消耗 tokens，后端已按调用次数降序返回。
+  const tokenKeyStartTimestamp = filters.start_timestamp
+    ? Math.floor(filters.start_timestamp.getTime() / 1000)
+    : undefined
+  const tokenKeyEndTimestamp = filters.end_timestamp
+    ? Math.floor(filters.end_timestamp.getTime() / 1000)
+    : undefined
+  const { data: tokenKeyOptions = [] } = useQuery({
+    queryKey: [
+      'dashboard',
+      'token-keys',
+      isAdmin ? 'admin' : 'self',
+      tokenKeyStartTimestamp,
+      tokenKeyEndTimestamp,
+    ],
+    queryFn: async (): Promise<ComboboxInputOption[]> => {
+      try {
+        const res = await getTokenKeys({
+          limit: 200,
+          start_timestamp: tokenKeyStartTimestamp,
+          end_timestamp: tokenKeyEndTimestamp,
+        })
+        if (!res.success || !Array.isArray(res.data)) return []
+        return res.data.map((item) => {
+          const masked = item.value.length > 8
+            ? `${item.value.slice(0, 4)}***${item.value.slice(-4)}`
+            : item.value
+          let label: string
+          if (item.deleted) {
+            label = t('{{key}} (deleted) · {{count}} calls · {{tokens}} tokens', {
+              key: masked,
+              count: item.usage,
+              tokens: item.token_used,
+            })
+          } else if (item.token_name) {
+            label = item.user_name
+              ? t(
+                  '{{name}} ({{user}}) · {{count}} calls · {{tokens}} tokens',
+                  {
+                    name: item.token_name,
+                    user: item.user_name,
+                    count: item.usage,
+                    tokens: item.token_used,
+                  }
+                )
+              : t('{{name}} · {{count}} calls · {{tokens}} tokens', {
+                  name: item.token_name,
+                  count: item.usage,
+                  tokens: item.token_used,
+                })
+          } else {
+            label = t('{{key}} · {{count}} calls · {{tokens}} tokens', {
+              key: masked,
+              count: item.usage,
+              tokens: item.token_used,
+            })
+          }
+          return {
+            value: item.value,
+            label,
+          }
+        })
+      } catch {
+        return []
+      }
+    },
+    enabled: isAdmin !== undefined,
+    staleTime: 5 * 60 * 1000,
+  })
+
   const handleOpenChange = (nextOpen: boolean) => {
     // Sync the editing state from the applied filters every time the dialog
     // opens so a previously applied manual range is preserved.
@@ -150,8 +227,9 @@ export function ModelsFilter(props: ModelsFilterProps) {
     value: Date | string | undefined
   ) => {
     setFilters((prev) => ({ ...prev, [field]: value }))
-    if (field === 'start_timestamp' || field === 'end_timestamp')
+    if (field === 'start_timestamp' || field === 'end_timestamp') {
       setSelectedRange(null)
+    }
   }
 
   const handleQuickRange = (days: number) => {
@@ -179,7 +257,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
       title={t(props.titleKey ?? 'Model Analytics Filters')}
       description={t(
         props.descriptionKey ??
-          'Filter the model analytics view by time range and user.'
+          'Filter the model analytics view by time range, user, and token key.'
       )}
       contentClassName='max-sm:h-dvh max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4 sm:max-w-lg'
       contentHeight='min(48vh, 460px)'
@@ -257,12 +335,10 @@ export function ModelsFilter(props: ModelsFilterProps) {
           <div className='grid gap-2'>
             <Label htmlFor='time_granularity'>{t('Time Granularity')}</Label>
             <Select
-              items={[
-                ...TIME_GRANULARITY_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.label),
-                })),
-              ]}
+              items={TIME_GRANULARITY_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
               value={filters.time_granularity}
               onValueChange={(value) =>
                 handleChange('time_granularity', value as TimeGranularity)
@@ -295,6 +371,20 @@ export function ModelsFilter(props: ModelsFilterProps) {
                   placeholder={t('Filter by username')}
                   value={filters.username}
                   onChange={(e) => handleChange('username', e.target.value)}
+                />
+              </div>
+
+              <div className='grid gap-2'>
+                <Label htmlFor='token_key'>{t('Token Key')}</Label>
+                <Combobox
+                  id='token_key'
+                  options={tokenKeyOptions}
+                  value={filters.token_key ?? ''}
+                  onValueChange={(value) => handleChange('token_key', value ?? '')}
+                  placeholder={t('Filter by token key')}
+                  searchPlaceholder={t('Filter by token key')}
+                  emptyText={t('No matching token key')}
+                  allowCustomValue
                 />
               </div>
             </>

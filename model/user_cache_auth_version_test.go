@@ -244,3 +244,156 @@ func TestUserAuthVersionFenceAndCommittedFloorAreMonotonic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "5", committed)
 }
+
+// requireLegacyUserCacheHash writes the pre-schema-3 user hash shape (no
+// ConcurrencyLimit field, CacheSchema=2) that a deployment upgrading from the
+// previous release leaves behind in Redis.
+func requireLegacyUserCacheHash(t *testing.T, userID int, username string) {
+	t.Helper()
+	require.NoError(t, common.RDB.HSet(t.Context(), getUserCacheKey(userID), map[string]any{
+		"Id": userID, "Group": "default", "Email": "", "Status": 1, "Role": 1,
+		"Username": username, "Setting": "", "AuthVersion": 1, "CacheSchema": 2,
+	}).Err())
+}
+
+func TestUserCacheConcurrencyLimitRoundTrip(t *testing.T) {
+	truncateTables(t)
+	useUserCacheMiniRedis(t)
+
+	user := User{
+		Username:         "user-cache-concurrency-user",
+		Password:         "password",
+		Role:             common.RoleCommonUser,
+		Status:           common.UserStatusEnabled,
+		Group:            "default",
+		AuthVersion:      1,
+		ConcurrencyLimit: 7,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, populateUserCache(user))
+
+	raw, err := common.RDB.HGet(t.Context(), getUserCacheKey(user.Id), "ConcurrencyLimit").Result()
+	require.NoError(t, err, "writeUserCache must HSET the ConcurrencyLimit field")
+	assert.Equal(t, "7", raw)
+
+	cached, err := cacheGetUserBase(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 7, cached.ConcurrencyLimit, "UserBase must round-trip ConcurrencyLimit")
+	assert.Equal(t, userCacheSchemaVersion, cached.CacheSchema)
+}
+
+func TestUserCacheRejectsHashWithPreviousSchemaVersion(t *testing.T) {
+	useUserCacheMiniRedis(t)
+	const userID = 4301
+	requireLegacyUserCacheHash(t, userID, "legacy-schema-user")
+
+	cached, err := cacheGetUserBase(userID)
+	require.ErrorContains(t, err, "user cache schema is stale")
+	assert.Nil(t, cached)
+}
+
+func TestUserCacheStaleHashReprimesFromDatabase(t *testing.T) {
+	truncateTables(t)
+	useUserCacheMiniRedis(t)
+
+	user := User{
+		Username:         "stale-hash-user",
+		Password:         "password",
+		Role:             common.RoleCommonUser,
+		Status:           common.UserStatusEnabled,
+		Group:            "default",
+		AuthVersion:      1,
+		ConcurrencyLimit: 7,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	requireLegacyUserCacheHash(t, user.Id, "stale-hash-user")
+
+	cached, err := GetUserCache(user.Id)
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+
+	raw, err := common.RDB.HGet(t.Context(), getUserCacheKey(user.Id), "ConcurrencyLimit").Result()
+	require.NoError(t, err, "rejected legacy hash must be re-primed from the database")
+	assert.Equal(t, "7", raw)
+	assert.Equal(t, 7, cached.ConcurrencyLimit, "DB fallback must serve the database limit")
+	assert.Equal(t, userCacheSchemaVersion, cached.CacheSchema)
+}
+
+// TestUserCacheAdminSaveRewritesLimitIntoCache pins the USR-03 save-to-cache
+// chain: EditWithTx persists the new limit, PublishUserAuthCache (the call
+// UpdateUser makes after a successful save) rewrites the hash in full, and the
+// next cache hit serves the new value — never the previously cached limit.
+func TestUserCacheAdminSaveRewritesLimitIntoCache(t *testing.T) {
+	truncateTables(t)
+	useUserCacheMiniRedis(t)
+
+	user := User{
+		Username:    "save-rewrite-user",
+		Password:    "password",
+		Role:        common.RoleCommonUser,
+		Status:      common.UserStatusEnabled,
+		Group:       "default",
+		AuthVersion: 1,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, populateUserCache(user))
+
+	before, err := cacheGetUserBase(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 0, before.ConcurrencyLimit, "cache starts with the unlimited default")
+
+	applyConcurrencyEdit(t, user.Id, 7)
+	require.NoError(t, PublishUserAuthCache(user.Id))
+
+	after, err := cacheGetUserBase(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 7, after.ConcurrencyLimit, "cache hit must serve the newly saved limit")
+	assert.Equal(t, userCacheSchemaVersion, after.CacheSchema)
+}
+
+// TestUserCachePartialUpdateDoesNotLaunderStaleSchema pins the CR-01 review
+// finding: a single-field cache refresh that hits a legacy (schema-2) hash
+// must NOT stamp the current CacheSchema onto it. Stamping would carry the
+// hash past the read gate while ConcurrencyLimit is still absent, decoding
+// the missing field as 0=unlimited (fail-open on the user axis, T-02-01).
+// On schema mismatch the partial write is skipped; the hash stays stale, the
+// gate keeps rejecting it, and the read path re-primes it from the database
+// (quota-safe: populateUserCache never overwrites a live Quota field).
+func TestUserCachePartialUpdateDoesNotLaunderStaleSchema(t *testing.T) {
+	truncateTables(t)
+	useUserCacheMiniRedis(t)
+
+	user := User{
+		Username:         "partial-stale-user",
+		Password:         "password",
+		Role:             common.RoleCommonUser,
+		Status:           common.UserStatusEnabled,
+		Group:            "default",
+		AuthVersion:      1,
+		ConcurrencyLimit: 7,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+	requireLegacyUserCacheHash(t, user.Id, "partial-stale-user")
+
+	// A single-field refresh (subscription group / setting / name path) hits
+	// the legacy hash with a matching auth version — the laundering window.
+	require.NoError(t, updateUserCacheFieldAtVersion(user.Id, "Setting", `{"k":"v"}`, 1))
+
+	// The partial write must not have carried the legacy hash past the gate.
+	_, err := cacheGetUserBase(user.Id)
+	require.ErrorContains(t, err, "user cache schema is stale",
+		"a schema-mismatched partial update must not stamp CacheSchema onto a legacy hash")
+
+	// The full read path still heals: DB fallback serves the real limit.
+	cached, err := GetUserCache(user.Id)
+	require.NoError(t, err)
+	require.NotNil(t, cached)
+	assert.Equal(t, 7, cached.ConcurrencyLimit, "DB fallback must serve the database limit")
+	assert.Equal(t, userCacheSchemaVersion, cached.CacheSchema)
+
+	// On a current-schema hash the partial update still applies (no regression).
+	require.NoError(t, updateUserCacheFieldAtVersion(user.Id, "Setting", `{"k":"v2"}`, 1))
+	after, err := cacheGetUserBase(user.Id)
+	require.NoError(t, err)
+	assert.Equal(t, `{"k":"v2"}`, after.Setting, "partial updates must still write on healthy hashes")
+}

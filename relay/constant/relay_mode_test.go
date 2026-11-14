@@ -19,6 +19,7 @@ func TestPath2RelayMode(t *testing.T) {
 		{path: "/v1/audio/voice/design", want: RelayModeAudioVoiceDesign},
 		{path: "/v1/audio/music", want: RelayModeAudioMusic},
 		{path: "/v1/audio/speech", want: RelayModeAudioSpeech},
+		{path: "/v1/audio/transcriptions/tasks/task_abc", want: RelayModeAudioTaskFetchByID},
 		{path: "/v1/audio/transcriptions", want: RelayModeAudioTranscription},
 		{path: "/v1/audio/translations", want: RelayModeAudioTranslation},
 	}

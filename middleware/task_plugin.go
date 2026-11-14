@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	taskjsplugin "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
@@ -50,11 +53,17 @@ const taskPluginInvalidRouteResult = "plugin returned an invalid route result"
 // by the request body limit, so a JSON request sent as a multipart field may
 // be as large as the same request sent as the body.
 const (
-	maxTaskPluginFormFields     = 256
-	maxTaskPluginMultipartParts = 256
-	maxTaskPluginFiles          = 32
-	maxTaskPluginFieldNameBytes = 256
-	maxTaskPluginFilenameBytes  = 255
+	maxTaskPluginFormFields      = 256
+	maxTaskPluginMultipartParts  = 256
+	maxTaskPluginFiles           = 32
+	maxTaskPluginFieldNameBytes  = 256
+	maxTaskPluginFieldValueBytes = 1 << 20
+	maxTaskPluginFilenameBytes   = 255
+	// maxMediaDurationProbeBytes bounds the total upload bytes one request may
+	// spend on measuring media duration. Decoding is proportional to file
+	// length, and a request may carry up to maxTaskPluginFiles files, so
+	// without a budget a token holder could force a large decode per part.
+	maxMediaDurationProbeBytes = 256 << 20
 )
 
 // NativeRouteCredential accepts, on the native routes of the built-in plugins
@@ -140,7 +149,7 @@ func PrepareTaskPluginRoute() gin.HandlerFunc {
 			len(candidates),
 		)
 
-		requestContext, err := buildTaskPluginRouteRequest(c)
+		requestContext, err := buildTaskPluginRouteRequest(c, pluginMeasuresMediaDuration(pinned.Plugin))
 		requestContext.Params = pluginruntime.RouteParams(c.Params, pinned.Route)
 		c.Set(pluginruntime.ContextKeyRouteRequest, requestContext)
 		if err != nil {
@@ -785,7 +794,7 @@ func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 			abortWithOpenAiMessage(c, http.StatusNotImplemented, "Task protocol bridge is not available")
 			return
 		}
-		requestContext, err := buildTaskPluginRouteRequest(c)
+		requestContext, err := buildTaskPluginRouteRequest(c, pluginMeasuresMediaDuration(pinned.Plugin))
 		if err != nil {
 			logger.LogWarn(
 				c,
@@ -993,7 +1002,7 @@ func PrepareTaskPluginEndpoint() gin.HandlerFunc {
 	}
 }
 
-func buildTaskPluginRouteRequest(c *gin.Context) (pluginruntime.RouteRequestContext, error) {
+func buildTaskPluginRouteRequest(c *gin.Context, measureMediaDuration bool) (pluginruntime.RouteRequestContext, error) {
 	requestContext := pluginruntime.RouteRequestContext{
 		Path:    c.Request.URL.Path,
 		Method:  c.Request.Method,
@@ -1189,6 +1198,7 @@ func buildTaskPluginRouteRequest(c *gin.Context) (pluginruntime.RouteRequestCont
 			textFields[field] = append([]string(nil), values...)
 		}
 		files := make([]map[string]any, 0)
+		probeBudget := int64(maxMediaDurationProbeBytes)
 		for field, headers := range form.File {
 			if !utf8.ValidString(field) || len(field) > maxTaskPluginFieldNameBytes {
 				return requestContext, fmt.Errorf("invalid multipart file field name")
@@ -1208,7 +1218,11 @@ func buildTaskPluginRouteRequest(c *gin.Context) (pluginruntime.RouteRequestCont
 					return requestContext, fmt.Errorf("multipart file exceeds %d MB", fileLimitMB)
 				}
 				ref := pluginruntime.FileReference(field, index)
-				files = append(files, map[string]any{"ref": ref, "field": field, "filename": header.Filename, "mimeType": header.Header.Get("Content-Type"), "size": header.Size})
+				file := map[string]any{"ref": ref, "field": field, "filename": header.Filename, "mimeType": header.Header.Get("Content-Type"), "size": header.Size}
+				if measureMediaDuration {
+					file["durationSeconds"] = billableMediaDuration(c, header, &probeBudget)
+				}
+				files = append(files, file)
 			}
 		}
 		requestContext.Files = files
@@ -1217,6 +1231,62 @@ func buildTaskPluginRouteRequest(c *gin.Context) (pluginruntime.RouteRequestCont
 		return requestContext, fmt.Errorf("%w %q", errTaskPluginUnsupportedMediaType, mediaType)
 	}
 	return requestContext, nil
+}
+
+// pluginMeasuresMediaDuration reports whether the plugin asked the host to
+// measure the duration of uploaded media files.
+func pluginMeasuresMediaDuration(plugin *pluginruntime.LoadedPlugin) bool {
+	if plugin == nil {
+		return false
+	}
+	return slices.Contains(plugin.Meta.RequiredCapabilities, pluginruntime.CapabilityMediaDuration)
+}
+
+// billableMediaDuration reports the duration the host bills an uploaded media
+// file at, in seconds.
+//
+// A measurable file reports its measured length. A file the host cannot
+// measure reports the largest billable duration instead of zero: the plugin
+// reserves this amount up front, and a zero would let an unknown-length
+// request through the balance check for free.
+//
+// The measured value is capped at the same ceiling the host applies to
+// duration billing facts: audio metadata is user-controlled, so a crafted
+// header must not inflate the reservation.
+//
+// The container is identified by the filename extension, falling back to the
+// part's media type: clients that upload a file without an extension are
+// common, and treating such a file as unmeasurable would reserve the full
+// ceiling for a clip that is seconds long.
+func billableMediaDuration(c *gin.Context, header *multipart.FileHeader, probeBudget *int64) float64 {
+	ceiling := float64(relaycommon.MaxTaskDurationSeconds)
+	extension := strings.ToLower(path.Ext(header.Filename))
+	if extension == "" {
+		extension = common.AudioExtensionForMediaType(header.Header.Get("Content-Type"))
+	}
+	if !common.SupportsAudioDuration(extension) {
+		return ceiling
+	}
+	// Decoding a container costs time proportional to its length (MP3 walks
+	// every frame), and one request may carry many files. A shared budget caps
+	// the total work any single request can cause; files beyond it are priced
+	// at the ceiling, the same conservative value an unmeasurable file gets.
+	if probeBudget != nil {
+		if header.Size > *probeBudget {
+			return ceiling
+		}
+		*probeBudget -= header.Size
+	}
+	file, err := header.Open()
+	if err != nil {
+		return ceiling
+	}
+	defer file.Close()
+	seconds, err := common.GetAudioDuration(c.Request.Context(), file, extension)
+	if err != nil || seconds <= 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return ceiling
+	}
+	return min(seconds, ceiling)
 }
 
 func validateTaskPluginFields(fields url.Values) error {

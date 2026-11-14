@@ -39,10 +39,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		c.Set("chat_completion_web_search_context_size", request.WebSearchOptions.SearchContextSize)
 	}
 
-	err = helper.ModelMappedHelper(c, info, request)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
-	}
+	// model_mapping is applied by controller.Relay() inside the retry loop
+	// (right after getChannel sets model_mapping for the selected channel),
+	// so per-format handlers no longer call ModelMappedHelper here.
 	if err := helper.ApplyReasoningModelSuffix(c, info, request); err != nil {
 		return newConvertRequestFailedError(c, info, err)
 	}
@@ -99,6 +98,18 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 
 	if passThroughGlobal || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
+		if err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		// Pass-through keeps the client's body shape, but model_mapping is
+		// ADDRESSING, not protocol conversion: when the channel maps the
+		// client's virtual name to an upstream name, the mapped name has to
+		// reach the wire or the upstream 404s on a model it never heard of.
+		if _, err := common.RewriteBodyJSONModel(c, info.UpstreamModelName); err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		// Re-read storage: RewriteBodyJSONModel replaced it.
+		storage, err = common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}

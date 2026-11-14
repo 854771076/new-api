@@ -1,0 +1,6 @@
+# 02-10 ③ soak 专用：把并发租约 TTL 压到 30s，使续约间隔（TTL/3=10s）
+# 与崩溃回收（30s）在一次 soak 窗口内可观测。默认 900s 时两者都看不到。
+services:
+  new-api:
+    environment:
+      - REDIS_CONCURRENCY_LEASE_TTL_SECONDS=30

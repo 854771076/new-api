@@ -277,3 +277,122 @@ describe('selected option icons', () => {
     expect(screen.queryByAltText('')).not.toBeInTheDocument()
   })
 })
+
+type MockRect = {
+  left: number
+  top: number
+  width: number
+  height: number
+  right: number
+  bottom: number
+}
+
+function rect(left: number, top: number, width: number, height: number): MockRect {
+  return { left, top, width, height, right: left + width, bottom: top + height }
+}
+
+function mockRectFor(el: Element, value: MockRect) {
+  vi.spyOn(el, 'getBoundingClientRect').mockReturnValue(
+    value as unknown as DOMRect
+  )
+}
+
+describe('popup placement inside a dialog', () => {
+  // 对话框(100,50)-(600,550)，内容可滚动；弹层 max 高度按 208(200+边框/间距)。
+  // allowCustomValue 走 LegacyComboboxInput 分支——看板筛选对话框的令牌 Key
+  // 筛选用的就是它（Base UI 分支自带锚定，不受此定位逻辑影响）。
+  const dialogRect = rect(100, 50, 500, 500)
+
+  function PlacementFixture() {
+    return (
+      <Combobox
+        options={options}
+        value=''
+        onValueChange={() => undefined}
+        aria-label='Provider'
+        allowCustomValue
+        emptyText='No matching provider'
+      />
+    )
+  }
+
+  async function openInDialog() {
+    render(
+      <Dialog open title='Choose a provider'>
+        <PlacementFixture />
+      </Dialog>
+    )
+    const input = screen.getByRole('combobox', { name: 'Provider' })
+    const dialog = document.querySelector('[role="dialog"]')
+    expect(dialog).not.toBeNull()
+    mockRectFor(dialog as Element, dialogRect)
+    await userEvent.setup().click(input)
+    await waitFor(() => expect(screen.getByRole('listbox')).toBeVisible())
+    return input
+  }
+
+  function popupTop() {
+    const style = screen.getByRole('listbox').parentElement?.style
+    return Number.parseFloat(style?.top ?? '')
+  }
+
+  it('drops the popup right below the input when the dialog has room below', async () => {
+    const input = await openInDialog()
+    mockRectFor(input, rect(120, 100, 400, 32))
+    window.dispatchEvent(new Event('scroll'))
+    await waitFor(() => expect(popupTop()).toBe(136))
+  })
+
+  it('flips the popup above the input when space below is too short', async () => {
+    // 输入框贴近对话框底部：下方仅 114px，不够 208 的弹层 → 向上翻转
+    const input = await openInDialog()
+    mockRectFor(input, rect(120, 400, 400, 32))
+    window.dispatchEvent(new Event('scroll'))
+    await waitFor(() => expect(popupTop()).toBe(188)) // 400 - 4 - 208
+  })
+
+  it('keeps the popup following the input when the dialog content scrolls', async () => {
+    const input = await openInDialog()
+    mockRectFor(input, rect(120, 100, 400, 32))
+    window.dispatchEvent(new Event('scroll'))
+    await waitFor(() => expect(popupTop()).toBe(136))
+
+    // 模拟容器内滚动把输入框上移 60px
+    mockRectFor(input, rect(120, 40, 400, 32))
+    window.dispatchEvent(new Event('scroll'))
+    await waitFor(() => expect(popupTop()).toBe(76)) // 40 + 32 + 4
+  })
+
+  it('self-corrects when the dialog becomes the fixed-position containing block', async () => {
+    // 对话框若带 transform/contain 等成为 fixed 的包含块，同样的 top 值会整体
+    // 偏移（实测偏移137px，弹层落到对话框外被裁掉）。弹层应按"实际渲染位置
+    // 与期望视口位置的差值"逐帧纠偏。
+    const input = await openInDialog()
+    mockRectFor(input, rect(120, 100, 400, 32))
+    window.dispatchEvent(new Event('scroll'))
+    await waitFor(() => expect(popupTop()).toBe(136))
+
+    const popup = screen.getByRole('listbox').parentElement as HTMLElement
+    const containerOffset = 137
+    // 模拟包含块偏移：渲染位置 = style.top + offset（跟随 style 变化）
+    vi.spyOn(popup, 'getBoundingClientRect').mockImplementation(() => {
+      const styleTop = Number.parseFloat(popup.style.top || '0')
+      const styleLeft = Number.parseFloat(popup.style.left || '0')
+      return rect(styleLeft + containerOffset, styleTop + containerOffset, 430, 202) as unknown as DOMRect
+    })
+    window.dispatchEvent(new Event('scroll'))
+    // 期望视觉位置仍是 136：style.top 会被纠偏到 136 - 137 = -1
+    await waitFor(() =>
+      expect(Number.parseFloat(popup.style.top) + containerOffset).toBe(136)
+    )
+    // 稳定性：纠偏值必须跨帧收敛。若逐帧重算+阈值跳变，style.top 会在
+    // 纠偏值与视口值之间来回振荡（真实浏览器里表现为弹层高频闪烁）。
+    const seen = new Set<number>()
+    for (let i = 0; i < 6; i += 1) {
+      seen.add(Number.parseFloat(popup.style.top))
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+    }
+    expect(seen.size).toBe(1)
+    expect([...seen][0] + containerOffset).toBe(136)
+  })
+})

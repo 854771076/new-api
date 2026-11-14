@@ -157,6 +157,31 @@ func (s *StreamStatus) MarkFailed(code, errorType string, status int) {
 	}
 }
 
+// SetErrorCode records the fine-grained code that explains how the stream
+// ended, e.g. the upstream idle timeout the gateway gave up on. It is a
+// diagnosis, not a verdict on the protocol result, so it does not change the
+// response outcome.
+func (s *StreamStatus) SetErrorCode(code string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if code != "" {
+		s.errorCode = code
+	}
+}
+
+// ErrorCode returns the fine-grained code recorded for the stream end.
+func (s *StreamStatus) ErrorCode() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.errorCode
+}
+
 func (s *StreamStatus) ResponseOutcome() string {
 	if s == nil {
 		return ""

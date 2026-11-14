@@ -1,0 +1,7 @@
+title = "new-api gitleaks config"
+
+[allowlist]
+description = "集成测试自建内容豁免(concurrency-test/ 内凭据均为本地/内网测试实例自建,详见该目录 README)"
+paths = [
+    '''concurrency-test/.*''',
+]

@@ -545,6 +545,54 @@ func TestOaiResponsesHandlerRewritesSGLangCreatedAtToInt(t *testing.T) {
 	assert.NotContains(t, w.Body.String(), `1786588600.0`)
 }
 
+// 非流式响应的响应体读取耗时单独成段：上游提前发出响应头后，整段生成时间都
+// 落在这里，没有这一段就看不出"响应头已到、内容还没来"的等待。
+func TestOaiResponsesHandlerRecordsUpstreamBodyDuration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(&delayedReader{
+			delay: 30 * time.Millisecond,
+			data:  []byte(`{"id":"resp_1","status":"completed","output":[]}`),
+		}),
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+	}
+
+	_, apiErr := OaiResponsesHandler(c, info, resp)
+	require.Nil(t, apiErr)
+
+	timing := relaycommon.RequestTimingFrom(c)
+	require.NotNil(t, timing, "the relay request must carry a timing collector")
+	assert.GreaterOrEqual(t, timing.UpstreamBodyMs.Load(), int64(30),
+		"the upstream response body read must be measured separately from the header wait")
+}
+
+// delayedReader 在第一次读取前睡一段时间，制造"响应体迟迟不来"的形态。
+type delayedReader struct {
+	delay time.Duration
+	data  []byte
+	read  bool
+}
+
+func (r *delayedReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		time.Sleep(r.delay)
+	}
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
 func TestOaiResponsesStreamHandlerRewritesSGLangCreatedAtToInt(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	oldTimeout := constant.StreamingTimeout

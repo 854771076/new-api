@@ -1,11 +1,17 @@
 package controller
 
 import (
+	"bytes"
+	"context"
+	"encoding/binary"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -309,4 +315,151 @@ func TestCloudflareEmbeddingResponseCompatibility(t *testing.T) {
 			assert.JSONEq(t, tt.body, w.Body.String())
 		})
 	}
+}
+
+// TestChannelTestRelayFormat 校验端点类型到 relay format 的映射。
+func TestChannelTestRelayFormat(t *testing.T) {
+	for _, tt := range []struct {
+		endpointType constant.EndpointType
+		want         types.RelayFormat
+	}{
+		{endpointType: constant.EndpointTypeOpenAI, want: types.RelayFormatOpenAI},
+		{endpointType: constant.EndpointTypeOpenAIResponse, want: types.RelayFormatOpenAIResponses},
+		{endpointType: constant.EndpointTypeOpenAIResponseCompact, want: types.RelayFormatOpenAIResponsesCompaction},
+		{endpointType: constant.EndpointTypeAnthropic, want: types.RelayFormatClaude},
+		{endpointType: constant.EndpointTypeGemini, want: types.RelayFormatGemini},
+		{endpointType: constant.EndpointTypeJinaRerank, want: types.RelayFormatRerank},
+		{endpointType: constant.EndpointTypeImageGeneration, want: types.RelayFormatOpenAIImage},
+		{endpointType: constant.EndpointTypeEmbeddings, want: types.RelayFormatEmbedding},
+		{endpointType: constant.EndpointTypeAudioTranscription, want: types.RelayFormatOpenAIAudio},
+		{endpointType: constant.EndpointType("unknown-endpoint"), want: types.RelayFormatOpenAI},
+	} {
+		t.Run(string(tt.endpointType), func(t *testing.T) {
+			assert.Equal(t, tt.want, channelTestRelayFormat(string(tt.endpointType)))
+		})
+	}
+}
+
+// TestChannelTestAudioTranscriptionRequest 校验音频转写端点构造出的是音频转写请求。
+func TestChannelTestAudioTranscriptionRequest(t *testing.T) {
+	request, ok := buildTestRequest(
+		constant.XunfeiASRModelName,
+		string(constant.EndpointTypeAudioTranscription),
+		&model.Channel{},
+		false,
+	).(*dto.AudioRequest)
+	require.True(t, ok)
+	assert.Equal(t, constant.XunfeiASRModelName, request.Model)
+	assert.Equal(t, "json", request.ResponseFormat)
+
+	// 其它端点类型的请求构造保持不变。
+	_, ok = buildTestRequest("gpt-4o-mini", string(constant.EndpointTypeOpenAI), &model.Channel{}, false).(*dto.GeneralOpenAIRequest)
+	assert.True(t, ok)
+}
+
+// TestChannelTestAudioModelOnlyForcedForXunfei 音频转写端点只在讯飞渠道上强制使用
+// 讯飞转写模型；其它渠道（如 OpenAI whisper）保持运营方指定的模型，否则会被改成
+// 讯飞模型名发往非讯飞上游并得到 model_not_found。
+func TestChannelTestAudioModelOnlyForcedForXunfei(t *testing.T) {
+	audioEndpoint := string(constant.EndpointTypeAudioTranscription)
+
+	// 讯飞渠道：音频转写端点使用固定转写模型，忽略运营方指定的对话模型或空模型。
+	assert.Equal(t, constant.XunfeiASRModelName, resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", audioEndpoint))
+	assert.Equal(t, constant.XunfeiASRModelName, resolveChannelTestModel(constant.ChannelTypeXunfei, "", audioEndpoint))
+
+	// 非讯飞渠道：模型保持原值，包括空值（由调用方回落到渠道测试模型或渠道模型列表）。
+	assert.Equal(t, "whisper-1", resolveChannelTestModel(constant.ChannelTypeOpenAI, "whisper-1", audioEndpoint))
+	assert.Equal(t, "", resolveChannelTestModel(constant.ChannelTypeOpenAI, "", audioEndpoint))
+
+	// 非音频端点不改写模型。
+	assert.Equal(t, "SparkDesk", resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", string(constant.EndpointTypeOpenAI)))
+	assert.Equal(t, "SparkDesk", resolveChannelTestModel(constant.ChannelTypeXunfei, "SparkDesk", ""))
+}
+
+// TestChannelTestAudioMultipartCarriesFixture 校验渠道测试的 multipart 请求体携带音频夹具。
+func TestChannelTestAudioMultipartCarriesFixture(t *testing.T) {
+	body, contentType, err := buildChannelTestAudioMultipart(constant.XunfeiASRModelName)
+	require.NoError(t, err)
+	require.NotEmpty(t, body)
+
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	require.NoError(t, err)
+	assert.Equal(t, "multipart/form-data", mediaType)
+
+	form, err := multipart.NewReader(bytes.NewReader(body), params["boundary"]).ReadForm(1 << 20)
+	require.NoError(t, err)
+	defer form.RemoveAll()
+
+	assert.Equal(t, []string{constant.XunfeiASRModelName}, form.Value["model"])
+	files := form.File["file"]
+	require.Len(t, files, 1)
+	assert.Equal(t, channelTestAudioFileName, files[0].Filename)
+
+	opened, err := files[0].Open()
+	require.NoError(t, err)
+	defer opened.Close()
+	audio, err := io.ReadAll(opened)
+	require.NoError(t, err)
+	assert.Equal(t, channelTestAudioSampleWAV, audio)
+}
+
+// TestChannelTestAudioFixtureFormat 校验音频夹具是讯飞要求的 16kHz/16bit/单声道 WAV。
+func TestChannelTestAudioFixtureFormat(t *testing.T) {
+	data := channelTestAudioSampleWAV
+	require.Greater(t, len(data), 44)
+	assert.Equal(t, "RIFF", string(data[0:4]))
+	assert.Equal(t, "WAVE", string(data[8:12]))
+	assert.Equal(t, "fmt ", string(data[12:16]))
+	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(data[20:22]))     // PCM
+	assert.Equal(t, uint16(1), binary.LittleEndian.Uint16(data[22:24]))     // 单声道
+	assert.Equal(t, uint32(16000), binary.LittleEndian.Uint32(data[24:28])) // 16kHz
+	assert.Equal(t, uint16(16), binary.LittleEndian.Uint16(data[34:36]))    // 16bit
+
+	seconds, err := common.GetAudioDuration(context.Background(), bytes.NewReader(data), ".wav")
+	require.NoError(t, err)
+	assert.InDelta(t, 2.0, seconds, 0.01)
+}
+
+// TestChannelTestTranscriptionResponse 校验渠道测试只对音频转写端点回传上游响应体，
+// 并对其长度限幅。
+func TestChannelTestTranscriptionResponse(t *testing.T) {
+	audioEndpoint := string(constant.EndpointTypeAudioTranscription)
+	transcript := `{"text":"今天天气不错","duration":2.0}`
+
+	t.Run("audio transcription returns upstream body", func(t *testing.T) {
+		preview := channelTestResponsePreview(audioEndpoint, []byte(transcript))
+		require.Equal(t, transcript, preview)
+
+		payload := channelTestSuccessPayload(testResult{responseBody: preview}, 1.25)
+		assert.Equal(t, true, payload["success"])
+		assert.Equal(t, transcript, payload["response"])
+	})
+
+	t.Run("other endpoints omit response", func(t *testing.T) {
+		for _, endpointType := range []constant.EndpointType{
+			constant.EndpointTypeOpenAI,
+			constant.EndpointTypeOpenAIResponse,
+			constant.EndpointTypeAnthropic,
+			constant.EndpointTypeGemini,
+			constant.EndpointTypeEmbeddings,
+			constant.EndpointTypeImageGeneration,
+			constant.EndpointType(""),
+		} {
+			assert.Empty(t, channelTestResponsePreview(string(endpointType), []byte(transcript)), "endpoint %q", endpointType)
+		}
+
+		payload := channelTestSuccessPayload(testResult{}, 1.25)
+		_, ok := payload["response"]
+		assert.False(t, ok)
+	})
+
+	t.Run("long transcription is truncated", func(t *testing.T) {
+		atLimit := strings.Repeat("转", channelTestResponseMaxRunes)
+		assert.Equal(t, atLimit, channelTestResponsePreview(audioEndpoint, []byte(atLimit)))
+
+		overLimit := atLimit + strings.Repeat("写", 10)
+		preview := channelTestResponsePreview(audioEndpoint, []byte(overLimit))
+		assert.Equal(t, atLimit+channelTestResponseTruncatedMarker, preview)
+		assert.True(t, utf8.ValidString(preview))
+	})
 }

@@ -51,3 +51,11 @@ go.work.sum
 
 # GSD planning artifacts (local-only, never committed)
 .planning/
+
+# ============ 本地私有产物与测试素材（勿入库）============
+# ASR 端测音频素材：约 8.4MB 二进制，仓库内无代码引用
+/scripts/samples/
+# 供应商参考配置：含真实 api_key / access_key_id，禁止入库
+/scripts/resources/
+# 并发测试的唯一配置源：含管理员凭据，禁止入库
+/concurrency-test/config.json

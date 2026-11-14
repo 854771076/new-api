@@ -47,6 +47,10 @@ export const apiKeySchema = z.object({
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
   allow_user_quota_query: z.boolean().optional().default(false),
+  concurrency_limit: z.number().optional(),
+  // Read-side shape reserved for the per-model cap (02-13 wires it into the
+  // form/payload atomically; this plan only reads it, never writes).
+  concurrency_limit_by_model: z.string().optional(),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -96,6 +100,13 @@ export interface ApiKeyFormData {
   group: string
   auto_groups: string[]
   cross_group_retry: boolean
+  /** Global concurrency cap; 0 means unlimited. Always sent explicitly. */
+  concurrency_limit: number
+  /**
+   * Per-model caps as a `model=limit` CSV. Always sent explicitly: '' clears
+   * the stored caps while an omitted key would keep them.
+   */
+  concurrency_limit_by_model: string
 }
 
 export interface TokenAutoGroupsConfig {

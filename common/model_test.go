@@ -5,7 +5,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
+
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWanEndpointsDistinguishImagesFromVideos(t *testing.T) {
@@ -19,7 +22,8 @@ func TestWanEndpointsDistinguishImagesFromVideos(t *testing.T) {
 		})
 	}
 	for _, name := range []string{
-		"wanx2.1-t2v-plus", "wanx2.1-t2v-turbo", "wanx2.1-i2v-plus", "wanx2.1-i2v-turbo",
+		"wanx2.1-t2v-plus", "wanx2.1-t2v-turbo", "wanx2.0-t2v-turbo",
+		"wanx2.1-i2v-plus", "wanx2.1-i2v-turbo",
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.NotContains(t, common.GetEndpointTypesByChannelType(constant.ChannelTypeAli, name), constant.EndpointTypeImageGeneration)
@@ -35,4 +39,26 @@ func TestDeepSeekToolRoutingNamesReportTheirEndpoint(t *testing.T) {
 		assert.Equal(t, []constant.EndpointType{constant.EndpointTypeDeepSeekToolsFetch}, common.GetEndpointTypesByChannelType(channelType, constant.DeepSeekFetchModel))
 	}
 	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI}, common.GetEndpointTypesByChannelType(constant.ChannelTypeDeepSeek, "deepseek-flash"))
+}
+
+// TestAudioTranscriptionEndpointTypeRegistration 校验音频转写端点类型在各个登记面上都已落地。
+func TestAudioTranscriptionEndpointTypeRegistration(t *testing.T) {
+	// 宿主常量必须与 relaykit 侧的端点类型常量保持一致。
+	assert.Equal(t, types.EndpointTypeAudioTranscription, constant.EndpointTypeAudioTranscription)
+	assert.Equal(t, constant.EndpointType("audio-transcription"), constant.EndpointTypeAudioTranscription)
+
+	// 内置端点的默认请求信息。
+	info, ok := common.GetDefaultEndpointInfo(constant.EndpointTypeAudioTranscription)
+	require.True(t, ok)
+	assert.Equal(t, "/v1/audio/transcriptions", info.Path)
+	assert.Equal(t, "POST", info.Method)
+
+	// 讯飞渠道的端点类型按模型声明：转写模型只声明音频转写端点，对话模型不声明音频转写端点。
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeAudioTranscription},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, constant.XunfeiASRModelName))
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, "SparkDesk-v3.5"))
+	// 模型名缺失时无法判定能力，保守地只声明 OpenAI 端点。
+	assert.Equal(t, []constant.EndpointType{constant.EndpointTypeOpenAI},
+		common.GetEndpointTypesByChannelType(constant.ChannelTypeXunfei, ""))
 }

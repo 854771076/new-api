@@ -154,6 +154,10 @@ func TestSetUserPermissionsStoresOnlyOverrides(t *testing.T) {
 			ActionSensitiveWrite: true,
 			ActionSecretView:     false,
 		},
+		ResourceConcurrency: {
+			ActionConcurrencyRead:  true,
+			ActionConcurrencyWrite: true,
+		},
 		ResourceTaskPlugin: {
 			ActionBind: false,
 		},
@@ -185,6 +189,10 @@ func TestSetUserPermissionsStoresOnlyOverrides(t *testing.T) {
 			ActionWrite:          true,
 			ActionSensitiveWrite: false,
 			ActionSecretView:     false,
+		},
+		ResourceConcurrency: {
+			ActionConcurrencyRead:  true,
+			ActionConcurrencyWrite: true,
 		},
 		ResourceTaskPlugin: {
 			ActionBind: false,

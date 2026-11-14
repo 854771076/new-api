@@ -128,9 +128,14 @@ var channelNonSensitiveFields = map[string]struct{}{
 	"status_code_mapping": {},
 	"priority":            {},
 	"auto_ban":            {},
-	"other_info":          {},
-	"tag":                 {},
-	"remark":              {},
-	"channel_info":        {},
-	"multi_key_mode":      {},
+	// CHN-01 (02-09 C-4): the per-channel concurrency cap is a routing /
+	// scheduling parameter like priority/weight, editable with ChannelWrite;
+	// it carries no credential material, so ChannelSensitiveWrite would gate it
+	// too strictly.
+	"concurrency_limit": {},
+	"other_info":        {},
+	"tag":               {},
+	"remark":            {},
+	"channel_info":      {},
+	"multi_key_mode":    {},
 }

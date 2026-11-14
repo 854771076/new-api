@@ -190,7 +190,10 @@ func TestSystemTaskActiveKeyPreventsDuplicateActiveRun(t *testing.T) {
 	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, payload, testSystemTaskState{})
 	require.NoError(t, err)
 	_, err = CreateSystemTask(SystemTaskTypeLogCleanup, payload, testSystemTaskState{})
-	require.Error(t, err)
+	// The duplicate insert is the cross-node race the active_key index is
+	// there to settle, so it is reported as that conflict and not as a
+	// database failure.
+	require.ErrorIs(t, err, ErrSystemTaskAlreadyActive)
 
 	activeTask, err := GetActiveSystemTask(SystemTaskTypeLogCleanup)
 	require.NoError(t, err)

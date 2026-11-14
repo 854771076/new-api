@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"mime"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/sjson"
 )
 
 // BodyStorage 请求体存储接口
@@ -345,6 +350,67 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		IncrementDiskCacheHits()
 	}
 	return storage, nil
+}
+
+// FORK-LOCAL-EXTENSION: 2026-10-20 pass-through 路径也下发映射后的模型名; remove-when: upstream 决定 pass-through 语义并实现等价的模型寻址。
+//
+// pass-through 原本被理解成「原样转发 body」，于是 model_mapping 只在走
+// 转换分支的路径生效；开了 pass_through_body_enabled（或全局
+// PassThroughRequestEnabled）的渠道仍然把客户端原始虚拟名发到上游，上游
+// 对一个它不认识的模型名返回 404「模型不存在」——与本次 fork 修复的
+// InitChannelMeta 症状完全一致，但走的是另一条分支。
+//
+// 语义澄清：pass-through 的承诺是「跳过协议转换、保留客户端 body 结构」，
+// 不等于「跳过模型寻址」。model_mapping 决定请求发到上游的哪个模型，属于
+// 路由寻址，必须落到 wire 上。
+
+// RewriteBodyJSONModel patches the top-level JSON "model" field of the
+// request body and replaces the request's BodyStorage so the next reader sees
+// the patched bytes. Non-JSON bodies (multipart/form-data, audio uploads, raw
+// streams) are left untouched and reported as unchanged.
+//
+// This exists for every relay path that forwards the client's RAW body instead
+// of a converted request struct — pass-through channels being the case that
+// matters. Pass-through means "skip protocol conversion, keep the client's body
+// shape"; it is NOT a licence to skip model ADDRESSING. A channel whose
+// model_mapping translates a client-facing virtual name into an upstream name
+// must still put the mapped name on the wire, or the upstream answers 404
+// "model not found" for a model it has never heard of.
+//
+// emptyModelName is a no-op: nothing to substitute.
+func RewriteBodyJSONModel(c *gin.Context, modelName string) (rewritten bool, err error) {
+	if modelName == "" {
+		return false, nil
+	}
+	mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+	if err != nil {
+		return false, nil
+	}
+	if mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json") {
+		return false, nil
+	}
+	storage, err := GetBodyStorage(c)
+	if err != nil {
+		return false, err
+	}
+	raw, err := storage.Bytes()
+	if err != nil {
+		return false, err
+	}
+	patched, err := sjson.SetBytes(raw, "model", modelName)
+	if err != nil {
+		return false, err
+	}
+	newStorage, err := CreateBodyStorage(patched)
+	if err != nil {
+		return false, err
+	}
+	_ = storage.Close()
+	c.Set(KeyBodyStorage, newStorage)
+	c.Set(KeyRequestBody, nil)
+	c.Request.Body = io.NopCloser(newStorage)
+	c.Request.ContentLength = int64(len(patched))
+	return true, nil
 }
 
 type replayableBodyReader struct {

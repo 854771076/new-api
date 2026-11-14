@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>并发排队与容量边界 · 产品汇报(2026-10-15)</title>
+<style>
+  :root{--ink:#1f2933;--soft:#55627a;--line:#e2e8f0;--bg:#f6f8fa;--card:#fff;
+    --ok:#15803d;--ok-bg:#e8f5ec;--bad:#b91c1c;--bad-bg:#fdecec;--mid:#c2410c;--mid-bg:#fdf1e6;--blue:#1d4ed8;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-size:16px;line-height:1.75;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:24px 20px 48px}
+  h1{font-size:26px;line-height:1.35;margin:0 0 4px}
+  .meta{font-size:13.5px;color:var(--soft);margin:0 0 14px}
+  .lede{background:#1d4ed8;color:#fff;border-radius:10px;padding:14px 18px;font-size:17px;font-weight:600;line-height:1.6}
+  h2{font-size:21px;margin:34px 0 10px;padding-left:10px;border-left:5px solid #1d4ed8}
+  h3{font-size:16.5px;margin:18px 0 4px}
+  p{margin:8px 0}
+  .small{font-size:13.5px;color:var(--soft)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:16px 0 4px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .card .v{font-size:30px;font-weight:700;line-height:1.2}
+  .card .t{font-size:13.5px;color:var(--soft);line-height:1.5;margin-top:2px}
+  .v.ok{color:var(--ok)}.v.bad{color:var(--bad)}.v.mid{color:var(--mid)}
+  .figure{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 14px 8px;margin:12px 0}
+  .figure .cap{font-size:14.5px;font-weight:600;margin:0 0 4px}
+  .figure .note{font-size:13px;color:var(--soft);margin:6px 2px 2px}
+  svg{display:block;width:100%;height:auto}
+  .pill{display:inline-block;border-radius:999px;padding:1px 10px;font-size:13px;font-weight:600}
+  .pill.ok{background:var(--ok-bg);color:var(--ok)}
+  .pill.bad{background:var(--bad-bg);color:var(--bad)}
+  .pill.mid{background:var(--mid-bg);color:var(--mid)}
+  .decisions{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 18px 12px}
+  .decisions li{margin:9px 0}
+  .decisions b{color:#1d4ed8}
+  ul{padding-left:22px}
+  footer{margin-top:34px;font-size:13px;color:var(--soft);border-top:1px solid var(--line);padding-top:10px}
+  a{color:#1d4ed8}
+  @media print{body{background:#fff}.figure,.card,.decisions{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>并发排队与容量边界 · 产品汇报</h1>
+<p class="meta">2026-10-15 · 镜像 new-api:20261015 · 机制矩阵 9 轮×500 任务 + 真实上游容量 3 种渠道规模×5 档目标速率 + 真实体验轮 500 任务 · 上游:内网 upstream.example.internal:30000(Qwen3.6-35B,响应约 0.16-0.24 秒)</p>
+
+<p class="lede">一句话结论:排队开关直接决定体验(拒绝 14.4%→0),默认配置即可上线;容量有天花板——单渠道实测约 11 请求/秒、扩到 8 渠道也只有约 27,扩渠道边际递减;多个客户端共用一个 key 是灾难,必须一调用方一 key。</p>
+
+<div class="cards">
+  <div class="card"><div class="v ok">14.4% → 0</div><div class="t">打开排队后,客户端「一发就被拒」的比例归零</div></div>
+  <div class="card"><div class="v ok">100%</div><div class="t">默认排队配置(4/128/10s)下 9 轮全部满完成率</div></div>
+  <div class="card"><div class="v mid">≈27/秒</div><div class="t">8 渠道真实吞吐上限;4→8 渠道只多 24%</div></div>
+  <div class="card"><div class="v bad">88.4%</div><div class="t">10 客户端共享 1 个 key 的完成率(反例)</div></div>
+</div>
+
+<h2>这次测了什么</h2>
+<ul>
+  <li><b>机制矩阵</b>(4500 任务):10 个客户端各 50 个长短不一的任务,一半「被拒不重试」、一半「按提示退避重试」,对比开/关排队、不同队列深浅、单渠道/多渠道、共享/独立 key。</li>
+  <li><b>真实容量矩阵</b>:把渠道复制成 1 / 4 / 8 份(每渠道 3 并发),对每种规模按 5→30 请求/秒逐档加压 45 秒,找吞吐天花板与塌方点。</li>
+  <li><b>判定线</b>:完成率 ≥99% 且被拒比例 ≤1% 才算「合格」。429 = 网关直接拒绝请求。</li>
+</ul>
+
+<h2>发现一:排队开关 = 体验开关</h2>
+<div class="figure">
+  <p class="cap">图 A · 开/关排队对比(机制矩阵)</p>
+  <svg viewBox="0 0 720 300" role="img" aria-label="开闭排队对比柱状图">
+    <!-- grid -->
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="70" y1="250" x2="690" y2="250"/><line x1="70" y1="197.5" x2="690" y2="197.5"/>
+      <line x1="70" y1="145" x2="690" y2="145"/><line x1="70" y1="92.5" x2="690" y2="92.5"/><line x1="70" y1="40" x2="690" y2="40"/>
+    </g>
+    <g font-size="12" fill="#55627a" text-anchor="end">
+      <text x="62" y="254">0</text><text x="62" y="201.5">25</text><text x="62" y="149">50</text><text x="62" y="96.5">75</text><text x="62" y="44">100%</text>
+    </g>
+    <!-- group1: 首击拒绝率 -->
+    <rect x="150" y="219.8" width="70" height="30.2" fill="#b91c1c"/>
+    <text x="185" y="213" font-size="14" font-weight="700" fill="#b91c1c" text-anchor="middle">14.4%</text>
+    <rect x="250" y="246" width="70" height="4" fill="#15803d"/>
+    <text x="285" y="239" font-size="14" font-weight="700" fill="#15803d" text-anchor="middle">0%</text>
+    <text x="220" y="272" font-size="13.5" fill="#1f2933" text-anchor="middle">一发就被拒(不排队 → 排队)</text>
+    <!-- group2: 完成率 -->
+    <rect x="430" y="55.5" width="70" height="194.5" fill="#c2410c"/>
+    <text x="465" y="48" font-size="14" font-weight="700" fill="#c2410c" text-anchor="middle">92.6%</text>
+    <rect x="530" y="40" width="70" height="210" fill="#15803d"/>
+    <text x="565" y="33" font-size="14" font-weight="700" fill="#15803d" text-anchor="middle">100%</text>
+    <text x="500" y="272" font-size="13.5" fill="#1f2933" text-anchor="middle">任务最终完成(不排队 → 排队)</text>
+    <text x="70" y="24" font-size="13" fill="#55627a">比例(%)</text>
+  </svg>
+  <p class="note">机制矩阵 9 轮汇总;两根「不排队」红柱 = 同一批任务在关闭排队时的表现。</p>
+</div>
+
+<h2>发现二:排队够用就行,不用堆深</h2>
+<div class="figure">
+  <p class="cap">图 B · 队列由浅到深四档对比(机制矩阵)</p>
+  <svg viewBox="0 0 760 300" role="img" aria-label="队列深浅对比">
+    <!-- 左:完成率(纵轴 96% 起) -->
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="60" y1="250" x2="350" y2="250"/><line x1="60" y1="202.5" x2="350" y2="202.5"/>
+      <line x1="60" y1="155" x2="350" y2="155"/><line x1="60" y1="107.5" x2="350" y2="107.5"/><line x1="60" y1="60" x2="350" y2="60"/>
+    </g>
+    <g font-size="11.5" fill="#55627a" text-anchor="end">
+      <text x="54" y="254">96</text><text x="54" y="206.5">97</text><text x="54" y="159">98</text><text x="54" y="111.5">99</text><text x="54" y="64">100%</text>
+    </g>
+    <rect x="75" y="159.4" width="46" height="90.6" fill="#c2410c"/>
+    <text x="98" y="152" font-size="13" font-weight="700" fill="#c2410c" text-anchor="middle">98.4</text>
+    <rect x="145" y="60" width="46" height="190" fill="#15803d"/>
+    <text x="168" y="53" font-size="13" font-weight="700" fill="#15803d" text-anchor="middle">100</text>
+    <rect x="215" y="60" width="46" height="190" fill="#15803d"/>
+    <text x="238" y="53" font-size="13" font-weight="700" fill="#15803d" text-anchor="middle">100</text>
+    <rect x="285" y="60" width="46" height="190" fill="#15803d"/>
+    <text x="308" y="53" font-size="13" font-weight="700" fill="#15803d" text-anchor="middle">100</text>
+    <g font-size="11.5" fill="#55627a" text-anchor="middle">
+      <text x="98" y="270">浅</text><text x="168" y="270">默认</text><text x="238" y="270">深</text><text x="308" y="270">超深</text>
+      <text x="205" y="288" font-size="12">完成率%(纵轴 96% 起)</text>
+    </g>
+    <!-- 右:峰值排队 vs 容量128 -->
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="420" y1="250" x2="740" y2="250"/><line x1="420" y1="176.5" x2="740" y2="176.5"/>
+      <line x1="420" y1="103" x2="740" y2="103"/><line x1="420" y1="63" x2="740" y2="63"/>
+    </g>
+    <line x1="420" y1="63" x2="740" y2="63" stroke="#b91c1c" stroke-width="2" stroke-dasharray="7 5"/>
+    <text x="740" y="56" font-size="12.5" font-weight="700" fill="#b91c1c" text-anchor="end">容量上限 128</text>
+    <rect x="440" y="194.2" width="46" height="55.8" fill="#1d4ed8"/>
+    <text x="463" y="187" font-size="13" font-weight="700" fill="#1d4ed8" text-anchor="middle">38</text>
+    <rect x="525" y="178.3" width="46" height="71.7" fill="#1d4ed8"/>
+    <text x="548" y="171" font-size="13" font-weight="700" fill="#1d4ed8" text-anchor="middle">49</text>
+    <rect x="610" y="182.7" width="46" height="67.3" fill="#1d4ed8"/>
+    <text x="633" y="175" font-size="13" font-weight="700" fill="#1d4ed8" text-anchor="middle">46</text>
+    <rect x="680" y="179.8" width="46" height="70.2" fill="#1d4ed8"/>
+    <text x="703" y="172" font-size="13" font-weight="700" fill="#1d4ed8" text-anchor="middle">48</text>
+    <g font-size="11.5" fill="#55627a" text-anchor="middle">
+      <text x="463" y="270">浅</text><text x="548" y="270">默认</text><text x="633" y="270">深</text><text x="703" y="270">超深</text>
+      <text x="580" y="288" font-size="12">实际峰值排队(次),上限 128 用不满</text>
+    </g>
+  </svg>
+  <p class="note">四档完成率几乎无差异;实际排队峰值只到 40-50,离容量 128 很远——深队列是冗余,默认值(深 4 倍、上限 128、最多等 10 秒)已含 2 倍余量。浅档(上限 8、等 3 秒)会漏掉 1.6% 任务。</p>
+</div>
+
+<h2>发现三:多渠道能扛量,但扩渠道有天花板</h2>
+<div class="figure">
+  <p class="cap">图 C · 真实上游容量:目标吞吐 vs 实际达成(每渠道 3 并发)</p>
+  <svg viewBox="0 0 760 380" role="img" aria-label="三种渠道规模的容量折线">
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="80" y1="330" x2="720" y2="330"/><line x1="80" y1="233.3" x2="720" y2="233.3"/>
+      <line x1="80" y1="136.7" x2="720" y2="136.7"/><line x1="80" y1="40" x2="720" y2="40"/>
+    </g>
+    <g font-size="12" fill="#55627a" text-anchor="end">
+      <text x="72" y="334">0</text><text x="72" y="237.3">10</text><text x="72" y="140.7">20</text><text x="72" y="44">30</text>
+    </g>
+    <g font-size="12" fill="#55627a" text-anchor="middle">
+      <text x="186.7" y="348">5</text><text x="293.3" y="348">10</text><text x="400" y="348">15</text>
+      <text x="506.7" y="348">20</text><text x="613.3" y="348">25</text><text x="720" y="348">30</text>
+      <text x="400" y="370" font-size="13" fill="#1f2933">目标吞吐(请求/秒)</text>
+    </g>
+    <text x="26" y="190" font-size="13" fill="#1f2933" transform="rotate(-90 26 190)" text-anchor="middle">实际达成(请求/秒)</text>
+    <!-- 理想线 y=x -->
+    <line x1="80" y1="330" x2="720" y2="40" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="8 6"/>
+    <text x="640" y="70" font-size="12" fill="#94a3b8">理想:达成=目标</text>
+    <!-- N=1 -->
+    <polyline points="186.7,284.6 293.3,241.1 400,223.7 506.7,223.7 720,220.8" fill="none" stroke="#64748b" stroke-width="2.5"/>
+    <g fill="#64748b">
+      <circle cx="186.7" cy="284.6" r="4.5"/><circle cx="293.3" cy="241.1" r="4.5"/><circle cx="400" cy="223.7" r="4.5"/><circle cx="506.7" cy="223.7" r="4.5"/><circle cx="720" cy="220.8" r="4.5"/>
+    </g>
+    <text x="716" y="212" font-size="12.5" font-weight="700" fill="#64748b" text-anchor="end">1 渠道:平台 ≈11</text>
+    <!-- N=4 -->
+    <polyline points="186.7,284.6 293.3,238.2 400,193.7 506.7,157.9 720,117.3" fill="none" stroke="#1d4ed8" stroke-width="2.5"/>
+    <g fill="#1d4ed8">
+      <circle cx="186.7" cy="284.6" r="4.5"/><circle cx="293.3" cy="238.2" r="4.5"/><circle cx="400" cy="193.7" r="4.5"/><circle cx="506.7" cy="157.9" r="4.5"/><circle cx="720" cy="117.3" r="4.5"/>
+    </g>
+    <text x="714" y="109" font-size="12.5" font-weight="700" fill="#1d4ed8" text-anchor="end">4 渠道:22(未到平台)</text>
+    <!-- N=8 -->
+    <polyline points="400,191.8 506.7,146.3 720,66" fill="none" stroke="#15803d" stroke-width="2.5"/>
+    <g fill="#15803d">
+      <circle cx="400" cy="191.8" r="4.5"/><circle cx="506.7" cy="146.3" r="4.5"/><circle cx="720" cy="66" r="4.5"/>
+    </g>
+    <text x="714" y="58" font-size="12.5" font-weight="700" fill="#15803d" text-anchor="end">8 渠道:27.3 后塌方</text>
+    <text x="400" y="212" font-size="12" fill="#55627a" text-anchor="middle">8 渠道 5/10 档因容器重启暖机污染剔除</text>
+    <!-- 安全边界标注 -->
+    <g stroke="#b91c1c" stroke-width="1.6" stroke-dasharray="4 4">
+      <line x1="186.7" y1="292" x2="186.7" y2="330"/>
+      <line x1="346" y1="200" x2="346" y2="330"/>
+      <line x1="453" y1="168" x2="453" y2="330"/>
+    </g>
+    <text x="186.7" y="326" font-size="11.5" fill="#b91c1c" text-anchor="middle">1 渠道边界≈5</text>
+    <text x="346" y="318" font-size="11.5" fill="#b91c1c" text-anchor="middle">4 渠道边界 10-15</text>
+    <text x="458" y="304" font-size="11.5" fill="#b91c1c" text-anchor="middle">8 渠道边界 15-20</text>
+    <!-- 图例 -->
+    <g font-size="12.5">
+      <line x1="90" y1="24" x2="120" y2="24" stroke="#64748b" stroke-width="2.5"/><text x="126" y="28" fill="#1f2933">1 渠道</text>
+      <line x1="190" y1="24" x2="220" y2="24" stroke="#1d4ed8" stroke-width="2.5"/><text x="226" y="28" fill="#1f2933">4 渠道</text>
+      <line x1="290" y1="24" x2="320" y2="24" stroke="#15803d" stroke-width="2.5"/><text x="326" y="28" fill="#1f2933">8 渠道</text>
+      <line x1="390" y1="24" x2="420" y2="24" stroke="#cbd5e1" stroke-width="2" stroke-dasharray="6 5"/><text x="426" y="28" fill="#94a3b8">理想线</text>
+    </g>
+  </svg>
+  <p class="note">数据:真实内网集群。三条红线为「完成率≥99% 且拒绝≤1%」的最后合格档。关键读法:① 1 渠道平台 ≈11 rps;② 4→8 渠道吞吐只从 22 涨到 27(<b>+24%,边际递减</b>,推测是排队等待者的唤醒节奏跟不上深槽位,槽位填不满——推测未做代码级证实);③ 超过边界即塌方:8 渠道目标 30 时实际反而跌到 27.3、完成率 94.5%、尾延迟恶化到 479ms。</p>
+</div>
+
+<h2>发现四:多个客户端挤一个 key = 灾难</h2>
+<div class="figure">
+  <p class="cap">图 D · 共享 1 个 key vs 每客户端独立 key(同一批 10 客户端)</p>
+  <svg viewBox="0 0 760 250" role="img" aria-label="共享key与独立key对比">
+    <!-- mini1 完成率 -->
+    <text x="130" y="20" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">完成率</text>
+    <line x1="40" y1="190" x2="220" y2="190" stroke="#e2e8f0"/>
+    <rect x="65" y="47.4" width="55" height="142.6" fill="#b91c1c"/>
+    <text x="92.5" y="40" font-size="13.5" font-weight="700" fill="#b91c1c" text-anchor="middle">88.4%</text>
+    <rect x="140" y="30" width="55" height="160" fill="#15803d"/>
+    <text x="167.5" y="23" font-size="13.5" font-weight="700" fill="#15803d" text-anchor="middle">100%</text>
+    <g font-size="12" fill="#55627a" text-anchor="middle"><text x="92.5" y="208">共享</text><text x="167.5" y="208">独立</text></g>
+    <!-- mini2 拒绝 -->
+    <text x="380" y="20" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">一发就被拒</text>
+    <line x1="290" y1="190" x2="470" y2="190" stroke="#e2e8f0"/>
+    <rect x="315" y="76.7" width="55" height="113.3" fill="#b91c1c"/>
+    <text x="342.5" y="69" font-size="13.5" font-weight="700" fill="#b91c1c" text-anchor="middle">28%</text>
+    <rect x="390" y="186" width="55" height="4" fill="#15803d"/>
+    <text x="417.5" y="179" font-size="13.5" font-weight="700" fill="#15803d" text-anchor="middle">0%</text>
+    <g font-size="12" fill="#55627a" text-anchor="middle"><text x="342.5" y="208">共享</text><text x="417.5" y="208">独立</text></g>
+    <!-- mini3 p95 -->
+    <text x="630" y="20" font-size="13.5" font-weight="600" fill="#1f2933" text-anchor="middle">P95 完成耗时</text>
+    <line x1="540" y1="190" x2="720" y2="190" stroke="#e2e8f0"/>
+    <rect x="565" y="43.3" width="55" height="146.7" fill="#b91c1c"/>
+    <text x="592.5" y="36" font-size="13.5" font-weight="700" fill="#b91c1c" text-anchor="middle">23.0 秒</text>
+    <rect x="640" y="166" width="55" height="24" fill="#15803d"/>
+    <text x="667.5" y="159" font-size="13.5" font-weight="700" fill="#15803d" text-anchor="middle">3.8 秒</text>
+    <g font-size="12" fill="#55627a" text-anchor="middle"><text x="592.5" y="208">共享</text><text x="667.5" y="208">独立</text></g>
+    <text x="380" y="235" font-size="12" fill="#55627a" text-anchor="middle">共享 key = 200 个在飞请求抢 15 个坑(3 并发+排队 12)</text>
+  </svg>
+  <p class="note">同负载下共享 key 的三个指标全面崩坏;独立 key 每个都有自己的 3 并发+排队,互不踩踏。</p>
+</div>
+
+<h2>附:削峰机制示意</h2>
+<div class="figure">
+  <p class="cap">图 E · 排队深度随时间(示意)</p>
+  <svg viewBox="0 0 720 230" role="img" aria-label="削峰示意曲线">
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="70" y1="190" x2="690" y2="190"/><line x1="70" y1="130" x2="690" y2="130"/><line x1="70" y1="70" x2="690" y2="70"/>
+    </g>
+    <g font-size="12" fill="#55627a" text-anchor="end"><text x="62" y="194">0</text><text x="62" y="134">≈25</text><text x="62" y="74">≈50</text></g>
+    <path d="M70,188 C110,186 130,80 170,72 C230,60 260,150 330,172 C420,196 540,186 690,187" fill="none" stroke="#1d4ed8" stroke-width="3"/>
+    <text x="170" y="60" font-size="12.5" font-weight="700" fill="#1d4ed8" text-anchor="middle">突发冲高 ≈50</text>
+    <text x="380" y="160" font-size="12.5" fill="#1d4ed8">几十秒内回落</text>
+    <text x="660" y="176" font-size="12.5" fill="#15803d" text-anchor="end">稳态≈0</text>
+    <g font-size="12" fill="#55627a" text-anchor="middle"><text x="380" y="215">时间(秒)</text></g>
+    <text x="24" y="100" font-size="12.5" fill="#55627a" transform="rotate(-90 24 100)" text-anchor="middle">排队深度</text>
+  </svg>
+  <p class="note">示意:排队是「削峰缓冲」不是常态积压——只在突发瞬间冲高,处理跟上后立即回落。</p>
+</div>
+
+<h2>给产品的四个决定</h2>
+<ol class="decisions">
+  <li><b>上线直接用默认排队配置</b>:开启排队、深度倍数 4、上限 128、最长等待 10 秒(UI 即改即生效,多节点 ≤60 秒同步)。</li>
+  <li><b>容量规划速算</b>:单渠道实测 ≈11 请求/秒(3 并发 ÷ 0.16 秒响应 × 效率);<b>渠道数 ≈ 目标吞吐 ÷ 8</b> 起配,按 70% 安全线使用;目标超 20 请求/秒时先找瓶颈(槽位唤醒节奏/上游限额),别继续硬加渠道。</li>
+  <li><b>接入规范:一个调用方一个 key</b>,每 key 并发上限 3 起配,<b>严禁多个客户端共享 key</b>。</li>
+  <li><b>三条告警</b>:排队深度接近上限持续 5 分钟;拒绝率每分钟超 1%;降级徽标亮起(Redis 故障时计数不可信,以徽标为准)。</li>
+</ol>
+
+<h2>口径与限制</h2>
+<p class="small">
+① 体验矩阵(图 A/B/D)在固定 0.8 秒模拟上游下测「机制」,真实上游验证 = 体验轮(完成率 98.4%,差 0.6 个百分点全部来自「被拒不重试」客户端;p95 5.0 秒远低于 10.3 秒合格线)+ 容量矩阵(图 C);② 8 渠道 5/10 档因测试容器中途重启(暖机污染)剔除,8 渠道边界两轮结果 95.6%/99.5% 不一致,按 15-20 区间报告;③ 「扩渠道边际递减」的成因为推测,未做代码级证实;④ 429 对账(客户端计数 = 服务端计数)全部轮次一致,压后无泄漏;⑤ 完整数据与技术分析:<a href="REPORT-INTEGRATION.md">REPORT-INTEGRATION.md</a>,策划案:<a href="TEST-PLAN.md">TEST-PLAN.md</a>。
+</p>
+
+<footer>2026-10-15 · 镜像 new-api:20261015 · 机制矩阵 9 轮 4500 任务 + 真实容量 3×5 档 + 真实体验轮 500 任务 · 生成:测试执行会话</footer>
+
+</div>
+</body>
+</html>

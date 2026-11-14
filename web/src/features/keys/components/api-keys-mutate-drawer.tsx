@@ -64,14 +64,18 @@ import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
 import { useStatus } from '@/hooks/use-status'
+import { toIntlLocale } from '@/i18n/languages'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
+import { formatNumber } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
+import { ROLE } from '@/lib/roles'
 import {
   requireServerSuccess,
   translateServerText,
 } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import {
   createApiKey,
@@ -87,6 +91,10 @@ import {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from '../lib'
+import {
+  type ConcurrencyLimitReason,
+  parseConcurrencyLimitByModel,
+} from '../lib/concurrency-limit-by-model'
 import type { ApiKey } from '../types'
 import {
   ApiKeyGroupCombobox,
@@ -101,14 +109,28 @@ type ApiKeyMutateDrawerProps = {
   currentRow?: ApiKey
 }
 
+// Reason code → display copy for the CSV preview (fixed mapping, 02-13 UI-SPEC):
+// the raw defect entry and this reason render together so the user can fix it
+// before saving instead of the server dropping it silently.
+const CONCURRENCY_LIMIT_REASON_KEYS: Record<
+  Exclude<ConcurrencyLimitReason, ''>,
+  string
+> = {
+  missing_separator: 'Missing = separator',
+  empty_model: 'Model name is empty',
+  invalid_limit: 'Limit must be an integer',
+  non_positive_limit: 'Limit must be a positive integer',
+}
+
 export function ApiKeysMutateDrawer({
   open,
   onOpenChange,
   currentRow,
 }: ApiKeyMutateDrawerProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const isUpdate = !!currentRow
   const currentRowId = currentRow?.id
+  const currentUser = useAuthStore((s) => s.auth.user)
   const { triggerRefresh } = useApiKeys()
   const { status, loading: statusLoading } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -369,6 +391,12 @@ export function ApiKeysMutateDrawer({
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
   const autoGroupsMode = form.watch('auto_groups_mode')
   const unlimitedQuota = form.watch('unlimited_quota')
+  // Presentation-only gate for the concurrency cap: it reads the EDITOR's role
+  // alone (never currentRow / target data), mirroring users-mutate-drawer.
+  // The security boundary lives server-side — the admin-only write block and
+  // the role-based response stripping in controller/token.go (02-06/02-11).
+  // A UI gate is never a security boundary; bypassing it hits the server.
+  const canEditConcurrencyLimit = (currentUser?.role ?? 0) >= ROLE.ADMIN
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -666,6 +694,134 @@ export function ApiKeysMutateDrawer({
                   </FormItem>
                 )}
               />
+
+              {/* 0 = unlimited. Server-side enforcement lives in the token
+                  write path; this field is the admin's configuration entry. */}
+              {canEditConcurrencyLimit && (
+                <>
+                  <FormField
+                    control={form.control}
+                    name='concurrency_limit'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Concurrency Limit')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type='number'
+                            min={0}
+                            placeholder={t('0 means unlimited')}
+                            onChange={(event) =>
+                              field.onChange(Number(event.target.value) || 0)
+                            }
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t('0 means unlimited')}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  {/* Per-model caps CSV with a pre-save parse preview (TUI-02
+                      UI main gate: show the parsed result instead of letting
+                      the server defensively drop bad entries). This gate is
+                      presentation-only — the security boundary stays
+                      server-side (02-06 admin-only write block + write-boundary
+                      validation + 02-11 response stripping). */}
+                  <FormField
+                    control={form.control}
+                    name='concurrency_limit_by_model'
+                    render={({ field }) => {
+                      const inputValue = field.value ?? ''
+                      const parsed =
+                        inputValue.trim() !== ''
+                          ? parseConcurrencyLimitByModel(inputValue)
+                          : null
+                      return (
+                        <FormItem>
+                          <FormLabel>
+                            {t('Concurrency Limit By Model')}
+                          </FormLabel>
+                          <FormControl>
+                            {/* Language-neutral format sample, deliberately not
+                                an i18n key (data pattern, 02-13 UI-SPEC). */}
+                            <Textarea
+                              {...field}
+                              value={inputValue}
+                              className='min-h-20 resize-none'
+                              placeholder='gpt-4o=3,claude-sonnet=2'
+                              rows={3}
+                            />
+                          </FormControl>
+                          <FormDescription>
+                            {t(
+                              'model=limit pairs separated by commas. Leave empty for no per-model limits.'
+                            )}
+                          </FormDescription>
+                          {parsed && (
+                            <div className='flex flex-col gap-1 text-xs'>
+                              {parsed.accepted.length > 0 && (
+                                <div className='flex flex-col gap-1'>
+                                  <span className='text-muted-foreground'>
+                                    {t('Parsed entries')}
+                                  </span>
+                                  <ul className='flex max-h-32 list-none flex-col gap-1 overflow-y-auto'>
+                                    {parsed.accepted.map((entry, index) => (
+                                      <li
+                                        // eslint-disable-next-line react/no-array-index-key -- Read-only derived preview rows have no stable IDs; index keys preserve input order and duplicate entries (repeated models are legal).
+                                        key={`${entry.model}-${index}`}
+                                        className='break-all'
+                                      >
+                                        <span className='font-mono text-xs'>
+                                          {entry.model}
+                                        </span>
+                                        =
+                                        {formatNumber(
+                                          entry.limit,
+                                          toIntlLocale(
+                                            i18n.resolvedLanguage ||
+                                              i18n.language
+                                          )
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {parsed.defects.length > 0 && (
+                                <div className='text-destructive flex flex-col gap-1'>
+                                  <span>{t('Invalid entries')}</span>
+                                  <ul className='flex max-h-32 list-none flex-col gap-1 overflow-y-auto'>
+                                    {parsed.defects.map((entry, index) => (
+                                      <li
+                                        // eslint-disable-next-line react/no-array-index-key -- Read-only derived preview rows have no stable IDs; index keys preserve input order and duplicate raw entries.
+                                        key={`${entry.raw}-${index}`}
+                                        className='break-all'
+                                      >
+                                        <span className='font-mono'>
+                                          {entry.raw}
+                                        </span>{' '}
+                                        {t(
+                                          CONCURRENCY_LIMIT_REASON_KEYS[
+                                            entry.reason
+                                          ]
+                                        )}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <FormMessage />
+                        </FormItem>
+                      )
+                    }}
+                  />
+                </>
+              )}
             </SideDrawerSection>
 
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>

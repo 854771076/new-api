@@ -94,6 +94,12 @@ func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo,
 	if events := RequestPolicy(ctx).Events(); len(events) > 0 {
 		other.SetAdmin("request_policy", events)
 	}
+	// 分段耗时：内部运维信息，只能落在 admin_info（用户视图由
+	// model.formatUserLogs 裁掉整段 admin_info）。快照里只有十个数值键，
+	// 不含上游 URL、请求体、响应体、渠道密钥或任何用户内容。
+	if timing := relaycommon.RequestTimingFrom(ctx); timing != nil {
+		other.SetAdmin("timing", timing.Snapshot())
+	}
 }
 
 func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelRatio, groupRatio, completionRatio float64,
@@ -164,6 +170,9 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 	streamInfo := map[string]any{
 		"status":     status,
 		"end_reason": string(ss.EndReason),
+	}
+	if code := ss.ErrorCode(); code != "" {
+		streamInfo["error_code"] = code
 	}
 	if outcome := ss.ResponseOutcome(); outcome != "" {
 		streamInfo["response_status"] = outcome

@@ -11,21 +11,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const userCacheSchemaVersion = 2
+// userCacheSchemaVersion guards the user hash shape: the read gate rejects
+// any hash whose CacheSchema differs, so bumping it (2 -> 3 added
+// ConcurrencyLimit) forces stale hashes back to the database for a re-prime.
+const userCacheSchemaVersion = 3
 
 type UserBase struct {
-	Id             int    `json:"id"`
-	Group          string `json:"group"`
-	Email          string `json:"email"`
-	Quota          int    `json:"quota"`
-	Status         int    `json:"status"`
-	Role           int    `json:"role"`
-	Username       string `json:"username"`
-	Setting        string `json:"setting"`
-	AuthVersion    int64  `json:"-"`
-	CacheSchema    int    `json:"-"`
-	CacheExpiresAt int64  `json:"-"`
-	CacheMAC       string `json:"-"`
+	Id               int    `json:"id"`
+	Group            string `json:"group"`
+	Email            string `json:"email"`
+	Quota            int    `json:"quota"`
+	ConcurrencyLimit int    `json:"concurrency_limit"`
+	Status           int    `json:"status"`
+	Role             int    `json:"role"`
+	Username         string `json:"username"`
+	Setting          string `json:"setting"`
+	AuthVersion      int64  `json:"-"`
+	CacheSchema      int    `json:"-"`
+	CacheExpiresAt   int64  `json:"-"`
+	CacheMAC         string `json:"-"`
 }
 
 func (user UserBase) cacheMAC() (string, error) {
@@ -41,6 +45,9 @@ func (user UserBase) cacheMAC() (string, error) {
 func (user *UserBase) WriteContext(c *gin.Context) {
 	common.SetContextKey(c, constant.ContextKeyUserGroup, user.Group)
 	common.SetContextKey(c, constant.ContextKeyUserQuota, user.Quota)
+	// Published for both auth chains (TokenAuth and UserAuth/playground, F16):
+	// the concurrency middleware reads the user axis from this context key.
+	common.SetContextKey(c, constant.ContextKeyUserConcurrencyLimit, user.ConcurrencyLimit)
 	common.SetContextKey(c, constant.ContextKeyUserStatus, user.Status)
 	common.SetContextKey(c, constant.ContextKeyUserEmail, user.Email)
 	common.SetContextKey(c, constant.ContextKeyUserName, user.Username)

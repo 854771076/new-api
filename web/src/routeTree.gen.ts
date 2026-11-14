@@ -39,6 +39,7 @@ import { Route as AuthenticatedAppProductsIndexRouteImport } from './routes/_aut
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
 import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
 import { Route as AuthenticatedCliAuthorizeRouteImport } from './routes/_authenticated/cli/authorize'
+import { Route as AuthenticatedConcurrencyIndexRouteImport } from './routes/_authenticated/concurrency/index'
 import { Route as AuthenticatedDashboardIndexRouteImport } from './routes/_authenticated/dashboard/index'
 import { Route as AuthenticatedDashboardSectionRouteImport } from './routes/_authenticated/dashboard/$section'
 import { Route as AuthenticatedErrorsErrorRouteImport } from './routes/_authenticated/errors/$error'
@@ -227,6 +228,12 @@ const AuthenticatedCliAuthorizeRoute =
   AuthenticatedCliAuthorizeRouteImport.update({
     id: '/cli/authorize',
     path: '/cli/authorize',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedConcurrencyIndexRoute =
+  AuthenticatedConcurrencyIndexRouteImport.update({
+    id: '/concurrency/',
+    path: '/concurrency/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedDashboardIndexRoute =
@@ -483,6 +490,7 @@ export interface FileRoutesByFullPath {
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/app-products/': typeof AuthenticatedAppProductsIndexRoute
   '/channels/': typeof AuthenticatedChannelsIndexRoute
+  '/concurrency/': typeof AuthenticatedConcurrencyIndexRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/keys/': typeof AuthenticatedKeysIndexRoute
   '/models/': typeof AuthenticatedModelsIndexRoute
@@ -549,6 +557,7 @@ export interface FileRoutesByTo {
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/app-products': typeof AuthenticatedAppProductsIndexRoute
   '/channels': typeof AuthenticatedChannelsIndexRoute
+  '/concurrency': typeof AuthenticatedConcurrencyIndexRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
   '/keys': typeof AuthenticatedKeysIndexRoute
   '/models': typeof AuthenticatedModelsIndexRoute
@@ -619,6 +628,7 @@ export interface FileRoutesById {
   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/_authenticated/app-products/': typeof AuthenticatedAppProductsIndexRoute
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
+  '/_authenticated/concurrency/': typeof AuthenticatedConcurrencyIndexRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
   '/_authenticated/keys/': typeof AuthenticatedKeysIndexRoute
   '/_authenticated/models/': typeof AuthenticatedModelsIndexRoute
@@ -688,6 +698,7 @@ export interface FileRouteTypes {
     | '/usage-logs/audit'
     | '/app-products/'
     | '/channels/'
+    | '/concurrency/'
     | '/dashboard/'
     | '/keys/'
     | '/models/'
@@ -754,6 +765,7 @@ export interface FileRouteTypes {
     | '/usage-logs/audit'
     | '/app-products'
     | '/channels'
+    | '/concurrency'
     | '/dashboard'
     | '/keys'
     | '/models'
@@ -823,6 +835,7 @@ export interface FileRouteTypes {
     | '/_authenticated/usage-logs/audit'
     | '/_authenticated/app-products/'
     | '/_authenticated/channels/'
+    | '/_authenticated/concurrency/'
     | '/_authenticated/dashboard/'
     | '/_authenticated/keys/'
     | '/_authenticated/models/'
@@ -1087,6 +1100,13 @@ declare module '@tanstack/react-router' {
       path: '/cli/authorize'
       fullPath: '/cli/authorize'
       preLoaderRoute: typeof AuthenticatedCliAuthorizeRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/concurrency/': {
+      id: '/_authenticated/concurrency/'
+      path: '/concurrency'
+      fullPath: '/concurrency/'
+      preLoaderRoute: typeof AuthenticatedConcurrencyIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/dashboard/': {
@@ -1452,6 +1472,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
   AuthenticatedAppProductsIndexRoute: typeof AuthenticatedAppProductsIndexRoute
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
+  AuthenticatedConcurrencyIndexRoute: typeof AuthenticatedConcurrencyIndexRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
   AuthenticatedKeysIndexRoute: typeof AuthenticatedKeysIndexRoute
   AuthenticatedModelsIndexRoute: typeof AuthenticatedModelsIndexRoute
@@ -1481,6 +1502,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
   AuthenticatedAppProductsIndexRoute: AuthenticatedAppProductsIndexRoute,
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
+  AuthenticatedConcurrencyIndexRoute: AuthenticatedConcurrencyIndexRoute,
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
   AuthenticatedKeysIndexRoute: AuthenticatedKeysIndexRoute,
   AuthenticatedModelsIndexRoute: AuthenticatedModelsIndexRoute,

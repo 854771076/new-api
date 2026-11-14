@@ -182,7 +182,6 @@ import {
   extractMappingSourceModels,
   hasModelConfigChanged,
   findMissingModelsInMapping,
-  validateModelMappingJson,
 } from '../../lib'
 import {
   getChannelConfigurationSection,
@@ -1664,28 +1663,12 @@ export function ChannelMutateDrawer({
         }
       }
 
-      // Validate model_mapping JSON format
+      // The form schema rejects a malformed model mapping with a specific
+      // message, so only the model list warning is left to check here.
       const hasModelMapping =
         typeof data.model_mapping === 'string' &&
         data.model_mapping.trim() !== ''
       const modelMappingValue = data.model_mapping || ''
-
-      if (hasModelMapping) {
-        const validation = validateModelMappingJson(modelMappingValue)
-        if (!validation.valid) {
-          form.setError('model_mapping', {
-            type: 'manual',
-            message: t(validation.error || 'Invalid model mapping'),
-          })
-          setConfigurationSection('routing')
-          setPendingErrorFocus('model_mapping')
-          handleServerError(
-            validation,
-            t(validation.error || 'Invalid model mapping')
-          )
-          return
-        }
-      }
 
       // Normalize models array
       const normalizedModels = parseModelsString(data.models || '')
@@ -2242,6 +2225,29 @@ export function ChannelMutateDrawer({
                 />
               </FormControl>
               <FormDescription>{t(FIELD_DESCRIPTIONS.WEIGHT)}</FormDescription>
+              <FormMessage />
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
+          name='concurrency_limit'
+          render={({ field }) => (
+            <FormItem>
+              <FormLabel>{t('Concurrency Limit')}</FormLabel>
+              <FormControl>
+                <Input
+                  type='number'
+                  min={0}
+                  placeholder='0'
+                  {...field}
+                  onChange={(e) => field.onChange(Number(e.target.value))}
+                />
+              </FormControl>
+              <FormDescription>
+                {t(FIELD_DESCRIPTIONS.CONCURRENCY_LIMIT)}
+              </FormDescription>
               <FormMessage />
             </FormItem>
           )}

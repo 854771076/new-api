@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import type { ApiKey } from '../../types'
 
@@ -26,6 +26,7 @@ const { I18nextProvider, initReactI18next } = await import('react-i18next')
 const { QueryClient, QueryClientProvider } =
   await import('@tanstack/react-query')
 const { api } = await import('@/lib/api')
+const { useAuthStore } = await import('@/stores/auth-store')
 const { ApiKeysProvider } = await import('../api-keys-provider')
 const { ApiKeysMutateDrawer } = await import('../api-keys-mutate-drawer')
 
@@ -39,6 +40,7 @@ type ApiMethod = (url: string, data?: unknown) => Promise<{ data: unknown }>
 type MockableApi = {
   get: ApiMethod
   post: ApiMethod
+  put: ApiMethod
 }
 type RenderedDrawer = {
   queryClient: InstanceType<typeof QueryClient>
@@ -47,9 +49,14 @@ type RenderedDrawer = {
 const apiClient = api as unknown as MockableApi
 const originalGet = apiClient.get
 const originalPost = apiClient.post
+const originalPut = apiClient.put
 let renderedDrawer: RenderedDrawer | null = null
 
-function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
+function installApiFixtures(
+  createdPayloads: Array<Record<string, unknown>>,
+  updatedPayloads: Array<Record<string, unknown>> = [],
+  storedApiKey: Record<string, unknown> = {}
+) {
   apiClient.get = async (url) => {
     switch (url) {
       case '/api/status':
@@ -74,6 +81,8 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
             data: { groups: ['vip', 'default'], max_count: 3 },
           },
         }
+      case '/api/token/1':
+        return { data: { success: true, data: storedApiKey } }
       default:
         throw new Error(`Unexpected GET ${url}`)
     }
@@ -84,9 +93,15 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
     createdPayloads.push(data as Record<string, unknown>)
     return { data: { success: true, data: {} } }
   }
+  apiClient.put = async (url, data) => {
+    expect(url).toBe('/api/token/')
+    expect(data && typeof data === 'object').toBeTruthy()
+    updatedPayloads.push(data as Record<string, unknown>)
+    return { data: { success: true, data: {} } }
+  }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+function createDrawerQueryClient(): InstanceType<typeof QueryClient> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -122,12 +137,45 @@ async function renderCreateDrawer(): Promise<void> {
     { updatedAt: freshAt }
   )
   renderedDrawer = { queryClient }
+  return queryClient
+}
+
+async function renderCreateDrawer(): Promise<void> {
+  const queryClient = createDrawerQueryClient()
 
   render(
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <ApiKeysProvider>
           <ApiKeysMutateDrawer open onOpenChange={() => undefined} />
+        </ApiKeysProvider>
+      </I18nextProvider>
+    </QueryClientProvider>
+  )
+  await waitFor(
+    () => {
+      const saveButton = findButton('Save changes', false)
+      expect(saveButton).toBeEnabled()
+    },
+    { timeout: 1500 }
+  )
+}
+
+async function renderUpdateDrawer(currentRow: {
+  id: number
+  name: string
+}): Promise<void> {
+  const queryClient = createDrawerQueryClient()
+
+  render(
+    <QueryClientProvider client={queryClient}>
+      <I18nextProvider i18n={i18n}>
+        <ApiKeysProvider>
+          <ApiKeysMutateDrawer
+            open
+            onOpenChange={() => undefined}
+            currentRow={currentRow as never}
+          />
         </ApiKeysProvider>
       </I18nextProvider>
     </QueryClientProvider>
@@ -154,6 +202,10 @@ function findButton(text: string, required = true): HTMLButtonElement | null {
 }
 
 function getControlByLabel(labelText: 'Name' | 'Quantity'): HTMLInputElement
+function getControlByLabel(labelText: 'Concurrency Limit'): HTMLInputElement
+function getControlByLabel(
+  labelText: 'Concurrency Limit By Model'
+): HTMLTextAreaElement
 function getControlByLabel(labelText: 'Group'): HTMLButtonElement
 function getControlByLabel(labelText: 'Auto group order'): HTMLElement
 function getControlByLabel(labelText: string): HTMLElement {
@@ -198,6 +250,8 @@ function selectComboboxOption(
 afterEach(() => {
   apiClient.get = originalGet
   apiClient.post = originalPost
+  apiClient.put = originalPut
+  useAuthStore.getState().auth.reset()
   localStorage.clear()
   if (renderedDrawer) {
     renderedDrawer.queryClient.clear()
@@ -422,5 +476,220 @@ describe('API keys mutate drawer user quota query switch', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
+  })
+})
+
+describe('API keys mutate drawer concurrency limit', () => {
+  const storedRow = {
+    id: 1,
+    name: 'existing-key',
+    key: 'sk-abcd***wxyz',
+    status: 1,
+    remain_quota: 0,
+    used_quota: 0,
+    unlimited_quota: true,
+    expired_time: -1,
+    created_time: 1700000000,
+    accessed_time: 1700000000,
+    group: 'default',
+    auto_groups: null,
+    cross_group_retry: false,
+    model_limits_enabled: false,
+    model_limits: '',
+    allow_ips: '',
+    concurrency_limit: 5,
+    concurrency_limit_by_model: 'gpt-4o=3',
+  }
+
+  beforeEach(() => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'operator', role: 10 })
+  })
+
+  test('create drawer renders the Concurrency Limit input with the unlimited hint', async () => {
+    installApiFixtures([])
+    await renderCreateDrawer()
+
+    const input = getControlByLabel('Concurrency Limit')
+    expect(input.type).toBe('number')
+    expect(input.min).toBe('0')
+    expect(input.placeholder).toBe('0 means unlimited')
+    expect(document.body.textContent).toContain('0 means unlimited')
+  })
+
+  test('create payload carries the typed concurrency limit as an explicit value', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer()
+
+    changeInput(getControlByLabel('Name'), 'batch')
+    changeInput(getControlByLabel('Concurrency Limit'), '3')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+
+    const payload = createdPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(payload, 'concurrency_limit')).toBe(true)
+    expect(payload.concurrency_limit).toBe(3)
+  })
+
+  test('create payload keeps an explicit zero instead of dropping the unlimited value', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer()
+
+    changeInput(getControlByLabel('Name'), 'zero')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+
+    const payload = createdPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(payload, 'concurrency_limit')).toBe(true)
+    expect(payload.concurrency_limit).toBe(0)
+  })
+
+  test('update drawer backfills the stored concurrency limit', async () => {
+    installApiFixtures([], [], storedRow)
+    await renderUpdateDrawer(storedRow)
+
+    const input = getControlByLabel('Concurrency Limit')
+    await waitFor(() => expect(input.value).toBe('5'))
+  })
+
+  test('update payload carries the stored concurrency limit unchanged', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], updatedPayloads, storedRow)
+    await renderUpdateDrawer(storedRow)
+
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+
+    const payload = updatedPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(payload, 'concurrency_limit')).toBe(true)
+    expect(payload.concurrency_limit).toBe(5)
+  })
+
+  test('update payload keeps an explicit zero after clearing the field', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], updatedPayloads, storedRow)
+    await renderUpdateDrawer(storedRow)
+
+    const input = getControlByLabel('Concurrency Limit')
+    await waitFor(() => expect(input.value).toBe('5'))
+    changeInput(input, '0')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+
+    const payload = updatedPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(payload, 'concurrency_limit')).toBe(true)
+    expect(payload.concurrency_limit).toBe(0)
+  })
+
+  test('create drawer renders the Concurrency Limit By Model textarea with the format hint', async () => {
+    installApiFixtures([])
+    await renderCreateDrawer()
+
+    const textarea = getControlByLabel('Concurrency Limit By Model')
+    expect(textarea.tagName).toBe('TEXTAREA')
+    expect(textarea.placeholder).toBe('gpt-4o=3,claude-sonnet=2')
+    expect(document.body.textContent).toContain(
+      'model=limit pairs separated by commas. Leave empty for no per-model limits.'
+    )
+  })
+
+  test('preview lists each accepted model=limit pair for a valid CSV', async () => {
+    installApiFixtures([])
+    await renderCreateDrawer()
+
+    fireEvent.input(getControlByLabel('Concurrency Limit By Model'), {
+      target: { value: 'gpt-4o=3,claude=2' },
+    })
+
+    expect(screen.getByText('Parsed entries')).toBeInTheDocument()
+    expect(document.body.textContent).toContain('gpt-4o=3')
+    expect(document.body.textContent).toContain('claude=2')
+    expect(screen.queryByText('Invalid entries')).not.toBeInTheDocument()
+  })
+
+  test('defect entry shows its reason and blocks the save before any write request', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads, updatedPayloads)
+    await renderCreateDrawer()
+
+    fireEvent.input(getControlByLabel('Concurrency Limit By Model'), {
+      target: { value: 'gpt-4o=x' },
+    })
+    expect(screen.getByText('Invalid entries')).toBeInTheDocument()
+    expect(document.body.textContent).toContain('gpt-4o=x')
+    expect(document.body.textContent).toContain('Limit must be an integer')
+
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() =>
+      expect(
+        screen.getByText('Fix invalid entries before saving')
+      ).toBeInTheDocument()
+    )
+    expect(createdPayloads).toHaveLength(0)
+    expect(updatedPayloads).toHaveLength(0)
+  })
+
+  test('create payload always carries the CSV key explicitly (empty means no per-model limits)', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer()
+
+    changeInput(getControlByLabel('Name'), 'fresh-csv')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+
+    const payload = createdPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(payload, 'concurrency_limit_by_model')).toBe(true)
+    expect(payload.concurrency_limit_by_model).toBe('')
+  })
+
+  test('update drawer backfills the stored CSV so reopening never silently clears it', async () => {
+    installApiFixtures([], [], storedRow)
+    await renderUpdateDrawer(storedRow)
+
+    const textarea = getControlByLabel('Concurrency Limit By Model')
+    await waitFor(() => expect(textarea.value).toBe('gpt-4o=3'))
+  })
+
+  test('update payload keeps the stored CSV, then sends an explicit empty string after clearing', async () => {
+    const updatedPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures([], updatedPayloads, storedRow)
+    await renderUpdateDrawer(storedRow)
+
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(updatedPayloads).toHaveLength(1))
+    const kept = updatedPayloads[0] as Record<string, unknown>
+    expect(Object.hasOwn(kept, 'concurrency_limit_by_model')).toBe(true)
+    expect(kept.concurrency_limit_by_model).toBe('gpt-4o=3')
+
+    const textarea = getControlByLabel('Concurrency Limit By Model')
+    await waitFor(() => expect(textarea.value).toBe('gpt-4o=3'))
+    fireEvent.input(textarea, { target: { value: '' } })
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(updatedPayloads).toHaveLength(2))
+    const cleared = updatedPayloads[1] as Record<string, unknown>
+    expect(Object.hasOwn(cleared, 'concurrency_limit_by_model')).toBe(true)
+    expect(cleared.concurrency_limit_by_model).toBe('')
+  })
+
+  test('non-admin editor does not render Concurrency Limit', async () => {
+    installApiFixtures([])
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'operator', role: 1 })
+    await renderCreateDrawer()
+
+    expect(screen.queryByLabelText('Concurrency Limit')).not.toBeInTheDocument()
+    expect(
+      screen.queryByLabelText('Concurrency Limit By Model')
+    ).not.toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('0 means unlimited')
+    expect(document.body.textContent).not.toContain(
+      'model=limit pairs separated by commas. Leave empty for no per-model limits.'
+    )
   })
 })

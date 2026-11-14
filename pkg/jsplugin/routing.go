@@ -96,6 +96,13 @@ var hostProtocols = []HostProtocolDefinition{
 		{Name: "retrieve", Methods: []string{http.MethodGet}, Path: "/v1/videos/:task_id", BodyKinds: []BodyKind{BodyNone}, RequiredProtocolMembers: []string{"render"}},
 		{Name: "content", Methods: []string{http.MethodGet, http.MethodHead}, Path: "/v1/videos/:task_id/content", BodyKinds: []BodyKind{BodyNone}, RequiredDriverHooks: []string{"listArtifacts", "buildContentRequest"}},
 	}},
+	// The OpenAI audio transcription task API is always asynchronous: create
+	// submits a task and retrieve renders the stored result, so the protocol
+	// declares no request modes.
+	{Name: ProtocolOpenAIAudio, Operations: []HostProtocolOperation{
+		{Name: "create", Methods: []string{http.MethodPost}, Path: "/v1/audio/transcriptions/tasks", BodyKinds: []BodyKind{BodyJSON, BodyMultipart}, ModelField: "model", RequiredProtocolMembers: []string{"decodeRequest"}},
+		{Name: "retrieve", Methods: []string{http.MethodGet}, Path: "/v1/audio/transcriptions/tasks/:task_id", BodyKinds: []BodyKind{BodyNone}, RequiredProtocolMembers: []string{"render"}},
+	}},
 	// The OpenAI Images API is synchronous: both operations create a task and
 	// the host answers with the rendered image response once the task is
 	// terminal, so there is no retrieve operation and no request modes.
@@ -104,6 +111,11 @@ var hostProtocols = []HostProtocolDefinition{
 		{Name: "edit", Methods: []string{http.MethodPost}, Path: "/v1/images/edits", BodyKinds: []BodyKind{BodyJSON, BodyMultipart}, ModelField: "model", RequiredProtocolMembers: []string{"decodeRequest", "render"}},
 	}},
 }
+
+// ProtocolOpenAIAudio is the host protocol that serves asynchronous audio
+// transcription tasks (`POST /v1/audio/transcriptions/tasks` and
+// `GET /v1/audio/transcriptions/tasks/:task_id`) from a plugin.
+const ProtocolOpenAIAudio = "openai_audio"
 
 // ProtocolOpenAIImage is the host protocol that serves the OpenAI Images API
 // (`POST /v1/images/generations` and `POST /v1/images/edits`) from a plugin.

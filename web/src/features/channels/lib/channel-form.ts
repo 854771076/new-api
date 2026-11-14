@@ -128,15 +128,31 @@ function isOptionalJsonObject(value: string | undefined): boolean {
   }
 }
 
-function isOptionalModelMapping(value: string | undefined): boolean {
+/**
+ * Single source of truth for the model mapping field: returns undefined when the
+ * mapping is acceptable, otherwise the user-facing reason it is rejected. The
+ * relay skips entries whose upstream model is blank, so a blank value is
+ * reported instead of being stored as a mapping that silently does nothing.
+ */
+function getModelMappingIssue(value: string | undefined): string | undefined {
+  let parsed: unknown
   try {
-    const parsed = parseOptionalJson(value)
-    if (parsed === undefined) return true
-    if (!isJsonObjectValue(parsed)) return false
-    return Object.values(parsed).every((item) => typeof item === 'string')
+    parsed = parseOptionalJson(value)
   } catch {
-    return false
+    return 'Model mapping must be valid JSON format'
   }
+  if (parsed === undefined) return undefined
+  if (!isJsonObjectValue(parsed)) {
+    return 'Model mapping must be a valid JSON object'
+  }
+  const entries = Object.entries(parsed)
+  if (entries.some(([, upstream]) => typeof upstream !== 'string')) {
+    return 'Model mapping values must be strings'
+  }
+  if (entries.some(([, upstream]) => !String(upstream).trim())) {
+    return 'Upstream model name must not be empty'
+  }
+  return undefined
 }
 
 function isOptionalStatusCodeMapping(value: string | undefined): boolean {
@@ -216,14 +232,17 @@ export const channelFormSchema = z
     model_mapping: z
       .string()
       .optional()
-      .refine(
-        isOptionalModelMapping,
-        'Model mapping must be a JSON object with string values'
-      ),
+      .superRefine((value, ctx) => {
+        const issue = getModelMappingIssue(value)
+        if (issue) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue })
+        }
+      }),
     priority: z.number().optional(),
     weight: z.number().optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
+    concurrency_limit: z.number().optional(),
     status: z.number(),
     status_code_mapping: z
       .string()
@@ -445,6 +464,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   weight: 0,
   test_model: '',
   auto_ban: 1,
+  concurrency_limit: 0,
   status: CHANNEL_STATUS.ENABLED,
   status_code_mapping: '',
   tag: '',
@@ -620,6 +640,7 @@ export function transformChannelToFormDefaults(
     weight: channel.weight || 0,
     test_model: channel.test_model || '',
     auto_ban: channel.auto_ban ?? 1,
+    concurrency_limit: channel.concurrency_limit ?? 0,
     status: channel.status,
     status_code_mapping: channel.status_code_mapping || '',
     tag: channel.tag || '',
@@ -888,6 +909,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     weight: formData.weight || null,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,
+    concurrency_limit: formData.concurrency_limit || null,
     status: formData.status,
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
@@ -936,6 +958,7 @@ export function transformFormDataToUpdatePayload(
     weight: formData.weight ?? 0,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,
+    concurrency_limit: formData.concurrency_limit ?? 0,
     status_code_mapping: formData.status_code_mapping || null,
     tag: formData.tag || null,
     remark: formData.remark || '',

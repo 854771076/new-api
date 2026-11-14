@@ -210,6 +210,24 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		code, message := TaskPlatformUnavailableError(platform)
 		return nil, service.TaskErrorWrapperLocal(errors.New(message), code, http.StatusBadRequest)
 	}
+	// The asynchronous audio transcription endpoint has no non-plugin
+	// fallback: no other endpoint serves it. A request that arrives here
+	// without a plugin that claims openai_audio reached it through a channel
+	// that advertises the model for a different provider, and the task
+	// validation that follows reads that provider's request shape — naming a
+	// field this endpoint never carries. Report the model instead.
+	if info.RelayMode == relayconstant.RelayModeAudioTaskSubmit {
+		provider, servesAudio := adaptor.(channel.OpenAIAudioTaskProvider)
+		if !servesAudio || !provider.ProvidesOpenAIAudioTask() {
+			modelName := info.OriginModelName
+			if modelName == "" {
+				modelName = info.UpstreamModelName
+			}
+			return nil, service.TaskErrorWrapperLocal(
+				fmt.Errorf("model %q is not served by any task plugin on the audio transcription endpoint", modelName),
+				"model_not_found", http.StatusServiceUnavailable)
+		}
+	}
 	// buildSubmitRequest runs during validation and the unreleased plugin
 	// contract exposes this host-generated id to that hook.
 	if info.PublicTaskID == "" {
@@ -443,7 +461,8 @@ func noteTaskQuotaClamp(info *relaycommon.RelayInfo, clamp *common.QuotaClamp) {
 }
 
 var fetchRespBuilders = map[int]func(c *gin.Context) (respBody []byte, taskResp *dto.TaskError){
-	relayconstant.RelayModeVideoFetchByID: videoFetchByIDRespBodyBuilder,
+	relayconstant.RelayModeVideoFetchByID:     videoFetchByIDRespBodyBuilder,
+	relayconstant.RelayModeAudioTaskFetchByID: audioFetchByIDRespBodyBuilder,
 }
 
 func RelayTaskFetch(c *gin.Context, relayMode int) (taskResp *dto.TaskError) {
@@ -469,7 +488,47 @@ func RelayTaskFetch(c *gin.Context, relayMode int) (taskResp *dto.TaskError) {
 	return
 }
 
-func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dto.TaskError) {
+// audioFetchByIDRespBodyBuilder serves the asynchronous audio transcription task
+// retrieve endpoint. The adaptor renders the task; this builder only resolves
+// the stored task and reports missing capabilities.
+func audioFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dto.TaskError) {
+	originTask, taskResp := resolveRetrievableTask(c)
+	if taskResp != nil {
+		return
+	}
+	return RenderOpenAIAudioTask(originTask)
+}
+
+// RenderOpenAIAudioTask renders a stored audio transcription task through the
+// plugin's openai_audio render hook. Submission and retrieval share this
+// renderer, so a client parses both responses with the same object shape.
+func RenderOpenAIAudioTask(task *model.Task) ([]byte, *dto.TaskError) {
+	if task == nil {
+		return nil, service.TaskErrorWrapperLocal(errors.New("task is required"), "task_not_exist", http.StatusBadRequest)
+	}
+	adaptor := GetTaskAdaptor(task.Platform)
+	if adaptor == nil {
+		// The stored task's platform no longer resolves to an adaptor: the
+		// plugin system is off, or the plugin that served the task is disabled
+		// or unregistered. Name that condition instead of reporting a channel
+		// problem the client cannot act on.
+		code, message := TaskPlatformUnavailableError(task.Platform)
+		return nil, service.TaskErrorWrapperLocal(errors.New(message), code, http.StatusBadRequest)
+	}
+	converter, ok := adaptor.(channel.OpenAIAudioTaskConverter)
+	if !ok {
+		return nil, service.TaskErrorWrapperLocal(fmt.Errorf("not_implemented:%s", task.Platform), "not_implemented", http.StatusNotImplemented)
+	}
+	body, err := converter.ConvertToOpenAIAudioTask(task)
+	if err != nil {
+		return nil, service.TaskErrorWrapper(err, "convert_to_openai_audio_task_failed", http.StatusInternalServerError)
+	}
+	return body, nil
+}
+
+// resolveRetrievableTask loads the task the request refers to and reports the
+// task error when it does not exist or its result is not retrievable.
+func resolveRetrievableTask(c *gin.Context) (*model.Task, *dto.TaskError) {
 	taskId := c.Param("task_id")
 	if taskId == "" {
 		taskId = c.GetString("task_id")
@@ -478,11 +537,17 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 
 	originTask, exist, err := model.GetByTaskIdScoped(userId, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID), taskId)
 	if err != nil {
-		taskResp = service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError)
-		return
+		return nil, service.TaskErrorWrapper(err, "get_task_failed", http.StatusInternalServerError)
 	}
 	if !exist || !originTask.ResultRetrievable() {
-		taskResp = service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusBadRequest)
+		return nil, service.TaskErrorWrapperLocal(errors.New("task_not_exist"), "task_not_exist", http.StatusBadRequest)
+	}
+	return originTask, nil
+}
+
+func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *dto.TaskError) {
+	originTask, taskResp := resolveRetrievableTask(c)
+	if taskResp != nil {
 		return
 	}
 
@@ -515,13 +580,15 @@ func videoFetchByIDRespBodyBuilder(c *gin.Context) (respBody []byte, taskResp *d
 	}
 
 	// 通用 TaskDto 格式
-	respBody, err = common.Marshal(dto.TaskResponse[any]{
+	marshaled, err := common.Marshal(dto.TaskResponse[any]{
 		Code: "success",
 		Data: TaskModel2Dto(originTask),
 	})
 	if err != nil {
 		taskResp = service.TaskErrorWrapper(err, "marshal_response_failed", http.StatusInternalServerError)
+		return
 	}
+	respBody = marshaled
 	return
 }
 

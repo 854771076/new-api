@@ -49,6 +49,7 @@ import {
   UserCog,
   Info,
   LogIn,
+  Clock,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
@@ -83,8 +84,17 @@ import {
   logTokenName,
   renderAuditContent,
   renderLogContent,
+  formatTimingDuration,
+  formatTimingSegment,
+  formatTimingTimeout,
 } from '../../lib/format'
 import { buildQuotaAuditOperation } from '../../lib/quota-audit-operation'
+import {
+  TIMING_SEGMENT_KEYS,
+  TIMING_SEGMENT_LABELS,
+  attributedTimingMs,
+  unattributedTimingMs,
+} from '../../lib/timing'
 import {
   getLogTypeConfig,
   isPerCallBilling,
@@ -546,6 +556,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const showAdminIp =
     !!props.log.ip && (showTiming || (props.isAdmin && isTopup))
   const adminInfo = other?.admin_info
+  const requestTiming = adminInfo?.timing
   const topupAuditFields =
     isTopup && props.isAdmin && adminInfo
       ? ([
@@ -849,6 +860,70 @@ export function DetailsDialog(props: DetailsDialogProps) {
             <PolicyDecisionRecord events={adminInfo.request_policy} />
           </DetailSection>
         ) : null}
+        {/* Latency breakdown (admin only): which stage of the request the time
+            went into, plus the upstream timeouts that were in effect. Segments
+            that were not measured render as a placeholder, and the part of
+            the total duration no segment accounts for is shown separately. */}
+        {props.isAdmin && requestTiming ? (
+          <DetailSection
+            label={t('Timing breakdown')}
+            icon={<Clock className='size-4' aria-hidden='true' />}
+          >
+            <div className='space-y-1'>
+              {TIMING_SEGMENT_KEYS.map((key) => (
+                <DetailRow
+                  key={key}
+                  label={t(TIMING_SEGMENT_LABELS[key])}
+                  value={formatTimingSegment(requestTiming[key], t('ms'))}
+                  mono
+                />
+              ))}
+              <DetailRow
+                label={t('Attempts')}
+                value={String(requestTiming.attempts ?? 0)}
+                mono
+              />
+              <DetailRow
+                label={t('Response header timeout')}
+                value={formatTimingTimeout(
+                  requestTiming.upstream_header_timeout_s
+                )}
+                mono
+              />
+              <DetailRow
+                label={t('Streaming idle timeout')}
+                value={formatTimingTimeout(requestTiming.streaming_timeout_s)}
+                mono
+              />
+              <DetailRow
+                label={t('Overall timeout')}
+                value={formatTimingTimeout(requestTiming.relay_timeout_s)}
+                mono
+              />
+              <DetailRow
+                label={t('Attributed')}
+                value={formatTimingDuration(
+                  attributedTimingMs(requestTiming),
+                  t('ms')
+                )}
+                mono
+              />
+              <DetailRow
+                label={t('Unattributed')}
+                value={formatTimingDuration(
+                  unattributedTimingMs(requestTiming, props.log.use_time),
+                  t('ms')
+                )}
+                mono
+              />
+              <p className='text-muted-foreground text-xs'>
+                {t(
+                  'The total duration has second precision, so the attributed split is an estimate.'
+                )}
+              </p>
+            </div>
+          </DetailSection>
+        ) : null}
         {props.isAdmin && other?.admin_info?.quota_saturation && (
           <DetailSection
             icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
@@ -891,6 +966,24 @@ export function DetailsDialog(props: DetailsDialogProps) {
             variant='danger'
           >
             <p className='text-xs wrap-break-word'>{adminInfo.reject_reason}</p>
+          </DetailSection>
+        )}
+
+        {/* Upstream transport failure reason (admin only): the fine-grained
+            error code plus the operator-facing summary of what actually went
+            wrong upstream. The summary is admin-only, so a log owner never
+            receives it. */}
+        {props.isAdmin && adminInfo?.upstream_error_reason && (
+          <DetailSection
+            icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
+            label={t('Upstream error reason')}
+            variant='danger'
+          >
+            <p className='text-xs wrap-break-word'>
+              {other?.error_code
+                ? `${other.error_code} — ${adminInfo.upstream_error_reason}`
+                : adminInfo.upstream_error_reason}
+            </p>
           </DetailSection>
         )}
 
@@ -1282,6 +1375,13 @@ export function DetailsDialog(props: DetailsDialogProps) {
               <DetailRow
                 label={t('End Reason')}
                 value={other.stream_status.end_reason}
+              />
+            )}
+            {other.stream_status.error_code && (
+              <DetailRow
+                label={t('Error Code')}
+                value={other.stream_status.error_code}
+                mono
               />
             )}
             {(other.stream_status.error_count ?? 0) > 0 && (

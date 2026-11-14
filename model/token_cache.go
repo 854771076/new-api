@@ -9,6 +9,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
+// tokenCacheSchemaVersion marks the field set of the token cache hash. The
+// read gate rejects any hash whose CacheSchema differs, so a hash written
+// before the concurrency fields existed (which decodes the missing fields as
+// 0 = unlimited) is forced back to the database for a re-prime.
+const tokenCacheSchemaVersion = 1
+
 func (token Token) cacheMAC() (string, error) {
 	key := getTokenCacheKey(token.Key)
 	token.Key = ""
@@ -19,12 +25,12 @@ func (token Token) cacheMAC() (string, error) {
 		token.AllowIps = nil
 	}
 	return authCacheMAC(key, struct {
-		Token          Token
-		AutoGroups     string
-		CacheExpiresAt int64
-	}{token, token.AutoGroups, token.CacheExpiresAt})
+		Token                   Token
+		AutoGroups              string
+		ConcurrencyLimitByModel string
+		CacheExpiresAt          int64
+	}{token, token.AutoGroups, token.ConcurrencyLimitByModel, token.CacheExpiresAt})
 }
-
 func getTokenCacheKey(key string) string {
 	return fmt.Sprintf("token:%s", common.GenerateHMAC(key))
 }
@@ -70,6 +76,12 @@ func invalidateTokenCacheForMutation(key string) error {
 // can update Redis before the database catches up; counters that are no
 // longer integers are replaced from the snapshot.
 // Returns 0 when fenced, 1 after initialization, or 2 for an existing hash.
+// A hash whose CacheSchema predates the current field set is republished from
+// the snapshot: the read gate rejects it forever otherwise, so its missing
+// concurrency fields would keep decoding as 0 = unlimited (T-02-01).
+// ARGV layout: [1..16]=token fields, [17]=AllowUserQuotaQuery, [18]=TTL,
+// [19]=CacheExpiresAt, [20]=CacheMAC, [21]=repair flag, [22]=cached MAC,
+// [23]=ConcurrencyLimit, [24]=ConcurrencyLimitByModel, [25]=CacheSchema.
 func cacheInitToken(token Token) (int, error) {
 	if !common.RedisEnabled {
 		return 0, nil
@@ -87,7 +99,12 @@ func cacheInitToken(token Token) (int, error) {
 	}
 	existing.Key = token.Key
 	existingMAC, macErr := existing.cacheMAC()
-	repair := readErr != nil || macErr != nil || !validAuthCacheMAC(existingMAC, existing.CacheMAC, existing.CacheExpiresAt)
+	// A hash written before the current schema existed has no concurrency
+	// fields: the read gate would decode them as 0 = unlimited, so it must be
+	// republished from the snapshot even when its MAC happens to match.
+	repair := readErr != nil || macErr != nil ||
+		existing.CacheSchema != tokenCacheSchemaVersion ||
+		!validAuthCacheMAC(existingMAC, existing.CacheMAC, existing.CacheExpiresAt)
 	token.CacheExpiresAt = time.Now().Add(time.Duration(tokenCacheTTLSeconds()) * time.Second).UnixMilli()
 	mac, err := token.cacheMAC()
 	if err != nil {
@@ -109,6 +126,8 @@ redis.call('HSET', KEYS[1],
   'UnlimitedQuota', ARGV[8], 'ModelLimitsEnabled', ARGV[9], 'ModelLimits', ARGV[10],
   'AllowIps', ARGV[11], 'Group', ARGV[12], 'CrossGroupRetry', ARGV[13],
   'AutoGroups', ARGV[14], 'AllowUserQuotaQuery', ARGV[17],
+  'ConcurrencyLimit', ARGV[23], 'ConcurrencyLimitByModel', ARGV[24],
+  'CacheSchema', ARGV[25],
   'CacheExpiresAt', ARGV[19], 'CacheMAC', ARGV[20])
 for _, counter in ipairs({{'AccessedTime', ARGV[6]}, {'RemainQuota', ARGV[15]}, {'UsedQuota', ARGV[16]}}) do
   if not string.match(redis.call('HGET', KEYS[1], counter[1]) or '', '^-?%d+$') then
@@ -132,10 +151,14 @@ return 1`
 		strconv.FormatBool(token.AllowUserQuotaQuery),
 		tokenCacheTTLSeconds(),
 		token.CacheExpiresAt, mac, strconv.FormatBool(repair), existing.CacheMAC,
+		token.ConcurrencyLimit, token.ConcurrencyLimitByModel,
+		tokenCacheSchemaVersion,
 	).Int()
 }
 
-// cacheGetTokenByKey 从缓存读取 token；不完整的哈希（如仅有配额字段）会被拒绝。
+// cacheGetTokenByKey 从缓存读取 token；不完整的哈希（如仅有配额字段）与
+// schema 版本不匹配的旧哈希一律拒绝并由调用方回源 DB——旧哈希缺并发字段
+// 会被静默解码为 0=不限流（威胁 T-02-01）。
 func cacheGetTokenByKey(key string) (*Token, error) {
 	if !common.RedisEnabled {
 		return nil, fmt.Errorf("redis is not enabled")
@@ -144,7 +167,7 @@ func cacheGetTokenByKey(key string) (*Token, error) {
 	if err := common.RedisHGetObj(getTokenCacheKey(key), &token); err != nil {
 		return nil, err
 	}
-	if token.Id <= 0 {
+	if token.Id <= 0 || token.CacheSchema != tokenCacheSchemaVersion {
 		return nil, fmt.Errorf("token cache is incomplete")
 	}
 	token.Key = key

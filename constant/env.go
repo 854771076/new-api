@@ -1,5 +1,10 @@
 package constant
 
+// DefaultErrorLogEnabled 是 ERROR_LOG_ENABLED 未显式设置时的默认行为：开启。
+// 默认部署下若不记失败请求的错误日志，失败请求在日志里就是一片空白（观测
+// 黑洞）；需要关闭的部署显式设置 ERROR_LOG_ENABLED=false。
+const DefaultErrorLogEnabled = true
+
 var StreamingTimeout int
 var DifyDebug bool
 var MaxFileDownloadMB int
