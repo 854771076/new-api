@@ -19,6 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { toIntlLocale } from '@/i18n/languages'
 import { cn } from '@/lib/utils'
 
 import { useChannelRoutingHealth } from '../hooks/use-channel-routing-health'
@@ -49,7 +50,8 @@ const MULTIPLIER_CHIP: Record<
  * window selector, and says so via the "Live · 3s poll" badge.
  */
 export function RoutingHealthCard() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const query = useChannelRoutingHealth()
   const rows = query.data ?? []
 
@@ -108,7 +110,7 @@ export function RoutingHealthCard() {
                 </TableRow>
               ) : (
                 rows.map((row) => {
-                  const display = formatRoutingHealthRow(row)
+                  const display = formatRoutingHealthRow(row, locale)
                   let chip = MULTIPLIER_CHIP.inactive
                   if (row.Multiplier > 1) {
                     chip = MULTIPLIER_CHIP.boosted

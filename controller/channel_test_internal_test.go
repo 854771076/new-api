@@ -114,6 +114,36 @@ func TestValidateChannelRequiresNewAPIBaseURL(t *testing.T) {
 	}
 }
 
+func TestValidateChannelRejectsNegativeConcurrencyLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   *int
+		wantErr bool
+	}{
+		{name: "unset"},
+		{name: "zero means unlimited", limit: common.GetPointer(0)},
+		{name: "positive", limit: common.GetPointer(5)},
+		{name: "negative", limit: common.GetPointer(-1), wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			channel := &model.Channel{
+				Type:             constant.ChannelTypeOpenAI,
+				ConcurrencyLimit: test.limit,
+			}
+
+			err := validateChannel(channel, false)
+
+			if test.wantErr {
+				require.ErrorContains(t, err, "invalid concurrency_limit")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestNewAPIChannelRegistration(t *testing.T) {
 	apiType, ok := common.ChannelType2APIType(constant.ChannelTypeNewAPI)
 

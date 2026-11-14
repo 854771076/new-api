@@ -543,6 +543,13 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if err := channel.ValidateModelMapping(); err != nil {
 		return err
 	}
+	// The channel-wide concurrency cap is a write-boundary field like the
+	// token one: a negative value would be persisted and then read back as
+	// "unlimited" by the limiter, so the console would show no cap while the
+	// operator believes one is in force.
+	if channel.ConcurrencyLimit != nil && *channel.ConcurrencyLimit < 0 {
+		return fmt.Errorf("invalid concurrency_limit: %d (must be >= 0, 0 means unlimited)", *channel.ConcurrencyLimit)
+	}
 	if channel.Type == constant.ChannelTypeTaskPlugin {
 		pluginKey := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
 		if pluginKey == "" {

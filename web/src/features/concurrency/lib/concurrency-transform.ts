@@ -17,7 +17,7 @@ License, or (at your option) any later version.
 // rejections mirrors controller/concurrency.go SnapshotResponse, and
 // DegradedStatus below mirrors the same envelope's degraded object.
 
-import { formatDateTimeStr, formatPercent } from '@/lib/format';
+import { formatDateTimeStr, formatNumber, formatPercent } from '@/lib/format';
 
 export type ConcurrencyKind = 'key' | 'user' | 'channel';
 
@@ -357,16 +357,21 @@ export interface ChannelRoutingHealthDisplay {
  * percentage, latency rounded to whole milliseconds, multiplier pinned to
  * two decimals, and the RFC3339 sample time as local YYYY-MM-DD HH:mm:ss.
  * An unparsable timestamp renders as a dash so a bad value can never surface
- * "Invalid Date" in the table.
+ * "Invalid Date" in the table. `locales` is the interface language's locale
+ * so the numbers read like the rest of the console.
  */
 export function formatRoutingHealthRow(
   row: ChannelRoutingHealthRow,
+  locales?: Intl.LocalesArgument,
 ): ChannelRoutingHealthDisplay {
   const when = new Date(row.LastSampleAt);
   return {
-    successRate: formatPercent(row.SuccessEWMA * 100),
-    latencyMs: String(Math.round(row.LatencyEWMA)),
-    multiplier: row.Multiplier.toFixed(2),
+    successRate: formatPercent(row.SuccessEWMA * 100, locales),
+    latencyMs: formatNumber(Math.round(row.LatencyEWMA), locales),
+    multiplier: formatNumber(row.Multiplier, locales, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }),
     lastSampleAt: Number.isNaN(when.getTime()) ? '-' : formatDateTimeStr(when),
   };
 }

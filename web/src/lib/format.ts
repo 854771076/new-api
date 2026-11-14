@@ -31,12 +31,14 @@ import {
 
 export function formatNumber(
   value: number | null | undefined,
-  locales?: Intl.LocalesArgument
+  locales?: Intl.LocalesArgument,
+  options?: Intl.NumberFormatOptions
 ): string {
   if (value == null || Number.isNaN(value as number)) return '-'
-  return Intl.NumberFormat(locales, { maximumFractionDigits: 2 }).format(
-    value as number
-  )
+  return Intl.NumberFormat(locales, {
+    maximumFractionDigits: 2,
+    ...options,
+  }).format(value as number)
 }
 
 export function formatCompactNumber(
@@ -50,9 +52,12 @@ export function formatCompactNumber(
   }).format(value as number)
 }
 
-export function formatPercent(value: number | null | undefined): string {
+export function formatPercent(
+  value: number | null | undefined,
+  locales?: Intl.LocalesArgument
+): string {
   if (value == null || Number.isNaN(value as number)) return '-'
-  return Intl.NumberFormat(undefined, {
+  return Intl.NumberFormat(locales, {
     style: 'percent',
     maximumFractionDigits: 2,
   }).format((value as number) / 100)

@@ -3960,6 +3960,7 @@
     "Model Mapping (JSON)": "模型映射 (JSON)",
     "Model Mapping must be a JSON object like": "模型映射必须是如下所示的 JSON 对象",
     "Model mapping must be a JSON object with string values": "模型映射必须是值为字符串的 JSON 对象",
+    "Model mapping keys must not be empty": "模型映射的键不能为空",
     "Model mapping must be a valid JSON object": "模型映射必须是有效的 JSON 对象",
     "Model mapping must be valid JSON": "模型映射必须是有效的 JSON",
     "Model mapping must be valid JSON format": "模型映射必须是有效的 JSON 格式",

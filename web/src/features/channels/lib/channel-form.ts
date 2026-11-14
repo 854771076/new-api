@@ -133,6 +133,9 @@ function isOptionalJsonObject(value: string | undefined): boolean {
  * mapping is acceptable, otherwise the user-facing reason it is rejected. The
  * relay skips entries whose upstream model is blank, so a blank value is
  * reported instead of being stored as a mapping that silently does nothing.
+ * A blank source key is reported for the same reason: the server rejects it
+ * ("model mapping keys must be a non-empty model name"), so catching it here
+ * turns a rejected save into an inline message.
  */
 function getModelMappingIssue(value: string | undefined): string | undefined {
   let parsed: unknown
@@ -151,6 +154,9 @@ function getModelMappingIssue(value: string | undefined): string | undefined {
   }
   if (entries.some(([, upstream]) => !String(upstream).trim())) {
     return 'Upstream model name must not be empty'
+  }
+  if (entries.some(([source]) => !source.trim())) {
+    return 'Model mapping keys must not be empty'
   }
   return undefined
 }
@@ -242,7 +248,7 @@ export const channelFormSchema = z
     weight: z.number().optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
-    concurrency_limit: z.number().optional(),
+    concurrency_limit: z.number().min(0).optional(),
     status: z.number(),
     status_code_mapping: z
       .string()

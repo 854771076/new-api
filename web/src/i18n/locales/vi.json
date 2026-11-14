@@ -3960,6 +3960,7 @@
     "Model Mapping (JSON)": "Ánh xạ mô hình (JSON)",
     "Model Mapping must be a JSON object like": "Ánh xạ Mô hình phải là một đối tượng JSON như",
     "Model mapping must be a JSON object with string values": "Ánh xạ mô hình phải là đối tượng JSON với giá trị chuỗi",
+    "Model mapping keys must not be empty": "Các khóa ánh xạ mô hình không được để trống",
     "Model mapping must be a valid JSON object": "Ánh xạ mô hình phải là một đối tượng JSON hợp lệ",
     "Model mapping must be valid JSON": "Ánh xạ mô hình phải là JSON hợp lệ",
     "Model mapping must be valid JSON format": "Ánh xạ mô hình phải có định dạng JSON hợp lệ",

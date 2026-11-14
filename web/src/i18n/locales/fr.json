@@ -3960,6 +3960,7 @@
     "Model Mapping (JSON)": "Mappage de modèle (JSON)",
     "Model Mapping must be a JSON object like": "Le mappage de modèle doit être un objet JSON tel que",
     "Model mapping must be a JSON object with string values": "Le mappage de modèles doit être un objet JSON avec des valeurs de chaîne",
+    "Model mapping keys must not be empty": "Les clés du mappage de modèles ne peuvent pas être vides",
     "Model mapping must be a valid JSON object": "Le mapping des modèles doit être un objet JSON valide",
     "Model mapping must be valid JSON": "La cartographie des modèles doit être un JSON valide",
     "Model mapping must be valid JSON format": "Le mapping des modèles doit être au format JSON valide",

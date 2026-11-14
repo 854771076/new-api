@@ -18,6 +18,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { toIntlLocale } from "@/i18n/languages";
+import { formatNumber, formatPercent } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 import {
@@ -64,7 +66,8 @@ const CHIP_TONE: Record<ReturnType<typeof utilizationTone>, string> = {
  * long window list scrolls inside the card instead of the page.
  */
 export function ScopeTable({ scopes, windowed, loading }: ScopeTableProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language);
   const ordered = sortByUtilization(scopes);
 
   let emptyMessage: string;
@@ -126,16 +129,16 @@ export function ScopeTable({ scopes, windowed, loading }: ScopeTableProps) {
                     <span className="font-mono text-xs">{s.model}</span>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {s.current}
+                    {formatNumber(s.current, locale)}
                     {" / "}
-                    {capped ? s.limit : "∞"}
+                    {capped ? formatNumber(s.limit, locale) : "∞"}
                   </TableCell>
                   <TableCell>
                     {capped ? (
                       <span className="flex items-center gap-2">
                         <Progress
                           value={utilisationPct}
-                          aria-label={`${utilisationPct}%`}
+                          aria-label={formatPercent(utilisationPct, locale)}
                           className={cn("min-w-0 flex-1", PROGRESS_TONE[tone])}
                         />
                         {/* True utilisation, not the clamped bar fill: an
@@ -146,7 +149,10 @@ export function ScopeTable({ scopes, windowed, loading }: ScopeTableProps) {
                             CHIP_TONE[tone],
                           )}
                         >
-                          {Math.round(s.utilization * 100)}%
+                          {formatPercent(
+                            Math.round(s.utilization * 100),
+                            locale,
+                          )}
                         </span>
                       </span>
                     ) : (

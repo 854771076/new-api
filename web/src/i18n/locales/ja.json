@@ -3960,6 +3960,7 @@
     "Model Mapping (JSON)": "モデルマッピング (JSON)",
     "Model Mapping must be a JSON object like": "モデルマッピングは次のようなJSONオブジェクトである必要があります",
     "Model mapping must be a JSON object with string values": "モデルマッピングは文字列値を持つ JSON オブジェクトである必要があります",
+    "Model mapping keys must not be empty": "モデルマッピングのキーは空にできません",
     "Model mapping must be a valid JSON object": "モデルマッピングは有効なJSONオブジェクトである必要があります",
     "Model mapping must be valid JSON": "モデルマッピングは有効な JSON である必要があります",
     "Model mapping must be valid JSON format": "モデルマッピングは有効なJSON形式である必要があります",

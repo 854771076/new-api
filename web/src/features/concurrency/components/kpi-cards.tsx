@@ -20,6 +20,8 @@ import { Activity, Gauge, Layers, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { StatCard } from '@/features/dashboard/components/ui/stat-card';
+import { toIntlLocale } from '@/i18n/languages';
+import { formatNumber, formatPercent } from '@/lib/format';
 
 import {
   deriveKpi,
@@ -58,7 +60,11 @@ export function KpiCards({
   windowPoints,
   windowLoading,
 }: KpiCardsProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // Interface-language numbers: the console must read like the rest of the
+  // app, so every figure goes through the shared formatters with the
+  // selected language's locale instead of the browser's default.
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language);
 
   if (windowPoints) {
     const wk = deriveWindowKpi(windowPoints);
@@ -66,7 +72,7 @@ export function KpiCards({
       <div className='grid shrink-0 grid-cols-1 gap-3 [&>*]:h-full sm:grid-cols-2 lg:grid-cols-4'>
         <StatCard
           title={t('Peak in-flight')}
-          value={wk.peak}
+          value={formatNumber(wk.peak, locale)}
           description={t('Highest in-flight requests in the selected window.')}
           icon={Activity}
           tone='accent-1'
@@ -75,7 +81,10 @@ export function KpiCards({
         />
         <StatCard
           title={t('Average in-flight')}
-          value={wk.avg.toFixed(1)}
+          value={formatNumber(wk.avg, locale, {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+          })}
           description={t(
             'Average in-flight requests across the selected window.',
           )}
@@ -86,7 +95,7 @@ export function KpiCards({
         />
         <StatCard
           title={t('Rejected in window')}
-          value={wk.rejected}
+          value={formatNumber(wk.rejected, locale)}
           description={t(
             'Concurrency 429 responses observed in the trend window.',
           )}
@@ -97,7 +106,7 @@ export function KpiCards({
         />
         <StatCard
           title={t('Active share')}
-          value={`${Math.round(wk.activeShare * 100)}%`}
+          value={formatPercent(Math.round(wk.activeShare * 100), locale)}
           description={t(
             'Share of sampled time with at least one request in flight.',
           )}
@@ -132,7 +141,7 @@ export function KpiCards({
       />
       <StatCard
         title={t('Configured concurrency caps')}
-        value={kpi.totalLimit}
+        value={formatNumber(kpi.totalLimit, locale)}
         description={t(
           'Sum of explicit per-key / per-user caps (unlimited scopes excluded).',
         )}
@@ -143,7 +152,7 @@ export function KpiCards({
       />
       <StatCard
         title={t('Average utilisation')}
-        value={`${Math.round(kpi.avgUtilization * 100)}%`}
+        value={formatPercent(Math.round(kpi.avgUtilization * 100), locale)}
         description={t(
           'Mean of capped-bucket utilisation. 0% means no caps are currently in use.',
         )}
