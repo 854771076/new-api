@@ -12,7 +12,8 @@
 # Stop & clean:
 #   docker compose -f docker-compose.yml -f docker-compose.sentinel.yml down -v
 #
-# ⚠️ Change default passwords (REDIS_PASSWORD=123456) before any non-dev use.
+# ⚠️ REDIS_PASSWORD / POSTGRES_PASSWORD are required env vars — compose refuses
+# to start without them (no default passwords since the fork's hardening pass).
 
 services:
   # Master / replicas form the data plane. Each container is pinned to a
@@ -26,9 +27,9 @@ services:
     command:
       - redis-server
       - --requirepass
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --masterauth
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --appendonly
       - "yes"
     volumes:
@@ -37,7 +38,7 @@ services:
       new-api-network:
         ipv4_address: 172.28.0.10
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -55,9 +56,9 @@ services:
       - 172.28.0.10
       - "6379"
       - --requirepass
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --masterauth
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --appendonly
       - "yes"
     volumes:
@@ -66,7 +67,7 @@ services:
       new-api-network:
         ipv4_address: 172.28.0.11
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -84,9 +85,9 @@ services:
       - 172.28.0.10
       - "6379"
       - --requirepass
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --masterauth
-      - "123456"
+      - "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}"
       - --appendonly
       - "yes"
     volumes:
@@ -95,7 +96,7 @@ services:
       new-api-network:
         ipv4_address: 172.28.0.12
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "123456", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
       retries: 6
@@ -210,12 +211,12 @@ services:
       - ./data:/data
       - ./logs:/app/logs
     environment:
-      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api
-      - REDIS_PASSWORD=123456
+      - SQL_DSN=postgresql://root:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD (required env, no default password)}@postgres:5432/new-api
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}
       - REDIS_SENTINEL_MODE=true
       - REDIS_SENTINEL_ADDRS=sentinel-1:26379,sentinel-2:26379,sentinel-3:26379
       - REDIS_SENTINEL_MASTER_NAME=mymaster
-      - REDIS_CONN_STRING=redis://:123456@redis-master:6379
+      - REDIS_CONN_STRING=redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}@redis-master:6379
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true
       - BATCH_UPDATE_ENABLED=true

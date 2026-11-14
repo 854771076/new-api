@@ -225,6 +225,46 @@ Snapshot(ctx) ...
 | PostgreSQL `users.access_token` 重复 DDL | 既有迁移每次启动重复发出自我 cast 的列类型变更(GORM 类型 tag 与 PG 类型上报差异),与本功能无关、良性 | 单独排查 |
 | 基线红测试 | Windows TempDir 家族、个别既有前端测试红、既有格式漂移,均与本功能无关 | 分别单独分诊 |
 
+### 8.1 Redis 降级(fail-open)运维指引
+
+> 本节是 02-08 交付的 fail-open 降级(`service/concurrency/limiter_redis.go`)的运维口径:
+> 降级不是故障静默,但意味着**降级期间并发上限不生效**,必须靠监控兜底。
+
+**降级语义(设计如此,勿当 bug 修)**
+
+- 触发条件:Redis 连接失败、超时、Lua 运行时错误、畸形回复——任何"非超限"的后端异常都
+  降级,绝不把基础设施故障伪装成 429 拒绝(D-08/D-09)。
+- 降级形态:回落到**进程内计数器,且以 limit=0 语义运行——只计数、不拒绝**(D-09/D-10)。
+  即降级期间:Token/用户/渠道三轴的并发上限**都不强制**,仅保留观测计数;多节点各自的
+  进程内计数互不同步,**跨节点一致性丢失**。
+- 租约与释放:降级期间的 release 失败会缓冲待重放(D-13),Redis 租约 TTL 是崩溃回收兜底;
+  恢复后共享计数自动恢复(D-11),不做计数回补——降级窗口内的"少计数"不追溯。
+
+**熔断与探活(D-11)**
+
+- 首个后端失败即打开冷却窗口(全局粒度);窗口内零 Redis 调用,由探活 paced probe 决定
+  延长或恢复;probe 失败延长冷却,probe 成功恢复共享计数。WARN 每次失败尝试至多一条,
+  恢复恰好一条——不会按请求量刷屏。
+
+**日志标记(告警规则照这些前缀配)**
+
+| 前缀 | 含义 | 处置 |
+|------|------|------|
+| `concurrency: redis` | 降级发生/持续(acquire degraded / fallback refused / release buffered / snapshot fell back / renewal failed) | 出现即告警:并发上限已不生效 |
+| `concurrency: breaker opened` | 熔断打开或冷却延长("redis call failed; degrading directly for …" / "backend still failing; cooldown extended to …") | 记录降级起点,联动 Redis 健康告警 |
+| `concurrency: breaker closed` | "redis recovered; resuming shared counting (D-11)" | 恢复确认;核对降级时长 |
+| `concurrency: renewal stopped` | 租约续期循环停止(D-02) | 立即排查,可能残留过期租约占位 |
+
+**建议动作**
+
+1. 对 `concurrency: redis` 与 `concurrency: breaker opened` 配即时告警(日志关键字匹配,
+   首条即报);降级窗口 > 一次探活周期仍持续则升级。
+2. 降级期间不要重启网关来"恢复限流"——恢复由探活自动完成;重启只会丢掉进程内计数。
+3. 恢复(concurrency: breaker closed)后抽查管理端快照页(/api/concurrency/snapshot)确认
+   计数已回到共享视图。
+4. 若业务要求"Redis 挂了就拒绝而不是放行",那是 fail-closed 严格模式,见第 9 节演进方向,
+   需另行立项而非改本节语义。
+
 ## 9. 演进方向(交付状态)
 
 > 本节"已交付"指分片交付史实,且这些分片已并入 main;实现位置见各章的代码引用。
