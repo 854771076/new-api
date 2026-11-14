@@ -35,6 +35,8 @@ import {
   useSystemOptions,
 } from '@/features/system-settings/hooks/use-system-options'
 import { useUpdateOption } from '@/features/system-settings/hooks/use-update-option'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { QueueSettingsForm, type QueueFormValues } from './queue-settings-form'
 
@@ -109,7 +111,13 @@ function createQueueSchema(t: (key: string) => string) {
  */
 export function QueueSettingsCard() {
   const { t } = useTranslation()
-  const optionsQuery = useSystemOptions()
+  const user = useAuthStore((state) => state.auth.user)
+  // The queue keys are global system options, so /api/option/ (root only) is
+  // the only backend contract that can read or write them. Querying it as a
+  // plain admin would 403 and leave the card showing defaults that may
+  // contradict the running gateway.
+  const canManageQueueSettings = user?.role === ROLE.SUPER_ADMIN
+  const optionsQuery = useSystemOptions(canManageQueueSettings)
   const updateOption = useUpdateOption()
 
   const serverBaseline = useMemo(
@@ -161,7 +169,21 @@ export function QueueSettingsCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className='min-h-0 flex-1 overflow-y-auto'>
-        <QueueSettingsForm form={form} busy={busy} onSubmit={onSubmit} />
+        {!canManageQueueSettings && (
+          <p className='text-muted-foreground text-sm'>
+            {t(
+              'Only the root account can change the bounded wait queue settings.'
+            )}
+          </p>
+        )}
+        {canManageQueueSettings && optionsQuery.isError && (
+          <p className='text-muted-foreground text-sm'>
+            {t('Failed to load the bounded wait queue settings.')}
+          </p>
+        )}
+        {canManageQueueSettings && optionsQuery.isSuccess && (
+          <QueueSettingsForm form={form} busy={busy} onSubmit={onSubmit} />
+        )}
       </CardContent>
     </Card>
   )

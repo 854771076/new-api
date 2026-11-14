@@ -7654,6 +7654,8 @@
     "No log files available": "沒有可用的日誌檔案",
     "No matches found": "未找到符合項目",
     "{{count}} matches": "{{count}} 筆符合",
-    "Log content truncated": "日誌內容已截斷"
+    "Log content truncated": "日誌內容已截斷",
+    "Only the root account can change the bounded wait queue settings.": "只有 root 帳號可以修改有界等待佇列設定。",
+    "Failed to load the bounded wait queue settings.": "載入有界等待佇列設定失敗。"
   }
 }

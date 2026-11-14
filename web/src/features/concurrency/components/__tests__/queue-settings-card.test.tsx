@@ -9,9 +9,11 @@ License, or (at your option) any later version.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { QueueSettingsCard } from '../queue-settings-card'
 
@@ -56,6 +58,17 @@ async function waitForLoadedForm() {
 describe('QueueSettingsCard', () => {
   beforeEach(() => {
     mockOptionApi()
+    // The queue options live behind the root-only /api/option/ endpoint, so
+    // the card only renders its controls for the root account.
+    useAuthStore.getState().auth.setUser({
+      id: 1,
+      username: 'root',
+      role: ROLE.SUPER_ADMIN,
+    })
+  })
+
+  afterEach(() => {
+    useAuthStore.getState().auth.setUser(null)
   })
 
   test('loads the stored queue options into the form controls', async () => {
@@ -166,5 +179,27 @@ describe('QueueSettingsCard', () => {
     // "always PUT every key" regression cannot slip through microtasks.
     await act(async () => {})
     expect(put).not.toHaveBeenCalled()
+  })
+
+  test('an admin that is not the root account sees no queue controls', async () => {
+    const { get } = mockOptionApi()
+    useAuthStore.getState().auth.setUser({
+      id: 2,
+      username: 'admin',
+      role: ROLE.ADMIN,
+    })
+    renderCard()
+
+    expect(
+      await screen.findByText(
+        'Only the root account can change the bounded wait queue settings.'
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Save queue settings' })
+    ).not.toBeInTheDocument()
+    // The option endpoint is root-only: a plain admin must not even ask for
+    // the values it may not change.
+    expect(get).not.toHaveBeenCalled()
   })
 })

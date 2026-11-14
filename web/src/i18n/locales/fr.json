@@ -7654,6 +7654,8 @@
     "No log files available": "Aucun fichier journal disponible",
     "No matches found": "Aucun résultat",
     "{{count}} matches": "{{count}} résultats",
-    "Log content truncated": "Contenu du journal tronqué"
+    "Log content truncated": "Contenu du journal tronqué",
+    "Only the root account can change the bounded wait queue settings.": "Seul le compte root peut modifier les paramètres de la file d'attente bornée.",
+    "Failed to load the bounded wait queue settings.": "Échec du chargement des paramètres de la file d'attente bornée."
   }
 }

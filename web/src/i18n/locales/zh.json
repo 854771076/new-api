@@ -7654,6 +7654,8 @@
     "No log files available": "没有可用的日志文件",
     "No matches found": "未找到匹配项",
     "{{count}} matches": "{{count}} 条匹配",
-    "Log content truncated": "日志内容已截断"
+    "Log content truncated": "日志内容已截断",
+    "Only the root account can change the bounded wait queue settings.": "只有 root 账号可以修改有界等待队列设置。",
+    "Failed to load the bounded wait queue settings.": "加载有界等待队列设置失败。"
   }
 }

@@ -7,18 +7,18 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
 
-import { createFileRoute, redirect } from '@tanstack/react-router';
+import { createFileRoute, redirect } from '@tanstack/react-router'
 
-import { ConcurrencyAdminPage } from '@/features/concurrency';
-import { ROLE } from '@/lib/roles';
-import { useAuthStore } from '@/stores/auth-store';
+import { ConcurrencyAdminPage } from '@/features/concurrency'
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
 
 export const Route = createFileRoute('/_authenticated/concurrency/')({
   beforeLoad: () => {
-    const { auth } = useAuthStore.getState();
+    const { auth } = useAuthStore.getState()
     if (!auth.user || auth.user.role < ROLE.ADMIN) {
-      throw redirect({ to: '/403' });
+      throw redirect({ to: '/403' })
     }
   },
   component: ConcurrencyAdminPage,
-});
+})

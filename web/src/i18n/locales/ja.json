@@ -7654,6 +7654,8 @@
     "No log files available": "利用可能なログファイルがありません",
     "No matches found": "一致する項目はありません",
     "{{count}} matches": "{{count}} 件一致",
-    "Log content truncated": "ログ内容は切り詰められました"
+    "Log content truncated": "ログ内容は切り詰められました",
+    "Only the root account can change the bounded wait queue settings.": "有界待機キューの設定を変更できるのは root アカウントのみです。",
+    "Failed to load the bounded wait queue settings.": "有界待機キューの設定の読み込みに失敗しました。"
   }
 }

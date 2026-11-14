@@ -7654,6 +7654,8 @@
     "No log files available": "Нет доступных файлов журнала",
     "No matches found": "Совпадений не найдено",
     "{{count}} matches": "{{count}} совпадений",
-    "Log content truncated": "Содержимое журнала обрезано"
+    "Log content truncated": "Содержимое журнала обрезано",
+    "Only the root account can change the bounded wait queue settings.": "Только учётная запись root может изменять настройки ограниченной очереди ожидания.",
+    "Failed to load the bounded wait queue settings.": "Не удалось загрузить настройки ограниченной очереди ожидания."
   }
 }

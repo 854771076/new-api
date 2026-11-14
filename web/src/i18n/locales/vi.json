@@ -7654,6 +7654,8 @@
     "No log files available": "Không có tệp nhật ký khả dụng",
     "No matches found": "Không tìm thấy kết quả phù hợp",
     "{{count}} matches": "{{count}} kết quả",
-    "Log content truncated": "Nội dung nhật ký đã bị cắt bớt"
+    "Log content truncated": "Nội dung nhật ký đã bị cắt bớt",
+    "Only the root account can change the bounded wait queue settings.": "Chỉ tài khoản root mới có thể thay đổi cài đặt hàng đợi có giới hạn.",
+    "Failed to load the bounded wait queue settings.": "Không tải được cài đặt hàng đợi có giới hạn."
   }
 }

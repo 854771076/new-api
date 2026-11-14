@@ -7654,6 +7654,8 @@
     "No log files available": "No log files available",
     "No matches found": "No matches found",
     "{{count}} matches": "{{count}} matches",
-    "Log content truncated": "Log content truncated"
+    "Log content truncated": "Log content truncated",
+    "Only the root account can change the bounded wait queue settings.": "Only the root account can change the bounded wait queue settings.",
+    "Failed to load the bounded wait queue settings.": "Failed to load the bounded wait queue settings."
   }
 }

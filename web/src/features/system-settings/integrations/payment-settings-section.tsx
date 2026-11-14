@@ -554,7 +554,10 @@ export function PaymentSettingsSection({
       })
     }
 
-    if (sanitized.EpayPlatformPublicKey !== initial.EpayPlatformPublicKey) {
+    if (
+      sanitized.EpayPlatformPublicKey &&
+      sanitized.EpayPlatformPublicKey !== initial.EpayPlatformPublicKey
+    ) {
       updates.push({
         key: 'payment_setting.epay_platform_public_key',
         value: sanitized.EpayPlatformPublicKey,
@@ -1383,6 +1386,9 @@ export function PaymentSettingsSection({
                               {...field}
                             />
                           </FormControl>
+                          <FormDescription>
+                            {t('Leave blank to keep the existing key')}
+                          </FormDescription>
                           <FormMessage />
                         </FormItem>
                       )}

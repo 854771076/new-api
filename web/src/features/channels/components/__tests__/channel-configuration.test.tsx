@@ -56,6 +56,12 @@ import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelsProvider } from '../channels-provider'
 import { ChannelMutateDrawer } from '../drawers/channel-mutate-drawer'
 
+// Opening the JSON tab of the mapping editor mounts a full CodeMirror
+// bundle. On a cold, CPU-constrained runner that first mount can take
+// minutes, which is over the default per-test budget and made the mapping
+// validation tests fail on timing rather than on behaviour.
+vi.setConfig({ testTimeout: 300_000 })
+
 const originalAuth = useAuthStore.getState().auth
 let client: QueryClient
 let editingChannel: Channel
