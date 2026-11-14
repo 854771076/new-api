@@ -257,7 +257,8 @@ it('saving the drawer sends concurrency_limit in the update payload', async () =
   await waitFor(() =>
     expect(put).toHaveBeenCalledWith(
       '/api/user/',
-      expect.objectContaining({ id: 2, concurrency_limit: 3 })
+      expect.objectContaining({ id: 2, concurrency_limit: 3 }),
+      {}
     )
   )
 })
