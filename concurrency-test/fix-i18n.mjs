@@ -1,8 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const localesDir =
-  'D:/workplace/code/ai-dev/new-api-monster/web/src/i18n/locales';
+// Resolve the checkout from this script's own location so the rewrite only
+// ever touches the locale files of the repository this script lives in.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const localesDir = path.resolve(
+  here,
+  '..',
+  'web',
+  'src',
+  'i18n',
+  'locales',
+);
 
 // Translations for the 15 untranslated concurrency keys, per locale.
 const translations = {

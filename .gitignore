@@ -59,3 +59,5 @@ go.work.sum
 /scripts/resources/
 # 并发测试的唯一配置源：含管理员凭据，禁止入库
 /concurrency-test/config.json
+# 并发测试运行产物（每次运行重新生成）
+/concurrency-test/results/

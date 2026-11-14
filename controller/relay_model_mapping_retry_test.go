@@ -324,5 +324,176 @@ func TestSingleHopZhipuChannelSendsConfiguredModelMapping(t *testing.T) {
 		"the upstream wire body must NOT carry the raw client virtual name; got=%s", got[0])
 }
 
+// TestRelayRetryWithoutChannelMappingKeepsClientModelName pins the other
+// half of the per-attempt mapping contract: the retry hop lands on a channel
+// that declares NO model_mapping at all. The previous attempt's mapped name
+// must not survive into that hop — the new channel never declared it, so
+// asking it for that name is a guaranteed upstream "model not found" (or a
+// silently different model). The wire body must carry the client's own model
+// name, exactly as a single-hop request to an unmapped channel does.
+func TestRelayRetryWithoutChannelMappingKeepsClientModelName(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	db := newChannelSlotDB(t)
+
+	const (
+		clientModel = "tyy_maas_kimi-k2.5"
+		upstreamA   = "real-upstream-a"
+		userID      = 7803
+		channelAID  = 7803
+		channelBID  = 7804
+	)
+
+	previousRetryTimes := common.RetryTimes
+	common.RetryTimes = 1
+	previousStatusCodes := operation_setting.AutomaticRetryStatusCodesToString()
+	require.NoError(t, operation_setting.AutomaticRetryStatusCodesFromString("500"))
+	previousAutoDisable := common.AutomaticDisableChannelEnabled
+	common.AutomaticDisableChannelEnabled = false
+	t.Cleanup(func() {
+		common.RetryTimes = previousRetryTimes
+		require.NoError(t, operation_setting.AutomaticRetryStatusCodesFromString(previousStatusCodes))
+		common.AutomaticDisableChannelEnabled = previousAutoDisable
+	})
+
+	previousRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(fmt.Sprintf(`{"%s":0}`, clientModel)))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios)) })
+
+	var (
+		bodyMu       sync.Mutex
+		bodiesFromA  []string
+		bodiesFromB  []string
+		upstreamHits atomic.Int32
+	)
+	upstreamAHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyMu.Lock()
+		bodiesFromA = append(bodiesFromA, string(body))
+		bodyMu.Unlock()
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-a","object":"chat.completion","created":1,"model":"` + upstreamA +
+			`","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	})
+	upstreamBHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		bodyMu.Lock()
+		bodiesFromB = append(bodiesFromB, string(body))
+		bodyMu.Unlock()
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-b","object":"chat.completion","created":1,"model":"` + clientModel +
+			`","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
+	})
+	upstreamAServer := httptest.NewServer(upstreamAHandler)
+	t.Cleanup(upstreamAServer.Close)
+	upstreamBServer := httptest.NewServer(upstreamBHandler)
+	t.Cleanup(upstreamBServer.Close)
+	service.InitHttpClient()
+
+	require.NoError(t, db.Create(&model.User{
+		Id:       userID,
+		Username: "wire-mapping-unmapped-user",
+		Password: "password",
+		Status:   common.UserStatusEnabled,
+		Group:    "default",
+		Quota:    100000,
+	}).Error)
+	require.NoError(t, db.Create(&model.Token{
+		Id:             userID,
+		UserId:         userID,
+		Key:            "wire-mapping-unmapped-token-key",
+		Name:           "wire-mapping-unmapped-token",
+		Status:         common.TokenStatusEnabled,
+		ExpiredTime:    -1,
+		UnlimitedQuota: true,
+	}).Error)
+
+	mappingA := `{"` + clientModel + `":"` + upstreamA + `"}`
+	limitA, limitB := 1, 1
+	channelA := &model.Channel{
+		Id:               channelAID,
+		Type:             constant.ChannelTypeOpenAI,
+		Key:              "wire-mapping-unmapped-channel-a-key",
+		Name:             "wire-mapping-unmapped-channel-a",
+		Status:           common.ChannelStatusEnabled,
+		Group:            "default",
+		Models:           clientModel,
+		BaseURL:          &upstreamAServer.URL,
+		ModelMapping:     &mappingA,
+		ConcurrencyLimit: &limitA,
+	}
+	require.NoError(t, db.Create(channelA).Error)
+	// Channel B declares NO model_mapping: it serves the client's own model
+	// name upstream.
+	channelB := &model.Channel{
+		Id:               channelBID,
+		Type:             constant.ChannelTypeOpenAI,
+		Key:              "wire-mapping-unmapped-channel-b-key",
+		Name:             "wire-mapping-unmapped-channel-b",
+		Status:           common.ChannelStatusEnabled,
+		Group:            "default",
+		Models:           clientModel,
+		BaseURL:          &upstreamBServer.URL,
+		ConcurrencyLimit: &limitB,
+	}
+	require.NoError(t, db.Create(channelB).Error)
+	priority := int64(100)
+	require.NoError(t, db.Create(&model.Ability{
+		Group:     "default",
+		Model:     clientModel,
+		ChannelId: channelAID,
+		Enabled:   true,
+		Priority:  &priority,
+	}).Error)
+	require.NoError(t, db.Create(&model.Ability{
+		Group:     "default",
+		Model:     clientModel,
+		ChannelId: channelBID,
+		Enabled:   true,
+		Priority:  &priority,
+	}).Error)
+
+	lim := newChannelSlotLimiter()
+	installChannelSlotLimiter(t, lim)
+
+	// Sibling holds A's only slot so the first hop is refused before any
+	// wire call; the retry hop then has B as the only candidate left.
+	siblingRelease, err := lim.inner.Acquire(t.Context(), concurrency.ChannelScope(channelAID), limitA)
+	require.NoError(t, err)
+	t.Cleanup(func() { siblingRelease() })
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"`+clientModel+`","messages":[{"role":"user","content":"hi"}]}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	setSlotRelayIdentityKeys(c, userID, "wire-mapping-unmapped-user", "wire-mapping-unmapped-token-key")
+	require.Nil(t, middleware.SetupContextForSelectedChannel(c, channelA, clientModel))
+
+	Relay(c, types.RelayFormatOpenAI)
+
+	assert.Equal(t, http.StatusOK, recorder.Code,
+		"retry hop must succeed (got body=%s)", recorder.Body.String())
+	bodyMu.Lock()
+	aBodies := append([]string(nil), bodiesFromA...)
+	bBodies := append([]string(nil), bodiesFromB...)
+	bodyMu.Unlock()
+
+	require.Empty(t, aBodies,
+		"channel A is saturated — its upstream must NOT be hit (got %d body)", len(aBodies))
+	require.Len(t, bBodies, 1,
+		"channel B must have seen exactly one wire request (the retry hop)")
+
+	got := bBodies[0]
+	assert.Contains(t, got, `"model":"`+clientModel+`"`,
+		"an unmapped channel must receive the client's own model name; got=%s", got)
+	assert.NotContains(t, got, upstreamA,
+		"the previous attempt's mapped name must not leak into an unmapped channel (the bug this test pins); got=%s", got)
+}
+
 // _ ensures model + gorm imports are retained when running in isolation.
 var _ = gorm.ErrRecordNotFound

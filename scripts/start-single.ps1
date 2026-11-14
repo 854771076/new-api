@@ -16,6 +16,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
+# The compose files require REDIS_PASSWORD / POSTGRES_PASSWORD; keep them in the
+# gitignored .env file so the documented flow works without extra setup.
+. "$PSScriptRoot\compose-env.ps1"
+Initialize-ComposeSecrets -RepoRoot $repoRoot
+
 if (-not (Test-Path "$repoRoot\logs")) {
     New-Item -ItemType Directory -Path "$repoRoot\logs" -Force | Out-Null
 }

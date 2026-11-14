@@ -275,7 +275,24 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// retry happened to pick, leaving later retries sending the client's
 		// raw model name upstream and triggering 404 "model not found" on
 		// channels whose upstream name differs from the client's name.
+		//
+		// Every attempt starts from the client's model name. The helper only
+		// writes the mapped name when this channel's mapping actually
+		// resolves the model, so without the reset a retry that lands on a
+		// channel without a mapping (or without an entry for this model)
+		// would keep the PREVIOUS attempt's mapped name and ask the new
+		// channel for a model it never declared.
+		//
+		// UpstreamModelName and IsModelMapped live on the embedded
+		// *ChannelMeta, which the first attempt does not have yet
+		// (ModelMappedHelper allocates it). Guard the reset so the first
+		// attempt does not dereference a nil ChannelMeta.
+		if relayInfo.ChannelMeta != nil {
+			relayInfo.UpstreamModelName = relayInfo.OriginModelName
+			relayInfo.IsModelMapped = false
+		}
 		if request != nil {
+			request.SetModelName(relayInfo.OriginModelName)
 			if err := helper.ModelMappedHelper(c, relayInfo, request); err != nil {
 				newAPIError = types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 				break

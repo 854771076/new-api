@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -236,4 +237,76 @@ func TestPostgresMigrationIsIdempotent(t *testing.T) {
 	dsn := "host=127.0.0.1 port=5433 user=postgres password=gsdpass dbname=newapi sslmode=disable"
 	db := mustOpen(t, "postgres", dsn, postgres.Open(dsn))
 	mustHaveNoAlterOnSecondPass(t, db, "postgres", runMigrator)
+}
+
+// TestTokenKeyLookupRunsOnEveryDatabase exercises the usage dashboard's token
+// key lookup against a real database.
+//
+// The statement aggregates quota_data and joins the tokens table by its key
+// column. Both identifiers are reserved words in MySQL ("key" and the former
+// "usage" alias), so the query only parses when the dialect-specific quoting
+// is applied — SQLite and PostgreSQL accept the unquoted form, which is why
+// this check has to run against MySQL as well.
+func TestTokenKeyLookupRunsOnEveryDatabase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration")
+	}
+	cases := []struct {
+		name string
+		dsn  string
+	}{
+		{"mysql", "root:gsdpass@tcp(127.0.0.1:3307)/newapi?parseTime=true&charset=utf8mb4"},
+		{"postgres", "postgres://postgres:gsdpass@127.0.0.1:5433/newapi?sslmode=disable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SQL_DSN", tc.dsn)
+			// Only a master node migrates, and the flag is set by common.InitEnv,
+			// which the test binary cannot call (it parses the command line).
+			common.IsMasterNode = true
+			require.NoError(t, model.InitDB())
+
+			key := fmt.Sprintf("integration-token-key-%s-%d", tc.name, time.Now().UnixNano())
+			token := model.Token{
+				UserId:      1,
+				Key:         key,
+				Status:      common.TokenStatusEnabled,
+				Name:        "integration-token",
+				CreatedTime: time.Now().Unix(),
+				AccessedTime: time.Now().Unix(),
+				ExpiredTime: -1,
+			}
+			require.NoError(t, model.DB.Create(&token).Error)
+			require.NoError(t, model.DB.Create(&model.QuotaData{
+				UserID:    1,
+				Username:  "integration-user",
+				ModelName: "integration-model",
+				TokenKey:  key,
+				Count:     3,
+				TokenUsed: 7,
+				CreatedAt: time.Now().Unix(),
+			}).Error)
+			t.Cleanup(func() {
+				model.DB.Where("token_key = ?", key).Delete(&model.QuotaData{})
+				model.DB.Delete(&model.Token{}, token.Id)
+			})
+
+			entries, err := model.ListDistinctTokenKeys("", "", 0, 0, 200)
+			require.NoError(t, err, "the token key lookup must run on %s", tc.name)
+
+			var found *model.QuotaDataTokenKeyEntry
+			for i := range entries {
+				if entries[i].Value == key {
+					found = &entries[i]
+					break
+				}
+			}
+			require.NotNil(t, found, "the token key must appear in the lookup result")
+			require.Equal(t, "integration-token", found.TokenName)
+			require.Equal(t, "integration-user", found.UserName)
+			require.Equal(t, int64(3), found.Usage)
+			require.Equal(t, int64(7), found.TokenUsed)
+			require.False(t, found.Deleted, "a token that still exists must not be reported as deleted")
+		})
+	}
 }

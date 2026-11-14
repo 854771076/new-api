@@ -117,7 +117,13 @@ services:
     command:
       - sh
       - -c
-      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+      - >-
+        { grep -v '^sentinel auth-pass' /etc/redis/sentinel.conf;
+        printf 'sentinel auth-pass mymaster "%s"\n' "$$REDIS_PASSWORD"; } > /tmp/sentinel.conf &&
+        chmod 666 /tmp/sentinel.conf &&
+        exec redis-sentinel /tmp/sentinel.conf
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}
     volumes:
       - ./docker/sentinel/conf/sentinel-1.conf:/etc/redis/sentinel.conf:ro
     networks:
@@ -140,7 +146,13 @@ services:
     command:
       - sh
       - -c
-      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+      - >-
+        { grep -v '^sentinel auth-pass' /etc/redis/sentinel.conf;
+        printf 'sentinel auth-pass mymaster "%s"\n' "$$REDIS_PASSWORD"; } > /tmp/sentinel.conf &&
+        chmod 666 /tmp/sentinel.conf &&
+        exec redis-sentinel /tmp/sentinel.conf
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}
     volumes:
       - ./docker/sentinel/conf/sentinel-2.conf:/etc/redis/sentinel.conf:ro
     networks:
@@ -163,7 +175,13 @@ services:
     command:
       - sh
       - -c
-      - "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && chmod 666 /tmp/sentinel.conf && exec redis-sentinel /tmp/sentinel.conf"
+      - >-
+        { grep -v '^sentinel auth-pass' /etc/redis/sentinel.conf;
+        printf 'sentinel auth-pass mymaster "%s"\n' "$$REDIS_PASSWORD"; } > /tmp/sentinel.conf &&
+        chmod 666 /tmp/sentinel.conf &&
+        exec redis-sentinel /tmp/sentinel.conf
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?set REDIS_PASSWORD (required env, no default password)}
     volumes:
       - ./docker/sentinel/conf/sentinel-3.conf:/etc/redis/sentinel.conf:ro
     networks:
@@ -176,13 +194,15 @@ services:
       retries: 6
 
   # Sentinel overlay keeps the original `redis` service defined in
-  # docker-compose.yml around for reference / fallback, but disables it
-  # via profiles so only the Sentinel data plane is actually started.
+  # docker-compose.yml around as a standalone fallback. It stays enabled
+  # because docker-compose.yml's new-api service depends on it, and a
+  # depends_on edge to a profile-disabled service makes the whole project
+  # invalid ("depends on undefined service redis"). In Sentinel mode the
+  # app talks to redis-master through the sentinels; this instance is idle.
   redis:
     image: redis:7-alpine
     container_name: redis
     restart: always
-    profiles: ["disabled"]
     networks:
       - new-api-network
 

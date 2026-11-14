@@ -211,23 +211,21 @@ func (m *MemoryLimiter) AcquireBatch(_ context.Context, scopes []ScopeLimit) (fu
 	}
 	m.mu.Unlock()
 
-	var done bool
+	var once sync.Once
 	return func() {
-		if done {
-			return
-		}
-		done = true
-		m.mu.Lock()
-		for _, key := range keys {
-			if m.holders[key] > 0 {
-				m.holders[key]--
+		once.Do(func() {
+			m.mu.Lock()
+			for _, key := range keys {
+				if m.holders[key] > 0 {
+					m.holders[key]--
+				}
+				if m.holders[key] == 0 {
+					delete(m.holders, key)
+				}
+				m.updated[key] = nowUnix()
 			}
-			if m.holders[key] == 0 {
-				delete(m.holders, key)
-			}
-			m.updated[key] = nowUnix()
-		}
-		m.mu.Unlock()
+			m.mu.Unlock()
+		})
 	}, nil
 }
 

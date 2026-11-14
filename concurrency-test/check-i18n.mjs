@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const srcDir = 'D:/workplace/code/ai-dev/new-api-monster/web/src';
+// Resolve the checkout from this script's own location so the check runs
+// against the repository it lives in, not a hardcoded path from another
+// machine.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const srcDir = path.resolve(here, '..', 'web', 'src');
 const files = [
   'features/concurrency/index.tsx',
   'features/concurrency/components/kpi-cards.tsx',

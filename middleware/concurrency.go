@@ -64,14 +64,22 @@ var (
 
 // SetConcurrencyLimiter installs the limiter used by ConcurrencyMiddleware.
 // Intended to be called from the boot path after the limiter has been built.
-// Calling more than once is a programming error and panics on the second
-// invocation so misconfiguration does not silently swap implementations.
+// The first call wins: later calls are swallowed by the sync.Once, so a second
+// install cannot silently swap the implementation under a running server.
+// Installing a nil limiter panics — the request gate would otherwise let every
+// request through unchecked.
 func SetConcurrencyLimiter(l concurrencyLimiterAdapter) {
-	concurrencyLimiterOnce.Do(func() { concurrencyLimiter = l })
+	installed := false
+	concurrencyLimiterOnce.Do(func() {
+		concurrencyLimiter = l
+		installed = true
+	})
+	if !installed {
+		// A limiter is already installed and stays in place.
+		return
+	}
 	if concurrencyLimiter == nil {
-		// Subsequent calls lost the race; the Once swallowed them. We must
-		// not silently let a second limiter replace the first.
-		panic("concurrency limiter already set")
+		panic("concurrency limiter must not be nil")
 	}
 }
 

@@ -3,7 +3,9 @@ package xunfei
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -236,6 +238,20 @@ type asrPollFailure struct {
 	} `json:"content"`
 }
 
+// asrUploadOrderMayExist 判断上传阶段的传输故障是否可能已经在上游创建了订单。
+//
+// 只有「请求尚未发出」的拨号失败可以安全重试：连接根本没建起来，上游不可能收到音频，
+// 上游侧也就没有订单。此时重试既不会双扣，也保留了瞬时网络故障的可用性。
+// 其余传输故障（连接建立后写入或读取失败、请求被取消等）都发生在请求体可能已经
+// 发出的窗口里，上游可能已经创建了订单，重试会再上传一次音频并造成双扣。
+func asrUploadOrderMayExist(err error) bool {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Op != "dial"
+	}
+	return true
+}
+
 // asrUploadAudio 上传音频原始字节，换取订单号与预估转写时长。
 func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, audio ASRAudio, language string, signatureRandom string) (*asrUploadResult, error) {
 	params := url.Values{}
@@ -265,6 +281,10 @@ func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, a
 		return nil, &ASRUpstreamError{
 			ASRErrorInfo: ASRErrorInfo{Description: "上游请求失败（网络或传输故障）", Stage: asrStageUpload},
 			Cause:        err,
+			// 拨号失败说明请求还没发出去，上游不可能创建订单，可以安全重试；
+			// 其余传输故障都发生在请求体已经开始发送之后，上游可能已经创建了订单，
+			// 重试会再上传一次音频并造成双扣。
+			OrderCreated: asrUploadOrderMayExist(err),
 		}
 	}
 	defer response.Body.Close()
@@ -273,6 +293,8 @@ func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, a
 		return nil, &ASRUpstreamError{
 			ASRErrorInfo: ASRErrorInfo{Description: "上游响应读取失败", Stage: asrStageUpload},
 			Cause:        err,
+			// 上游已经开始应答，说明上传已被受理，订单多半已经创建，不能重试。
+			OrderCreated: true,
 		}
 	}
 	if response.StatusCode != http.StatusOK {
@@ -288,6 +310,9 @@ func asrUploadAudio(ctx context.Context, baseURL string, creds ASRCredentials, a
 		return nil, &ASRUpstreamError{
 			ASRErrorInfo: ASRErrorInfo{Description: "上游响应不是合法 JSON", Stage: asrStageUpload},
 			Cause:        err,
+			// 上游以 200 应答说明上传已被受理，订单多半已经创建，只是响应无法解析；
+			// 这类失败不能重试：重试会重新上传音频并创建第二个订单，造成双扣。
+			OrderCreated: true,
 		}
 	}
 	if code := string(envelope.Code); code != "" && code != asrSuccessCode {

@@ -256,11 +256,14 @@ func ListDistinctTokenKeys(username string, keyword string, startTimestamp int64
 	// Step 1: 拿到 distinct token_key 列表 + 窗口内累计调用次数与 tokens 消耗
 	type aggRow struct {
 		TokenKey  string `gorm:"column:token_key"`
-		Usage     int64  `gorm:"column:usage"`
+		Usage     int64  `gorm:"column:usage_count"`
 		TokenUsed int64  `gorm:"column:token_used"`
 	}
 	query := DB.Table("quota_data").
-		Select("token_key, sum(count) as usage, COALESCE(sum(token_used), 0) as token_used").
+		// usage is a reserved word in MySQL, so the aggregate is aliased as
+		// usage_count; the bare alias makes the whole statement fail with
+		// ER_PARSE_ERROR on MySQL.
+		Select("token_key, sum(count) as usage_count, COALESCE(sum(token_used), 0) as token_used").
 		Where("token_key <> ''")
 	if username != "" {
 		query = query.Where("username = ?", username)
@@ -274,7 +277,11 @@ func ListDistinctTokenKeys(username string, keyword string, startTimestamp int64
 	if endTimestamp != 0 {
 		query = query.Where("created_at <= ?", endTimestamp)
 	}
-	query = query.Group("token_key")
+	// 按调用次数降序取前 limit 个分组：SQL 侧排序 + LIMIT，避免把整张表的分组
+	// 拉进内存再截断，也把后续两次 IN 查询的参数数量限制在 limit 之内
+	// （SQLite 的绑定变量上限是 999，超限会让整段查询失败）。
+	// 同次数时按 token_key 升序，保证并列项的顺序稳定可预期。
+	query = query.Group("token_key").Order("usage_count desc, token_key asc").Limit(limit)
 
 	var aggRows []aggRow
 	if err := query.Find(&aggRows).Error; err != nil {
@@ -292,7 +299,7 @@ func ListDistinctTokenKeys(username string, keyword string, startTimestamp int64
 			Key  string `gorm:"column:key"`
 			Name string `gorm:"column:name"`
 		}
-		if err := DB.Table("tokens").Select("key, name").Where("key IN ?", keys).Find(&tokenRows).Error; err == nil {
+		if err := DB.Table("tokens").Select(commonKeyCol+", name").Where(commonKeyCol+" IN ?", keys).Find(&tokenRows).Error; err == nil {
 			for _, tr := range tokenRows {
 				keyToName[tr.Key] = tr.Name
 			}
