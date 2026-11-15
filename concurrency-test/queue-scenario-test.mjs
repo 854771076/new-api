@@ -134,6 +134,31 @@ const tally = (rs) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// in-flight count as the server sees it: the user bucket counts every request
+// this token has in flight, so it is the only bucket that reflects "a request
+// holds a slot" without knowing the token id.
+async function inflight() {
+  const s = await snapshot();
+  return (s.scopes || []).reduce((a, x) => a + (x.kind === 'user' ? x.current : 0), 0);
+}
+
+// Wait until the server reports exactly `target` requests in flight.
+//
+// The server frees a slot in a gin defer that runs AFTER the response is
+// written, so the CLIENT seeing 200 does not mean the slot is free yet.
+// Firing the next scenario immediately therefore races that release: the new
+// long tasks find the old slots still held and queue instead of holding
+// slots themselves, which changes the queue depth this suite asserts on.
+// Waiting for the count to settle removes the race.
+async function waitForInflight(target, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if ((await inflight()) === target) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
 // ================= main =================
 console.log(`target: ${BASE}  model=${MODEL}`);
 console.log(`config: ratio=${RATIO} cap=${CAP} max_wait=${MAX_WAIT_S}s  →  Q=${Q}, total admit=${TOTAL_ADMIT}\n`);
@@ -192,8 +217,12 @@ try {
 
 // ---- S4: queued request aborted → depth released; no leaks after recovery ----
 {
+  // Let S3's long tasks release their slots before this scenario starts,
+  // otherwise S4's own long tasks queue instead of holding the slots and the
+  // queue depth below is not the one under test.
+  await waitForInflight(0);
   const longs = Array.from({ length: 3 }, () => longTask());
-  await sleep(600);
+  await waitForInflight(3); // the three long tasks now hold the three slots
   const ac = new AbortController();
   const pending = chat({ maxTokens: 60, signal: ac.signal });
   await sleep(700); // inside the queue now (slots are full)

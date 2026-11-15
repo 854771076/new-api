@@ -252,13 +252,15 @@ func TestGetChannel_DBPath_PriorityRetryStepsThroughAllTiers(t *testing.T) {
 	assert.Equal(t, 104002, chosen.Id,
 		"DB fallback: with the highest tier excluded, retry=0 must land on the next tier (priority=50)")
 
-	// retry=1 with the highest tier excluded — must reach the original
-	// third tier (priority=0).
+	// retry=1 with the highest tier excluded — must step to the second tier
+	// (priority=50), exactly like the cache path above. The DB fallback keeps
+	// the priority ladder anchored to the PRE-exclusion tier list, so retry=1
+	// is the original second tier, not the bottom tier.
 	chosen, err = GetChannel("default", priorityTestModel, 1, nil, 104001)
 	require.NoError(t, err)
 	require.NotNil(t, chosen)
-	assert.Equal(t, 104003, chosen.Id,
-		"DB fallback: retry=1 with the highest tier excluded must land on the original third tier (priority=0)")
+	assert.Equal(t, 104002, chosen.Id,
+		"DB fallback: retry=1 with the highest tier excluded must land on the second tier (priority=50), not the bottom tier (priority=0)")
 
 	// retry=2 with the top two tiers excluded — must clamp to the only
 	// surviving tier (priority=0) instead of erroring.

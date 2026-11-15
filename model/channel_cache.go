@@ -234,7 +234,7 @@ func GetRandomSatisfiedChannel(
 	// retry progression stays anchored to the pre-exclusion priority ranking.
 	// Without this the post-exclusion priority list shrinks as saturation
 	// accumulates and retry=N silently picks the bottom priority instead of
-	// the N-th tier (see .planning/debug/concurrency-priority-not-applied.md).
+	// the N-th tier.
 	if retry >= len(sortedUniquePriorities) {
 		retry = len(sortedUniquePriorities) - 1
 	}

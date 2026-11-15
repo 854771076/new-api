@@ -141,6 +141,13 @@ func GetChannel(
 		}
 		abilities = filterAbilitiesByConstraints(abilities, model, filters)
 	}
+	// originalAbilities captures the pre-exclusion ability set so the
+	// priority list (and the retry clamp) stay aligned to the full priority
+	// tier list even when the highest tier is excluded. Mirrors the cache path
+	// in model/channel_cache.go: the DB fallback must not skip intermediate
+	// priority tiers when retry=N.
+	originalAbilities := make([]Ability, len(abilities))
+	copy(originalAbilities, abilities)
 	// Saturation exclusion: dropped AFTER the request-filter pass and BEFORE
 	// the priority list is built, so the layer mapping and its retry clamp stay
 	// aligned to the full priority tier list and a saturated channel is never
@@ -155,13 +162,6 @@ func GetChannel(
 		abilities = kept
 	}
 	if len(abilities) > 0 {
-		// originalAbilities captures the pre-exclusion ability set so the
-		// priority list (and the retry clamp) stay aligned to the full priority
-		// tier list even when the highest tier is excluded. Mirrors the cache
-		// path in model/channel_cache.go: the DB fallback must not skip
-		// intermediate priority tiers when retry=N.
-		originalAbilities := make([]Ability, len(abilities))
-		copy(originalAbilities, abilities)
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)
 		for _, ability := range originalAbilities {
