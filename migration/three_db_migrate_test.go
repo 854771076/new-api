@@ -268,13 +268,13 @@ func TestTokenKeyLookupRunsOnEveryDatabase(t *testing.T) {
 
 			key := fmt.Sprintf("integration-token-key-%s-%d", tc.name, time.Now().UnixNano())
 			token := model.Token{
-				UserId:      1,
-				Key:         key,
-				Status:      common.TokenStatusEnabled,
-				Name:        "integration-token",
-				CreatedTime: time.Now().Unix(),
+				UserId:       1,
+				Key:          key,
+				Status:       common.TokenStatusEnabled,
+				Name:         "integration-token",
+				CreatedTime:  time.Now().Unix(),
 				AccessedTime: time.Now().Unix(),
-				ExpiredTime: -1,
+				ExpiredTime:  -1,
 			}
 			require.NoError(t, model.DB.Create(&token).Error)
 			require.NoError(t, model.DB.Create(&model.QuotaData{
