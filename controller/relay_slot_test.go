@@ -754,9 +754,24 @@ func TestRelayRetrySwitchesChannelSlotScopePerAttempt(t *testing.T) {
 // released must select A again: the exclusion set lives exactly one client
 // request and never sticks (T-02-15-05).
 func TestRelaySaturationSwitchesToNextChannelWithoutClientError(t *testing.T) {
+	// CHN-02: the guarantee must hold under the factory retry budget as well
+	// as under a configured one. The saturation refusal is routed to a retry
+	// for free by the decision layer, so the operator's retry setting must
+	// not decide whether a saturated channel becomes visible to the client.
+	t.Run("factory retry budget", func(t *testing.T) {
+		testRelaySaturationSwitchesToNextChannel(t, 0)
+	})
+	t.Run("retry budget 1", func(t *testing.T) {
+		testRelaySaturationSwitchesToNextChannel(t, 1)
+	})
+}
+
+// testRelaySaturationSwitchesToNextChannel runs the saturated-first-channel
+// scenario with the given per-request attempt budget.
+func testRelaySaturationSwitchesToNextChannel(t *testing.T, retryTimes int) {
 	require.NoError(t, i18n.Init())
 	db := newChannelSlotDB(t)
-	pinRelayRetryBudget(t)
+	pinRelayRetryBudgetWithRetries(t, retryTimes)
 
 	const modelName = "slot-saturation-model"
 	previousRatios := ratio_setting.ModelRatio2JSONString()
@@ -1163,9 +1178,23 @@ func terminalErrorBody(t *testing.T, recorder *httptest.ResponseRecorder) map[st
 // the refusal must never reach an upstream, and the request must have tried
 // each channel exactly once before giving up.
 func TestRelayAllSaturationChannelsRenderTerminalCNT01429(t *testing.T) {
+	// The all-saturated terminal must hold under the factory retry budget as
+	// well: the refusal walk visits every candidate exactly once and then
+	// terminates with the CNT-01 429 instead of a budget error.
+	t.Run("factory retry budget", func(t *testing.T) {
+		testRelayAllSaturationChannelsRenderTerminalCNT01429(t, 0)
+	})
+	t.Run("retry budget 1", func(t *testing.T) {
+		testRelayAllSaturationChannelsRenderTerminalCNT01429(t, 1)
+	})
+}
+
+// testRelayAllSaturationChannelsRenderTerminalCNT01429 runs the
+// all-saturated scenario with the given per-request attempt budget.
+func testRelayAllSaturationChannelsRenderTerminalCNT01429(t *testing.T, retryTimes int) {
 	require.NoError(t, i18n.Init())
 	db := newChannelSlotDB(t)
-	pinRelayRetryBudget(t)
+	pinRelayRetryBudgetWithRetries(t, retryTimes)
 
 	const modelName = "slot-all-sat-model"
 	const requestID = "task2-all-sat-req"

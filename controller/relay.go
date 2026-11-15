@@ -228,13 +228,32 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		triedChannels         = make(map[int]struct{}, 2)
 	)
 
-	for ; retryParam.GetRetry() <= common.RetryTimes || grantUpstream429Retry; retryParam.IncreaseRetry() {
+	// CHN-02 (02-15): per-request state for the "a saturated channel must not
+	// terminate the request" grant. The saturation refusal is routed to a
+	// retry for free by DecideRelayRetry — types.IsChannelError matches the
+	// "channel:" prefix and returns before the budget check — but the LOOP
+	// budget (common.RetryTimes, 0 by default) is what actually bounds the
+	// attempts. Under the default budget the free retry therefore never got
+	// an iteration, and the client saw "concurrency_exceeded" while another
+	// channel was still able to serve the request. The grant opens exactly
+	// one more iteration per refusal. It cannot spin: every refused channel
+	// joins the per-request exclusion set, so the walk ends with an empty
+	// selection and getChannel's CHN-02 rule answers that with the
+	// all-saturated CNT-01 rejection. Only this error class is affected —
+	// every other retry class stays gated by common.RetryTimes.
+	var grantChannelSaturationRetry bool
+
+	for ; retryParam.GetRetry() <= common.RetryTimes || grantUpstream429Retry || grantChannelSaturationRetry; retryParam.IncreaseRetry() {
 		// RTE-02: consume the grant flag on the first line of the iteration
 		// it unlocked — the loop condition may be re-entered through the
 		// budget clause later, and consuming here guarantees the grant opens
 		// exactly one iteration (anti-self-spin, double insurance with the
 		// predicate's priorGrants == 0).
 		grantUpstream429Retry = false
+		// CHN-02: same contract for the saturation grant — it is armed at
+		// the end of the iteration that was refused and unlocks exactly the
+		// next one.
+		grantChannelSaturationRetry = false
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
@@ -400,6 +419,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// shared state.
 		if service.IsChannelConcurrencyRejection(newAPIError) {
 			retryParam.ExcludeSaturatedChannel(channel.Id)
+			// CHN-02/02-15: the refusal is consumed by the retry loop walking
+			// the remaining candidates — the client-facing "concurrency_exceeded"
+			// is only the right answer when EVERY candidate is saturated. The
+			// retry decision above is already free, so the loop budget is the
+			// only thing that can end the request here; arm one more iteration
+			// so the walk continues instead of surfacing a refusal that another
+			// channel could still absorb.
+			grantChannelSaturationRetry = true
 		}
 
 		if decision.Action != "retry" {

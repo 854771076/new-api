@@ -1168,7 +1168,6 @@ func invokeBillingHandler[T any](t *testing.T, handler gin.HandlerFunc, userID, 
 	return response
 }
 
-
 type tokenConcurrencyLimitsView struct {
 	ConcurrencyLimit        int    `json:"concurrency_limit"`
 	ConcurrencyLimitByModel string `json:"concurrency_limit_by_model"`
