@@ -61,3 +61,6 @@ go.work.sum
 /concurrency-test/config.json
 # 并发测试运行产物（每次运行重新生成）
 /concurrency-test/results/
+
+# 本地排查用草稿目录：含临时网关令牌（.scratch/gw_key.txt），禁止入库
+/.scratch/
