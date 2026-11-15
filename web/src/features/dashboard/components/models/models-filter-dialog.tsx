@@ -16,8 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Filter, RotateCcw, Calendar, Search } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
+import { Filter, RotateCcw, Calendar, Search } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -143,27 +143,28 @@ export function ModelsFilter(props: ModelsFilterProps) {
         })
         if (!res.success || !Array.isArray(res.data)) return []
         return res.data.map((item) => {
-          const masked = item.value.length > 8
-            ? `${item.value.slice(0, 4)}***${item.value.slice(-4)}`
-            : item.value
+          const masked =
+            item.value.length > 8
+              ? `${item.value.slice(0, 4)}***${item.value.slice(-4)}`
+              : item.value
           let label: string
           if (item.deleted) {
-            label = t('{{key}} (deleted) · {{count}} calls · {{tokens}} tokens', {
-              key: masked,
-              count: item.usage,
-              tokens: item.token_used,
-            })
+            label = t(
+              '{{key}} (deleted) · {{count}} calls · {{tokens}} tokens',
+              {
+                key: masked,
+                count: item.usage,
+                tokens: item.token_used,
+              }
+            )
           } else if (item.token_name) {
             label = item.user_name
-              ? t(
-                  '{{name}} ({{user}}) · {{count}} calls · {{tokens}} tokens',
-                  {
-                    name: item.token_name,
-                    user: item.user_name,
-                    count: item.usage,
-                    tokens: item.token_used,
-                  }
-                )
+              ? t('{{name}} ({{user}}) · {{count}} calls · {{tokens}} tokens', {
+                  name: item.token_name,
+                  user: item.user_name,
+                  count: item.usage,
+                  tokens: item.token_used,
+                })
               : t('{{name}} · {{count}} calls · {{tokens}} tokens', {
                   name: item.token_name,
                   count: item.usage,
@@ -381,7 +382,9 @@ export function ModelsFilter(props: ModelsFilterProps) {
                   id='token_key'
                   options={tokenKeyOptions}
                   value={filters.token_key ?? ''}
-                  onValueChange={(value) => handleChange('token_key', value ?? '')}
+                  onValueChange={(value) =>
+                    handleChange('token_key', value ?? '')
+                  }
                   placeholder={t('Filter by token key')}
                   searchPlaceholder={t('Filter by token key')}
                   emptyText={t('No matching token key')}

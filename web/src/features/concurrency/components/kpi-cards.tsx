@@ -16,33 +16,33 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Activity, Gauge, Layers, ShieldAlert } from 'lucide-react';
-import { useTranslation } from 'react-i18next';
+import { Activity, Gauge, Layers, ShieldAlert } from 'lucide-react'
+import { useTranslation } from 'react-i18next'
 
-import { StatCard } from '@/features/dashboard/components/ui/stat-card';
-import { toIntlLocale } from '@/i18n/languages';
-import { formatNumber, formatPercent } from '@/lib/format';
+import { StatCard } from '@/features/dashboard/components/ui/stat-card'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber, formatPercent } from '@/lib/format'
 
 import {
   deriveKpi,
   deriveWindowKpi,
   type ConcurrencyScopeSnapshot,
   type ConcurrencyTrendPoint,
-} from '../lib/concurrency-transform';
+} from '../lib/concurrency-transform'
 
 interface KpiCardsProps {
-  scopes: ConcurrencyScopeSnapshot[];
-  loading?: boolean;
-  error?: boolean;
+  scopes: ConcurrencyScopeSnapshot[]
+  loading?: boolean
+  error?: boolean
   /**
    * Non-null selects the historical-window tile set derived from these
    * points (peak / mean / rejected / active share); null keeps the live
    * tiles. Without this split the row keeps ticking on live snapshot values
    * underneath a static historical chart — two clocks on one card.
    */
-  windowPoints?: ConcurrencyTrendPoint[] | null;
+  windowPoints?: ConcurrencyTrendPoint[] | null
   /** Drives the skeleton while the history query is fetching. */
-  windowLoading?: boolean;
+  windowLoading?: boolean
 }
 
 /**
@@ -60,16 +60,16 @@ export function KpiCards({
   windowPoints,
   windowLoading,
 }: KpiCardsProps) {
-  const { t, i18n } = useTranslation();
+  const { t, i18n } = useTranslation()
   // Interface-language numbers: the console must read like the rest of the
   // app, so every figure goes through the shared formatters with the
   // selected language's locale instead of the browser's default.
-  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language);
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
 
   if (windowPoints) {
-    const wk = deriveWindowKpi(windowPoints);
+    const wk = deriveWindowKpi(windowPoints)
     return (
-      <div className='grid shrink-0 grid-cols-1 gap-3 [&>*]:h-full sm:grid-cols-2 lg:grid-cols-4'>
+      <div className='grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 [&>*]:h-full'>
         <StatCard
           title={t('Peak in-flight')}
           value={formatNumber(wk.peak, locale)}
@@ -86,7 +86,7 @@ export function KpiCards({
             maximumFractionDigits: 1,
           })}
           description={t(
-            'Average in-flight requests across the selected window.',
+            'Average in-flight requests across the selected window.'
           )}
           icon={Layers}
           tone='accent-2'
@@ -97,7 +97,7 @@ export function KpiCards({
           title={t('Rejected in window')}
           value={formatNumber(wk.rejected, locale)}
           description={t(
-            'Concurrency 429 responses observed in the trend window.',
+            'Concurrency 429 responses observed in the trend window.'
           )}
           icon={ShieldAlert}
           tone='accent-3'
@@ -108,7 +108,7 @@ export function KpiCards({
           title={t('Active share')}
           value={formatPercent(Math.round(wk.activeShare * 100), locale)}
           description={t(
-            'Share of sampled time with at least one request in flight.',
+            'Share of sampled time with at least one request in flight.'
           )}
           icon={Gauge}
           tone='accent-3'
@@ -116,10 +116,10 @@ export function KpiCards({
           error={false}
         />
       </div>
-    );
+    )
   }
 
-  const kpi = deriveKpi(scopes);
+  const kpi = deriveKpi(scopes)
 
   return (
     // shrink-0: the tile row keeps its height inside the page's one
@@ -127,12 +127,12 @@ export function KpiCards({
     // StatCard gets h-full via [&>*] so the four tiles share one row
     // height, and the description clamps to a single line with the full
     // text preserved in its title (no layout shift on refresh).
-    <div className='grid shrink-0 grid-cols-1 gap-3 [&>*]:h-full sm:grid-cols-2 lg:grid-cols-4'>
+    <div className='grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 [&>*]:h-full'>
       <StatCard
         title={t('Total in-flight requests')}
         value={kpi.totalCurrent}
         description={t(
-          'Unique in-flight requests across every active user bucket.',
+          'Unique in-flight requests across every active user bucket.'
         )}
         icon={Activity}
         tone='accent-1'
@@ -143,7 +143,7 @@ export function KpiCards({
         title={t('Configured concurrency caps')}
         value={formatNumber(kpi.totalLimit, locale)}
         description={t(
-          'Sum of explicit per-key / per-user caps (unlimited scopes excluded).',
+          'Sum of explicit per-key / per-user caps (unlimited scopes excluded).'
         )}
         icon={Layers}
         tone='accent-2'
@@ -154,7 +154,7 @@ export function KpiCards({
         title={t('Average utilisation')}
         value={formatPercent(Math.round(kpi.avgUtilization * 100), locale)}
         description={t(
-          'Mean of capped-bucket utilisation. 0% means no caps are currently in use.',
+          'Mean of capped-bucket utilisation. 0% means no caps are currently in use.'
         )}
         icon={Gauge}
         tone='accent-3'
@@ -165,7 +165,7 @@ export function KpiCards({
         title={t('Over-limit scopes')}
         value={kpi.overLimitScopes}
         description={t(
-          'Number of per-key / per-user buckets currently exceeding their configured cap.',
+          'Number of per-key / per-user buckets currently exceeding their configured cap.'
         )}
         icon={ShieldAlert}
         tone='accent-3'
@@ -173,5 +173,5 @@ export function KpiCards({
         error={error}
       />
     </div>
-  );
+  )
 }

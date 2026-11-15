@@ -99,7 +99,7 @@ describe('one-screen layout contract (spec §1/§2)', () => {
 
     const root = container.firstElementChild as HTMLElement
     const region = [...root.children].find((el) =>
-      el.classList.contains('flex-1'),
+      el.classList.contains('flex-1')
     )
     expect(region).toBeDefined()
     // Below lg the region scrolls internally; at lg+ it stops scrolling and

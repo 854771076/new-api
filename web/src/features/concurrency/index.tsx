@@ -16,15 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useConcurrencySnapshot } from './hooks/use-concurrency-snapshot';
-import { useConcurrencyWindow } from './hooks/use-concurrency-window';
-import { BucketsCard } from './components/buckets-card';
-import { KpiCards } from './components/kpi-cards';
-import { QueueSettingsCard } from './components/queue-settings-card';
-import { RoutingHealthCard } from './components/routing-health-card';
-import { TrendCard } from './components/trend-card';
-import { VerdictBand } from './components/verdict-band';
-import { WindowHeader } from './components/window-header';
+import { BucketsCard } from './components/buckets-card'
+import { KpiCards } from './components/kpi-cards'
+import { QueueSettingsCard } from './components/queue-settings-card'
+import { RoutingHealthCard } from './components/routing-health-card'
+import { TrendCard } from './components/trend-card'
+import { VerdictBand } from './components/verdict-band'
+import { WindowHeader } from './components/window-header'
+import { useConcurrencySnapshot } from './hooks/use-concurrency-snapshot'
+import { useConcurrencyWindow } from './hooks/use-concurrency-window'
 
 /**
  * Admin /concurrency page (contract Y-3 / Y-4 / Y-5), laid out as the
@@ -44,8 +44,8 @@ import { WindowHeader } from './components/window-header';
  * buckets visibly answer to the SAME window.
  */
 export function ConcurrencyAdminPage() {
-  const query = useConcurrencySnapshot();
-  const snapshot = query.data;
+  const query = useConcurrencySnapshot()
+  const snapshot = query.data
   const {
     scopes,
     windowMode,
@@ -60,7 +60,7 @@ export function ConcurrencyAdminPage() {
     verdict,
     tableScopes,
     overCapBuckets,
-  } = useConcurrencyWindow(snapshot);
+  } = useConcurrencyWindow(snapshot)
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-3 p-4'>
@@ -112,5 +112,5 @@ export function ConcurrencyAdminPage() {
         </div>
       </div>
     </div>
-  );
+  )
 }

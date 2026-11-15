@@ -287,7 +287,12 @@ type MockRect = {
   bottom: number
 }
 
-function rect(left: number, top: number, width: number, height: number): MockRect {
+function rect(
+  left: number,
+  top: number,
+  width: number,
+  height: number
+): MockRect {
   return { left, top, width, height, right: left + width, bottom: top + height }
 }
 
@@ -378,7 +383,12 @@ describe('popup placement inside a dialog', () => {
     vi.spyOn(popup, 'getBoundingClientRect').mockImplementation(() => {
       const styleTop = Number.parseFloat(popup.style.top || '0')
       const styleLeft = Number.parseFloat(popup.style.left || '0')
-      return rect(styleLeft + containerOffset, styleTop + containerOffset, 430, 202) as unknown as DOMRect
+      return rect(
+        styleLeft + containerOffset,
+        styleTop + containerOffset,
+        430,
+        202
+      ) as unknown as DOMRect
     })
     window.dispatchEvent(new Event('scroll'))
     // 期望视觉位置仍是 136：style.top 会被纠偏到 136 - 137 = -1

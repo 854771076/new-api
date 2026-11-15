@@ -16,10 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 
-import { getConcurrencyHistory, type ConcurrencyHistoryResponse } from '../api';
-import type { HistoryRange } from '../lib/concurrency-transform';
+import { getConcurrencyHistory, type ConcurrencyHistoryResponse } from '../api'
+import type { HistoryRange } from '../lib/concurrency-transform'
 
 /**
  * Loads recorded load history for the selected window. Disabled while the
@@ -27,19 +27,19 @@ import type { HistoryRange } from '../lib/concurrency-transform';
  * re-selecting a preset cheap without going stale during a long look.
  */
 export function useConcurrencyHistory(
-  range: HistoryRange | null,
+  range: HistoryRange | null
 ): UseQueryResult<ConcurrencyHistoryResponse> {
   return useQuery({
     queryKey: ['concurrency', 'history', range?.start ?? 0, range?.end ?? 0],
     queryFn: async () => {
       if (!range) {
         // enabled:false guarantees this never runs; the guard satisfies TS.
-        throw new Error('history range not selected');
+        throw new Error('history range not selected')
       }
-      return getConcurrencyHistory(range.start, range.end);
+      return getConcurrencyHistory(range.start, range.end)
     },
     enabled: range !== null,
     staleTime: 30_000,
     retry: 1,
-  });
+  })
 }

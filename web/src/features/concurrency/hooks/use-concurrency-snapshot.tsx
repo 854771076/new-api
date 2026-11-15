@@ -7,10 +7,10 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
 
-import { useQuery, type UseQueryResult } from '@tanstack/react-query';
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 
-import { getConcurrencySnapshot } from '../api';
-import type { ConcurrencySnapshot } from '../lib/concurrency-transform';
+import { getConcurrencySnapshot } from '../api'
+import type { ConcurrencySnapshot } from '../lib/concurrency-transform'
 
 /**
  * Polls GET /api/concurrency/snapshot every 3 seconds (≤5s lag per
@@ -26,5 +26,5 @@ export function useConcurrencySnapshot(): UseQueryResult<ConcurrencySnapshot> {
     staleTime: 1500,
     refetchOnWindowFocus: false,
     retry: 1,
-  });
+  })
 }

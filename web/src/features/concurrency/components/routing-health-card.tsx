@@ -31,10 +31,7 @@ const COLUMN_COUNT = 7
 // penalised <1 amber — the displayed number itself is unchanged. Chip text
 // stays foreground-on-tint: the small semantic tokens miss WCAG AA 4.5:1
 // on their own /10 tint at 12px in the light theme; the tint carries tone.
-const MULTIPLIER_CHIP: Record<
-  'boosted' | 'inactive' | 'penalised',
-  string
-> = {
+const MULTIPLIER_CHIP: Record<'boosted' | 'inactive' | 'penalised', string> = {
   boosted: 'border-success/40 bg-success/10 text-foreground',
   inactive: 'border-border bg-muted text-muted-foreground',
   penalised: 'border-warning/40 bg-warning/10 text-foreground',
@@ -69,10 +66,10 @@ export function RoutingHealthCard() {
       <CardHeader className='flex flex-row flex-wrap items-center justify-between gap-2 space-y-0'>
         <div className='flex flex-wrap items-center gap-2'>
           <CardTitle>{t('Channel load (EWMA routing)')}</CardTitle>
-          <Badge variant='outline' className='gap-1.5 text-muted-foreground'>
+          <Badge variant='outline' className='text-muted-foreground gap-1.5'>
             <span
               aria-hidden='true'
-              className='live-dot size-1.5 shrink-0 rounded-full bg-success text-success'
+              className='live-dot bg-success text-success size-1.5 shrink-0 rounded-full'
             />
             {t('Live · 3s poll')}
           </Badge>

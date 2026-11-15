@@ -16,22 +16,22 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useTranslation } from 'react-i18next';
-import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import { useTranslation } from 'react-i18next'
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from 'recharts'
 
 import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
-} from '@/components/ui/chart';
+} from '@/components/ui/chart'
 
-import type { ConcurrencyTrendPoint } from '../lib/concurrency-transform';
+import type { ConcurrencyTrendPoint } from '../lib/concurrency-transform'
 
 interface TrendChartProps {
-  points: ConcurrencyTrendPoint[];
+  points: ConcurrencyTrendPoint[]
   /** Overrides the <2-points placeholder (e.g. historical "no samples"). */
-  emptyMessage?: string;
+  emptyMessage?: string
 }
 
 /**
@@ -41,7 +41,7 @@ interface TrendChartProps {
  * placeholder instead of a degenerate chart.
  */
 export function TrendChart({ points, emptyMessage }: TrendChartProps) {
-  const { t } = useTranslation();
+  const { t } = useTranslation()
 
   // One series; the tooltip header reuses the KPI title so the chart and the
   // tile above speak the same language without a new translation key.
@@ -50,7 +50,7 @@ export function TrendChart({ points, emptyMessage }: TrendChartProps) {
       label: t('Total in-flight requests'),
       color: 'var(--chart-1)',
     },
-  } satisfies ChartConfig;
+  } satisfies ChartConfig
 
   if (points.length < 2) {
     // Same box as the rendered chart so an empty window never resizes the
@@ -59,17 +59,20 @@ export function TrendChart({ points, emptyMessage }: TrendChartProps) {
       <div className='text-muted-foreground flex h-full min-h-[160px] w-full items-center justify-center text-sm'>
         {emptyMessage ?? t('Collecting samples…')}
       </div>
-    );
+    )
   }
 
-  const data = points.map((p) => ({ t: p.t, inFlight: p.inFlight }));
+  const data = points.map((p) => ({ t: p.t, inFlight: p.inFlight }))
 
   return (
     <ChartContainer
       config={chartConfig}
       className='aspect-auto h-full min-h-[160px] w-full'
     >
-      <AreaChart data={data} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
+      <AreaChart
+        data={data}
+        margin={{ top: 8, right: 8, left: -14, bottom: 0 }}
+      >
         <CartesianGrid vertical={false} strokeDasharray='3 3' />
         <XAxis
           dataKey='t'
@@ -77,12 +80,17 @@ export function TrendChart({ points, emptyMessage }: TrendChartProps) {
           axisLine={false}
           minTickGap={48}
           tickFormatter={(v: number) => {
-            const d = new Date(v);
-            const pad = (n: number) => String(n).padStart(2, '0');
-            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+            const d = new Date(v)
+            const pad = (n: number) => String(n).padStart(2, '0')
+            return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
           }}
         />
-        <YAxis allowDecimals={false} tickLine={false} axisLine={false} width={36} />
+        <YAxis
+          allowDecimals={false}
+          tickLine={false}
+          axisLine={false}
+          width={36}
+        />
         <ChartTooltip content={<ChartTooltipContent />} />
         <Area
           dataKey='inFlight'
@@ -97,5 +105,5 @@ export function TrendChart({ points, emptyMessage }: TrendChartProps) {
         />
       </AreaChart>
     </ChartContainer>
-  );
+  )
 }

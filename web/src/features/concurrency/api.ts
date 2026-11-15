@@ -7,14 +7,14 @@ published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
 */
 
-import { api } from '@/lib/api';
+import { api } from '@/lib/api'
 
 import type {
   ChannelRoutingHealthRow,
   ConcurrencyScopeSnapshot,
   ConcurrencySnapshot,
   ConcurrencyTrendPoint,
-} from './lib/concurrency-transform';
+} from './lib/concurrency-transform'
 
 /**
  * GET /api/concurrency/snapshot — admin-only live in-flight snapshot.
@@ -23,8 +23,8 @@ import type {
  * controller/concurrency.go (SnapshotResponse).
  */
 export async function getConcurrencySnapshot(): Promise<ConcurrencySnapshot> {
-  const res = await api.get('/api/concurrency/snapshot');
-  return res.data;
+  const res = await api.get('/api/concurrency/snapshot')
+  return res.data
 }
 
 /**
@@ -38,16 +38,16 @@ export async function getConcurrencySnapshot(): Promise<ConcurrencySnapshot> {
 export async function getChannelRoutingHealth(): Promise<
   ChannelRoutingHealthRow[]
 > {
-  const res = await api.get('/api/concurrency/routing-health');
-  return res.data.data;
+  const res = await api.get('/api/concurrency/routing-health')
+  return res.data.data
 }
 
 export interface ConcurrencyHistoryResponse {
-  points: ConcurrencyTrendPoint[];
+  points: ConcurrencyTrendPoint[]
   /** Per-bucket PEAK rows for the same window (live snapshot shape). */
-  scopeStats: ConcurrencyScopeSnapshot[];
-  start: number;
-  end: number;
+  scopeStats: ConcurrencyScopeSnapshot[]
+  start: number
+  end: number
 }
 
 /**
@@ -58,10 +58,10 @@ export interface ConcurrencyHistoryResponse {
  */
 export async function getConcurrencyHistory(
   start: number,
-  end: number,
+  end: number
 ): Promise<ConcurrencyHistoryResponse> {
   const res = await api.get('/api/concurrency/history', {
     params: { start, end },
-  });
-  return res.data;
+  })
+  return res.data
 }

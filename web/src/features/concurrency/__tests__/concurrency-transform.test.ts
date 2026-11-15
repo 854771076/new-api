@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 import assert from 'node:assert/strict'
+
 import { describe, expect, test } from 'vitest'
 
 import {
@@ -39,7 +40,7 @@ import {
 
 function scope(
   overrides: Partial<ConcurrencyScopeSnapshot> &
-    Pick<ConcurrencyScopeSnapshot, 'scope' | 'kind'>,
+    Pick<ConcurrencyScopeSnapshot, 'scope' | 'kind'>
 ): ConcurrencyScopeSnapshot {
   return {
     subjectId: 1,
@@ -57,21 +58,47 @@ describe('concurrency KPI derivation (I-5)', () => {
     // The same three in-flight requests occupy all four buckets below —
     // summing every row would report 12 instead of 3.
     const scopes: ConcurrencyScopeSnapshot[] = [
-      scope({ scope: 'key:1:*', kind: 'key', current: 3, limit: 10, utilization: 0.3 }),
-      scope({ scope: 'key:1:gpt-4o', kind: 'key', model: 'gpt-4o', current: 3, limit: 0 }),
-      scope({ scope: 'user:7:*', kind: 'user', subjectId: 7, current: 3, limit: 4, utilization: 0.75 }),
-      scope({ scope: 'channel:1', kind: 'channel', subjectId: 1, current: 3, limit: 5, utilization: 0.6 }),
+      scope({
+        scope: 'key:1:*',
+        kind: 'key',
+        current: 3,
+        limit: 10,
+        utilization: 0.3,
+      }),
+      scope({
+        scope: 'key:1:gpt-4o',
+        kind: 'key',
+        model: 'gpt-4o',
+        current: 3,
+        limit: 0,
+      }),
+      scope({
+        scope: 'user:7:*',
+        kind: 'user',
+        subjectId: 7,
+        current: 3,
+        limit: 4,
+        utilization: 0.75,
+      }),
+      scope({
+        scope: 'channel:1',
+        kind: 'channel',
+        subjectId: 1,
+        current: 3,
+        limit: 5,
+        utilization: 0.6,
+      }),
     ]
     const kpi = deriveKpi(scopes)
     assert.equal(
       kpi.totalCurrent,
       3,
-      'one request held on every axis must count once, not once per bucket',
+      'one request held on every axis must count once, not once per bucket'
     )
     assert.equal(
       kpi.totalLimit,
       14,
-      'the cap sum stays on the labelled per-key / per-user axes (channel cap excluded)',
+      'the cap sum stays on the labelled per-key / per-user axes (channel cap excluded)'
     )
     assert.ok(Math.abs(kpi.avgUtilization - (0.3 + 0.75) / 2) < 1e-9)
     assert.equal(kpi.cappedScopes, 2)
@@ -87,9 +114,27 @@ describe('concurrency KPI derivation (I-5)', () => {
 
   test('ignores unlimited (limit=0) scopes in the limit sum', () => {
     const kpi = deriveKpi([
-      scope({ scope: 'key:1:*', kind: 'key', current: 1, limit: 5, utilization: 0.2 }),
-      scope({ scope: 'key:2:*', kind: 'key', subjectId: 2, current: 1, limit: 0 }),
-      scope({ scope: 'user:9:*', kind: 'user', subjectId: 9, current: 2, limit: 0 }),
+      scope({
+        scope: 'key:1:*',
+        kind: 'key',
+        current: 1,
+        limit: 5,
+        utilization: 0.2,
+      }),
+      scope({
+        scope: 'key:2:*',
+        kind: 'key',
+        subjectId: 2,
+        current: 1,
+        limit: 0,
+      }),
+      scope({
+        scope: 'user:9:*',
+        kind: 'user',
+        subjectId: 9,
+        current: 2,
+        limit: 0,
+      }),
     ])
     assert.equal(kpi.totalCurrent, 2, 'the user row carries the unique count')
     assert.equal(kpi.totalLimit, 5)
@@ -100,14 +145,46 @@ describe('concurrency KPI derivation (I-5)', () => {
     // labels promise per-key / per-user aggregates, so every tile must
     // ignore the channel axis — including its over-limit state.
     const kpi = deriveKpi([
-      scope({ scope: 'channel:42', kind: 'channel', subjectId: 42, current: 5, limit: 1, utilization: 1 }),
-      scope({ scope: 'key:1:*', kind: 'key', current: 2, limit: 10, utilization: 0.2 }),
-      scope({ scope: 'user:7:*', kind: 'user', subjectId: 7, current: 1, limit: 4, utilization: 0.25 }),
+      scope({
+        scope: 'channel:42',
+        kind: 'channel',
+        subjectId: 42,
+        current: 5,
+        limit: 1,
+        utilization: 1,
+      }),
+      scope({
+        scope: 'key:1:*',
+        kind: 'key',
+        current: 2,
+        limit: 10,
+        utilization: 0.2,
+      }),
+      scope({
+        scope: 'user:7:*',
+        kind: 'user',
+        subjectId: 7,
+        current: 1,
+        limit: 4,
+        utilization: 0.25,
+      }),
     ])
-    assert.equal(kpi.totalCurrent, 1, "the channel bucket's current must not leak")
+    assert.equal(
+      kpi.totalCurrent,
+      1,
+      "the channel bucket's current must not leak"
+    )
     assert.equal(kpi.totalLimit, 14, "the channel bucket's limit must not leak")
-    assert.equal(kpi.cappedScopes, 2, 'channel caps are not per-key/per-user caps')
-    assert.equal(kpi.overLimitScopes, 0, 'the over-limit channel row stays table-only')
+    assert.equal(
+      kpi.cappedScopes,
+      2,
+      'channel caps are not per-key/per-user caps'
+    )
+    assert.equal(
+      kpi.overLimitScopes,
+      0,
+      'the over-limit channel row stays table-only'
+    )
   })
 })
 
@@ -134,7 +211,11 @@ describe('utilization tone mapping (Y-5 health colour)', () => {
 })
 
 describe('trend ring buffer', () => {
-  const point = (t: number, inFlight = 0, rejections = 0): ConcurrencyTrendPoint => ({
+  const point = (
+    t: number,
+    inFlight = 0,
+    rejections = 0
+  ): ConcurrencyTrendPoint => ({
     t,
     inFlight,
     rejections,
@@ -146,7 +227,7 @@ describe('trend ring buffer', () => {
     buf = pushTrendPoint(buf, point(4000, 2))
     assert.deepEqual(
       buf.map((p) => p.t),
-      [1000, 4000],
+      [1000, 4000]
     )
   })
 
@@ -155,7 +236,11 @@ describe('trend ring buffer', () => {
     buf = pushTrendPoint(buf, point(4000, 5))
     const second = pushTrendPoint(buf, point(4000, 5))
     assert.equal(second, buf, 'an identical timestamp must not push twice')
-    assert.equal(pushTrendPoint(buf, point(2000, 1)), buf, 'stale renders cannot rewind')
+    assert.equal(
+      pushTrendPoint(buf, point(2000, 1)),
+      buf,
+      'stale renders cannot rewind'
+    )
   })
 
   test('trims to the 5-minute window', () => {
@@ -163,8 +248,16 @@ describe('trend ring buffer', () => {
     for (let i = 0; i < TREND_WINDOW_POINTS + 10; i++) {
       buf = pushTrendPoint(buf, point(1000 + i * 3000, i))
     }
-    assert.equal(buf.length, TREND_WINDOW_POINTS, 'the buffer never exceeds the window')
-    assert.equal(buf.at(-1)?.t, 1000 + (TREND_WINDOW_POINTS + 9) * 3000, 'newest point survives')
+    assert.equal(
+      buf.length,
+      TREND_WINDOW_POINTS,
+      'the buffer never exceeds the window'
+    )
+    assert.equal(
+      buf.at(-1)?.t,
+      1000 + (TREND_WINDOW_POINTS + 9) * 3000,
+      'newest point survives'
+    )
   })
 
   test('rejection delta spans the buffered window', () => {
@@ -187,7 +280,7 @@ describe('trend ring buffer', () => {
     assert.equal(
       trendRejectionDelta(buf),
       31,
-      'rejects before AND after a restart count; the reset itself contributes nothing',
+      'rejects before AND after a restart count; the reset itself contributes nothing'
     )
   })
 
@@ -195,7 +288,11 @@ describe('trend ring buffer', () => {
     let buf: ConcurrencyTrendPoint[] = []
     buf = pushTrendPoint(buf, point(1000, 0, 500))
     buf = pushTrendPoint(buf, point(4000, 0, 7))
-    assert.equal(trendRejectionDelta(buf), 0, 'a backward-only jump shows zero, not negative')
+    assert.equal(
+      trendRejectionDelta(buf),
+      0,
+      'a backward-only jump shows zero, not negative'
+    )
   })
 })
 
@@ -224,20 +321,26 @@ describe('resolveHistoryRange (time-window control)', () => {
 
   test('custom waits for both endpoints and normalises reversed order', () => {
     assert.equal(resolveHistoryRange('custom', {}, now), null)
-    assert.equal(resolveHistoryRange('custom', { start: new Date(500) }, now), null)
+    assert.equal(
+      resolveHistoryRange('custom', { start: new Date(500) }, now),
+      null
+    )
     assert.deepEqual(
-      resolveHistoryRange('custom', { start: new Date(500), end: new Date(200) }, now),
+      resolveHistoryRange(
+        'custom',
+        { start: new Date(500), end: new Date(200) },
+        now
+      ),
       { start: 200, end: 500 },
-      'reversed custom ranges swap so the API never sees start > end',
+      'reversed custom ranges swap so the API never sees start > end'
     )
     assert.deepEqual(
       resolveHistoryRange('custom', { start: 100, end: 900 }, now),
       { start: 100, end: 900 },
-      'numeric endpoints pass through untouched',
+      'numeric endpoints pass through untouched'
     )
   })
 })
-
 
 describe('deriveWindowKpi (historical window tiles)', () => {
   test('empty window renders zeroed tiles', () => {
@@ -269,7 +372,7 @@ describe('formatRoutingHealthRow (channel load card display)', () => {
   // Field names mirror the PascalCase GET /api/concurrency/routing-health
   // contract (Go struct fields without json tags).
   function row(
-    overrides: Partial<ChannelRoutingHealthRow> = {},
+    overrides: Partial<ChannelRoutingHealthRow> = {}
   ): ChannelRoutingHealthRow {
     return {
       ChannelID: 3,
@@ -287,10 +390,10 @@ describe('formatRoutingHealthRow (channel load card display)', () => {
     // Locale-independent digits; the separator/space before % may vary by
     // Intl locale, hence the tolerant pattern.
     expect(formatRoutingHealthRow(row({ SuccessEWMA: 1 })).successRate).toMatch(
-      /^100\s?%$/u,
+      /^100\s?%$/u
     )
     expect(
-      formatRoutingHealthRow(row({ SuccessEWMA: 0.98765 })).successRate,
+      formatRoutingHealthRow(row({ SuccessEWMA: 0.98765 })).successRate
     ).toMatch(/^98[.,]\d{2}\s?%$/u)
   })
 
@@ -298,11 +401,11 @@ describe('formatRoutingHealthRow (channel load card display)', () => {
     const display = formatRoutingHealthRow(row())
     expect(display.latencyMs).toBe('161')
     expect(display.multiplier).toBe('2.00')
-    expect(
-      formatRoutingHealthRow(row({ Multiplier: 0.851 })).multiplier,
-    ).toBe('0.85')
+    expect(formatRoutingHealthRow(row({ Multiplier: 0.851 })).multiplier).toBe(
+      '0.85'
+    )
     expect(formatRoutingHealthRow(row({ Multiplier: 1 })).multiplier).toBe(
-      '1.00',
+      '1.00'
     )
   })
 
@@ -317,7 +420,7 @@ describe('formatRoutingHealthRow (channel load card display)', () => {
 
   test('an unparsable sample time renders a dash instead of "Invalid Date"', () => {
     const display = formatRoutingHealthRow(
-      row({ LastSampleAt: 'not-a-timestamp' }),
+      row({ LastSampleAt: 'not-a-timestamp' })
     )
     expect(display.lastSampleAt).toBe('-')
   })
@@ -351,7 +454,7 @@ describe('deriveVerdict (verdict band tone ladder)', () => {
         ],
         rejected: 2,
         queued: 5,
-      }),
+      })
     )
     assert.equal(verdict.tone, 'destructive')
     assert.equal(verdict.titleKey, 'Action needed — {{n}} buckets over cap')
@@ -373,7 +476,7 @@ describe('deriveVerdict (verdict band tone ladder)', () => {
             utilization: 5,
           }),
         ],
-      }),
+      })
     )
     assert.equal(verdict.tone, 'success')
     assert.equal(verdict.overLimit, 0)
@@ -397,7 +500,7 @@ describe('deriveVerdict (verdict band tone ladder)', () => {
             utilization: 2.25,
           }),
         ],
-      }),
+      })
     )
     assert.equal(outranked.tone, 'destructive', 'ladder step 1 beats step 2')
     assert.equal(outranked.degraded, true, 'the chip state is still reported')
@@ -410,7 +513,10 @@ describe('deriveVerdict (verdict band tone ladder)', () => {
 
     const queuedVerdict = deriveVerdict(input({ queued: 1 }))
     assert.equal(queuedVerdict.tone, 'warning')
-    assert.equal(queuedVerdict.titleKey, 'Requests waiting in the bounded queue')
+    assert.equal(
+      queuedVerdict.titleKey,
+      'Requests waiting in the bounded queue'
+    )
   })
 
   test('a clean gateway renders the success title', () => {

@@ -32,8 +32,7 @@ const newKeys = {
     'Over-limit {{n}}': 'Over-limit {{n}}',
     'Rejected {{n}}': 'Rejected {{n}}',
     'Queued {{n}}': 'Queued {{n}}',
-    'Rejections observed in this window':
-      'Rejections observed in this window',
+    'Rejections observed in this window': 'Rejections observed in this window',
     'Requests waiting in the bounded queue':
       'Requests waiting in the bounded queue',
     'Number of per-key / per-user buckets currently exceeding their configured cap.':
