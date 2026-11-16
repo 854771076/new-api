@@ -87,6 +87,7 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 
 		normalizeGeminiSchemaTypeAndNullable(cleanedMap)
 		sanitizeGeminiEnum(cleanedMap)
+		geminiFillMissingArrayItems(cleanedMap)
 
 		if props, ok := cleanedMap["properties"].(map[string]interface{}); ok && props != nil {
 			cleanedProps := make(map[string]interface{})
@@ -123,6 +124,19 @@ func cleanGeminiFunctionParametersWithDepth(params interface{}, depth int) inter
 	}
 }
 
+// geminiFillMissingArrayItems keeps every ARRAY schema loadable by Gemini.
+// Gemini's typed Schema requires items on an ARRAY and rejects the whole
+// request with a 400 when a client omits them, while JSON Schema treats a
+// missing items as "any element", so an empty item schema is used here.
+func geminiFillMissingArrayItems(schema map[string]interface{}) {
+	if schema["type"] != "ARRAY" {
+		return
+	}
+	if items, ok := schema["items"]; !ok || items == nil {
+		schema["items"] = map[string]interface{}{}
+	}
+}
+
 func cleanGeminiFunctionParametersShallow(params interface{}) interface{} {
 	switch v := params.(type) {
 	case map[string]interface{}:
@@ -137,6 +151,7 @@ func cleanGeminiFunctionParametersShallow(params interface{}) interface{} {
 		delete(cleanedMap, "properties")
 		delete(cleanedMap, "items")
 		delete(cleanedMap, "anyOf")
+		geminiFillMissingArrayItems(cleanedMap)
 		return cleanedMap
 	case []interface{}:
 		return []interface{}{}

@@ -942,6 +942,56 @@ func TestConvertRequestOpenAIChatToGeminiAddsThoughtSignatureForAdvancedCustom(t
 	assert.Equal(t, sharedgemini.ThoughtSignatureBypassValue, thoughtSignature)
 }
 
+func TestConvertRequestOpenAIChatToGeminiFillsMissingArrayItems(t *testing.T) {
+	info := &convmeta.Values{
+		Options:             &convmeta.Options{Gemini: convmeta.GeminiOptions{}},
+		ConversionChain:     []types.RelayFormat{types.RelayFormatOpenAI},
+		ChannelMetaAttached: true,
+		UpstreamModelName:   "gemini-test",
+	}
+	req := &dto.GeneralOpenAIRequest{
+		Model: "gemini-test",
+		Messages: []dto.Message{
+			{Role: "user", Content: "hi"},
+		},
+		Tools: []dto.ToolCallRequest{
+			{
+				Type: "function",
+				Function: dto.FunctionRequest{
+					Name:       "run_checks",
+					Parameters: json.RawMessage(`{"type":"object","properties":{"checks":{"type":"array"},"steps":{"type":"array","items":{"type":"string"}}}}`),
+				},
+			},
+		},
+	}
+
+	result, err := ConvertRequest(nil, info, types.RelayFormatGemini, req)
+
+	require.NoError(t, err)
+	geminiReq, ok := result.Value.(*dto.GeminiChatRequest)
+	require.True(t, ok)
+	tools := geminiReq.GetTools()
+	require.Len(t, tools, 1)
+	functions, err := kitutil.Any2Type[[]dto.FunctionRequest](tools[0].FunctionDeclarations)
+	require.NoError(t, err)
+	require.Len(t, functions, 1)
+	var params map[string]any
+	require.NoError(t, kitutil.Unmarshal(functions[0].Parameters, &params))
+	properties, ok := params["properties"].(map[string]any)
+	require.True(t, ok)
+	checks, ok := properties["checks"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "ARRAY", checks["type"])
+	items, ok := checks["items"].(map[string]any)
+	require.True(t, ok)
+	assert.Empty(t, items)
+	steps, ok := properties["steps"].(map[string]any)
+	require.True(t, ok)
+	stepItems, ok := steps["items"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "STRING", stepItems["type"])
+}
+
 func TestConvertRequestViaResponsesToGeminiStillUsesDirectSteps(t *testing.T) {
 	info := &convmeta.Values{
 		ConversionChain:     []types.RelayFormat{types.RelayFormatOpenAIResponses},
