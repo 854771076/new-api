@@ -51,6 +51,14 @@ console.
 
 ## 3. Identity: What You Can and Cannot Get
 
+### Proxy mode (preferred)
+
+Verify the native Supabase user on the server and key app-admin membership by its UUID plus the fixed App identity. Proxy and OAuth user populations remain independent: do not reuse an OAuth gateway subject, auto-link by email or import OAuth assets. Proxy users cannot receive subscriptions; enforce this in admin grant handlers as well as UI. The existing provider-bound identity/RLS helpers below implement the OAuth reference, not native proxy authorization.
+
+To initialize a proxy console, an operator verifies the intended Supabase project, fixed App and an existing native user's UUID out of band, then grants that exact `(App, UUID)` the owner role in the protected app-admin store using a privileged transaction. Require a unique membership constraint, RLS and restricted writes; do not accept email, request-supplied mode or a first-signup rule as proof. Existing `app_admins(client_id, user_id)` deployments retain their configured App key, but do not require a `custom:newapi` identity predicate for native membership. Verify the live user session and membership on every admin request, test an ordinary user's denial, and record the grant. No OAuth login or `INITIAL_ADMIN_SUB` is required. Do not run the OAuth SQL below for this path; the runnable proxy reference/guard remains planned work.
+
+### OAuth mode only
+
 After OAuth authorization the console has these identity sources:
 
 | Source | Fields | Notes |
@@ -391,7 +399,7 @@ Forbidden, with no exception:
 - [ ] Admin UI and consumer UI live in separate route trees (or separate apps) with only one styling system each.
 - [ ] `lib/supabase/admin.ts` has `import 'server-only'` and is never referenced by client code.
 - [ ] Role comes from `app_metadata`/`app_admins`, never `user_metadata` or request input.
-- [ ] The first `owner` is the OAuth app developer (`oauth_apps.created_by` → `INITIAL_ADMIN_SUB`), granted out of band after one OAuth login, and the grant is recorded.
+- [ ] The first owner is granted out of band and recorded: proxy mode uses an explicitly verified native Supabase UUID/App without OAuth; OAuth mode uses the app developer/provider-subject procedure. Guards/RLS use the chosen mode's trusted identity, and users/assets are not linked across modes.
 - [ ] Only an `owner` can change admin roles; self-promotion and removing the last owner are blocked.
 - [ ] Every admin Route Handler calls the guard before touching data.
 - [ ] Refine `dataProvider` targets `/api/admin/**`; the browser never queries privileged tables directly.

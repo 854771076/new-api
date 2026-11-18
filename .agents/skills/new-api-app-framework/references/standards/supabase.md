@@ -1,5 +1,13 @@
 # Supabase Standard (CLI 3.x, Auth, RLS, Edge Functions, SSR)
 
+Prefer existing Supabase Auth with a backend-held per-user API-key proxy; read `identity.md` for the current capability gate. The `custom:newapi` setup, provider-bound RLS helpers and `user-sync` examples below implement the existing OAuth reference. Do not run that provider bootstrap or copy those identity predicates for native Supabase proxy mode. That mode needs a protected mapping from verified Supabase project/user and configured App to the gateway user, with equivalent user/App isolation; its runnable reference is planned work.
+
+Dual-mode proxy and OAuth users remain independent: proxy mappings include trusted identity source and dedicated gateway IDs; preserve old OAuth profiles without copying them. Email or a shared Supabase UUID is not permission to merge assets. Reject ambiguous automatically linked identities or isolate identity domains before provisioning. Proxy mode has no subscriptions. Initialize its first admin from an explicitly verified native Supabase UUID using `admin-dashboard.md`'s proxy procedure, without an OAuth login.
+
+A natural person using multiple Apps has a separate proxy gateway user ID per App. The proxy account has immutable App ownership: never create another App's key for that account or reuse it across Apps. Existing OAuth/platform account behavior is unchanged.
+
+Use the planned controlled provisioning/recovery contract in `identity.md`: a lost gateway response or failed Supabase mapping write must recover the same gateway ID by stable external identity; save the mapping only after gateway success, then initialize keys separately. Ordinary `CreateUser` is insufficient and no proxy provisioning route is assumed shipped.
+
 Applies to: **Supabase CLI 3.x**, **`@supabase/ssr` 0.5+**,
 **`@supabase/supabase-js` 2.x**, Supabase Postgres 15+, Next.js 15+ App Router.
 

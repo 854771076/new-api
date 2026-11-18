@@ -1,11 +1,23 @@
 ---
 name: new-api-app-framework
-description: Development framework for building an external Web app against new-api — identity (OAuth 2.0/OIDC), AI relay, quota/top-up/subscription billing, plus a reference outfit demo app (Next.js + Supabase + Vercel).
+description: Build external Web apps against new-api. Prefer existing Supabase login with backend-held per-user API keys and PAT management; retain optional OAuth/OIDC. Covers relay, quota, payments, and the reference outfit app.
 ---
 
 # new-api App Development Framework (Web)
 
-This skill is the standard for building an external **Web** application that uses new-api as its identity provider and AI gateway. It applies to SaaS products, enterprise internal tools, and demos that must run the complete chain: stack and project structure, frontend standards, the Supabase backend, Vercel deployment, and the new-api contracts for identity, AI relay, users, quota, top-up, and subscriptions. The identity and billing chapters are new-api product contracts and stay valid when you deviate from the default stack; the stack chapters are defaults, not requirements.
+This skill is the standard for building an external **Web** application that uses new-api as its AI gateway and billing backend. Prefer the app's existing Supabase identity system and a trusted backend that holds each user's API key. new-api OAuth/OIDC remains an optional identity integration. The stack chapters are defaults; credential separation, user/App ownership, and billing contracts apply across stacks.
+
+## Integration Choice — Proxy First
+
+**Recommend server-side API-key proxy mode first**, especially when the app already uses Supabase Auth. The user signs in to Supabase; the app backend validates the session, resolves the trusted new-api user mapping, and calls `/v1/*` with that user's `sk-...` key. Management and checkout use a scoped admin `nap_...` PAT on the backend. A PAT is not an AI key, and an OAuth BFF that proxies an OAuth token is a different integration mode.
+
+Choose new-api OAuth/OIDC when the user explicitly wants new-api sign-in or delegated authorization. Both modes may coexist; retain working OAuth integrations during migration. Read **Integration choice and current capability gate** in `references/standards/identity.md` before choosing endpoints or running bootstrap.
+
+**Product boundary:** dual mode provides independent user populations, not account linking. Proxy users have dedicated gateway user IDs and assets; never reuse an OAuth user's mapping or merge by email/Supabase UUID. Proxy mode supports App wallet balance, top-ups and one-time quota products only, **not subscriptions**. Enforce this at reads, checkout, admin grants and relay funding; OAuth subscriptions remain available to OAuth users. A key's quota/window limit caps spending and does not create a subscription or wallet funds. These are target contracts, subject to the capability gate below.
+
+A natural person using multiple Apps has a separate proxy gateway user ID per App. The proxy account has immutable App ownership: never create another App's key for that account or reuse it across Apps. Existing OAuth/platform account behavior is unchanged. Provisioning must implement the atomic, recoverable identity contract in `references/standards/identity.md`; existing ordinary user creation is insufficient. Rotation must preserve the shared spending budget described in `references/standards/relay.md`. Use the separate normalized wallet contract in `references/standards/billing.md`; legacy OAuth platform/App fields keep their meanings.
+
+**Current capability gate:** the shipped reference app and bootstrap still implement OAuth. App-bound API keys, specified-user PAT checkout, mode switches, and the unified credit APIs are planned work, not shipped contracts. Verify the target server's actual capabilities before using them. Describe missing capabilities explicitly; do not invent routes, bill an ordinary key against an App pool, or silently switch the user back to OAuth. A documented preference does not make a planned endpoint available.
 
 ## Default Stack
 
@@ -18,12 +30,13 @@ This skill is the standard for building an external **Web** application that use
 | Backend | Supabase | Auth, Postgres + RLS, Edge Functions, Storage |
 | Deployment | Vercel | Git integration or `vercel --prod` |
 | Package manager | bun | `bun install`, `bun run dev`, `bun run build` |
-| Identity | new-api OAuth 2.0 / OIDC | Authorization Code + PKCE; confidential BFF or public client |
+| Identity | Existing Supabase Auth | Preferred proxy mode keeps login in the app; OAuth/OIDC is optional |
+| AI access | Backend-held per-user API key | Validate the app session; verify the key's actual user/App funding scope |
 | Admin console (optional) | Ant Design 5 + `@refinedev/core` | Separate route tree from the consumer app; see **Step 8** |
 
 The consumer app uses Tailwind + DaisyUI. An admin console is the one deliberate exception: it uses Ant Design and must not share a layout with the consumer app.
 
-You may deviate when an existing platform standard, an offline/on-premise requirement, a non-Web target, or a regulatory constraint makes the default stack impossible. When you deviate, only **Step 2 (Identity)** and **Step 4 (Users, Quota, and Payments)** remain normative; keep **Security Checklist**, **Token Lifecycle**, **Scopes Reference**, and **Model Whitelist per App**, and preserve the same security properties: server-side secret storage, PKCE, state validation, token rotation, and no token in logs.
+You may adapt the stack to an existing platform or deployment requirement. Keep **Step 2 (Identity)**, **Step 4 (Users, Quota, and Payments)**, and the mode-applicable security rules. Server-only secrets and trusted ownership checks apply to both modes; PKCE, OAuth state/nonce validation, and provider-token refresh apply when OAuth is enabled.
 
 ## Reference Index
 
@@ -41,23 +54,21 @@ This file is the contract and index; read the matching standard before implement
 | API contract: pagination, response envelope, error codes, i18n keys | `references/standards/api-contract.md` | Writing any Route Handler |
 | Deployment on Vercel | `references/standards/vercel.md` | Linking, env vars, promoting, rollback |
 | Admin console (Next.js + Ant Design + Refine + Supabase) | `references/standards/admin-dashboard.md` | Building the optional back office |
-| Identity: app creation, both client modes, `custom:newapi`, starter, logout | `references/standards/identity.md` | Implementing login (Step 2) |
+| Proxy-first choice, capability gate, optional OAuth clients and `custom:newapi` | `references/standards/identity.md` | Selecting an integration or implementing login (Step 2) |
 | AI relay: BFF proxy code, rules, direct calls | `references/standards/relay.md` | Calling `/v1/*` (Step 3) |
 | Quota, `userinfo`, PAT, sessions, payments, credits | `references/standards/billing.md` | Reading balance or taking payment (Step 4) |
 | Security checklist and token lifecycle, in full | `references/standards/security.md` | Reviewing a flow or handling tokens |
 | Local acceptance: Cloudflare Tunnel and Supabase URL config | `references/standards/local-acceptance.md` | Testing the flow locally |
 | Runnable demo app | `references/web/outfit-demo/README.md` | Wanting a working reference |
 | Vendor source provenance | `references/vendor/README.md` | Auditing vendored material |
-| Environment self-check | `scripts/check-env.ps1`, `scripts/check-env.sh` | Step 0.1 / 0.4 |
-| One-shot bootstrap | `scripts/bootstrap.ps1`, `scripts/bootstrap.sh` | Step 0.3 |
+| OAuth environment self-check | `scripts/check-env.ps1`, `scripts/check-env.sh` | OAuth mode, Step 0.1 / 0.4 |
+| OAuth one-shot bootstrap | `scripts/bootstrap.ps1`, `scripts/bootstrap.sh` | OAuth mode, Step 0.3 |
 
 ## Prerequisites
 
 1. A new-api instance running and accessible over HTTPS.
-2. Admin access to the new-api dashboard to create an OAuth application.
-3. One of:
-   - a backend (BFF) that can store `client_secret` (confidential client), or
-   - a browser SPA / mini-program that uses PKCE with a **public client** (`public_client = true`, no `client_secret`). Supabase direct mode uses this option.
+2. Proxy mode: an existing app login, a trusted backend for per-user keys and a scoped admin PAT, a stable user mapping, and verified server support for the intended wallet/checkout operations.
+3. OAuth mode only: permission to register an OAuth application, plus either a confidential backend that stores `client_secret`, or a public PKCE client with no secret. Supabase OIDC direct mode is the latter; it is not Supabase-native proxy mode.
 
 ## Credential Surfaces
 
@@ -74,13 +85,13 @@ An OAuth access token is accepted by the AI relay and `/oauth/*` endpoints above
 
 ## End-to-End Development Workflow
 
-Deliver an external App from zero to production in this order. Every step has a CLI; do not skip one and do not leave the wiring for later.
+Select the integration first, then complete the applicable path. Existing scripts and CLI commands must be checked against the target server; the proxy path does not automatically create an OIDC provider.
 
-1. **Create the new-api sub-project and the App repo.** `newapi-cli` creates the new-api side (OAuth app, scopes, quota pool); `gh repo create` creates the sub-App repository. Confirm the OAuth app's `client_id` (`nac_...`) and redirect URIs before moving on.
-2. **Create the Supabase and Vercel projects.** Use the Supabase CLI (`supabase init`, `supabase link --project-ref <ref>`, `supabase db push`) and the Vercel CLI (`vercel link`) to provision both. Run Step 0's bootstrap/self-check so the `custom:newapi` provider and `GATEWAY_PUBLIC_URL` issuer agree.
-3. **Develop the sub-App and deploy a test environment.** Build against Supabase (auth + RLS, Edge Functions, Storage) following the Steps in this skill, then deploy a preview/staging environment with `vercel` and verify login, relay, and billing there.
-4. **Configure subscription plans, products, and the payment callback.** Use `newapi-cli` (`plan create/update`, `product create/update`) to define App-scoped plans/products, and wire the payment return/callback URL so `waffo_pancake`/online checkouts can confirm and credit the App pool.
-5. **Go live.** `vercel --prod` promotes the verified environment to production. Update the three origins together (Vercel production domain, OAuth app redirect + post-logout URIs, Supabase Site URL + redirect allow list) in one change window.
+1. **Confirm the server contract and App identity.** Prefer proxy mode; verify the user mapping, key funding scope, and specified-user management/checkout support. For OAuth, register the client and confirm `client_id` and redirects. Create a repository only when that is part of the user's task.
+2. **Reuse or configure Supabase and deployment.** Preserve existing users and project bindings. Proxy mode uses native app login and server-only credentials; OAuth mode additionally runs Step 0's provider/issuer bootstrap checks. Reuse existing infrastructure when available.
+3. **Build and verify the selected path.** Test login, user/App isolation, AI consumption, and payment results before deployment. Proxy mode must demonstrate that the key charges the same wallet the checkout funds.
+4. **Configure the selected mode's payments.** Proxy mode uses verified specified-user top-ups and one-time quota products; do not create or grant subscriptions to proxy users. OAuth mode may configure App subscription plans/products using the existing supported CLI and payment matrix. Wire callbacks to the same user's App wallet and confirm the actual order state.
+5. **Go live when authorized.** Promote the verified deployment and align the app origin, Supabase URL configuration, and payment return URLs. Update OAuth redirect and post-logout URIs only for apps using OAuth.
 
 ### newapi-cli updates must sync the skills (mandatory)
 
@@ -91,7 +102,7 @@ The `newapi-cli` npm package bundles **both** `newapi-cli` and `new-api-app-fram
 
 ## Step 0: Environment Bootstrap
 
-Install the toolchain and prove both sides of the trust chain agree. Run every command in the working copy you are building.
+Install the applicable toolchain. The bootstrap and provider checks below are the existing **OAuth path**; they create/reconcile `custom:newapi` and must not run as prerequisites for Supabase-native proxy mode. For proxy mode, verify the existing Supabase login, backend secret storage, trusted user mapping, and actual key/checkout capabilities instead.
 
 ### 0.1 One command with optional auto-install
 
@@ -133,6 +144,8 @@ Windows:      $env:GATEWAY_BASE_URL='...'; $env:GATEWAY_PUBLIC_URL='...'; $env:S
 
 Use the App Router: route handlers own server secrets; pages stay renderable on the server.
 
+The layout below is the existing OAuth reference. In proxy mode, reuse native Supabase login and its callbacks; omit gateway OAuth start/callback and provider-refresh code. Its existing `user-sync` function is OIDC-specific, not a ready-made proxy user mapping.
+
 ```text
 my-app/
 ├─ src/
@@ -161,9 +174,11 @@ my-app/
 
 `src/lib/supabase/client.ts` uses only the anon/publishable key and is safe in the browser; `server.ts` reads cookies and still uses the anon key unless a route explicitly needs elevated privileges. The `service_role` / secret key is imported only by trusted server code or an Edge Function, never by a Client Component and never with a `NEXT_PUBLIC_` prefix. Business data access goes through Supabase + RLS; if you choose a BFF instead, business tables can live in your own database, but the identity and billing chapters still apply. The runnable reference app follows this layout, with the consumer routes under `(consumer)` route groups and an `admin/` tree for the Ant Design console; see `references/web/outfit-demo/README.md`.
 
-## Step 2: Identity (OAuth / OIDC)
+## Step 2: Identity (Proxy First; OAuth Optional)
 
-new-api is the OIDC identity provider; your app never stores new-api passwords. Authorization Code + PKCE is the only supported flow. Full contract and code: `references/standards/identity.md`.
+Start with the proxy-first branch in `references/standards/identity.md`: retain Supabase login, verify the session on the backend, resolve the trusted user/App mapping, and keep per-user keys and the management PAT server-side. Check availability before promising App-bound keys or specified-user checkout.
+
+The remaining login instructions and local-acceptance commands in this step apply **only to OAuth mode**. In that mode new-api is the OIDC provider and Authorization Code + PKCE is the supported authorization flow; the app does not collect the user's new-api password.
 
 - **Public or confidential, decide once**: a server that can keep a secret uses a confidential client (BFF, `client_secret` server-only); an SPA or mini-program uses a public client (`public_client = true`, no secret, PKCE mandatory). Never enable public mode for a server-side app.
 - Generate `state`, `nonce`, and the PKCE `code_verifier` on the server, keep them in HttpOnly / `Secure` / `SameSite=Lax` cookies, and validate `state` and the verifier on the callback.
@@ -192,18 +207,22 @@ newapi-cli api PUT "/api/oauth-apps/$app_id" --data "{\"redirect_uris\":$uris}"
 
 ## Step 3: AI Relay Calls
 
-All AI traffic goes to `/v1/*` with the OAuth access token; that token is not a dashboard credential and `/api/*` rejects it. Proxy code and rules: `references/standards/relay.md`.
+All AI traffic goes to `/v1/*`. Proxy mode attaches the authenticated user's backend-held API key; OAuth mode uses the OAuth access token. A dashboard PAT is not a relay credential. Proxy rules, capability limits, and the OAuth example: `references/standards/relay.md`.
 
-- BFF: a Route Handler attaches the token and returns `upstream.body` so streams stay unbuffered; public clients call the gateway directly.
+- Proxy mode: resolve the key from the trusted session mapping and fixed App configuration, then return `upstream.body` without buffering. OAuth BFFs attach their OAuth token; OAuth public clients may call the gateway directly.
 - Never log the `Authorization` header, token, request body, or upstream body; log method, path, status, latency, and a request id only.
 - Never forward cookies, `client_secret`, or dashboard PATs upstream; preserve the upstream status and content type.
-- Retry a `401` exactly once after refresh, then surface it.
+- OAuth mode may retry a `401` once after token refresh. API keys have no OAuth refresh flow; surface invalid/revoked-key failures and use the backend's explicit key lifecycle management.
 - Relay billing for an OAuth access token is **App-scoped**: pre-consume, settlement, and refund all use the quota pool of the App that owns the token (`app_quota`), never the user's platform wallet.
 - Async task endpoints (video, music, and other task submissions, including Midjourney) accept App access tokens. Pre-consume, completion-delta settlement, and refunds all use the App quota pool, the App wallet `used_quota` is maintained alongside platform statistics, and tasks are isolated by `app_id`: an App token can only read, remix, or cancel tasks its own App created, and Midjourney fetch/action endpoints resolve tasks within that same App.
 
 ## Step 4: Users, Quota, and Payments
 
-The dashboard user system lives under `/api/*`, which OAuth tokens cannot reach. App-scoped identity, quota, plans, products, top-up, and usage are exposed under `/oauth/*` and accept the OAuth access token directly. Full contract, payment matrix, and error codes: `references/standards/billing.md` and `references/standards/identity.md`.
+Proxy mode uses verified specified-user management and payment contracts with a backend-only admin PAT. Existing self-payment and `/api/token/*` routes act on the PAT owner; adding `user_id` does not make them delegated APIs. App-bound keys, specified-user checkout and returned credit fields remain capability-gated planned work. Full current contract and limits: `references/standards/billing.md`.
+
+Proxy mode is balance-only even on dual-mode Apps. Its subscription capability is false; hide subscription UI and reject subscription reads, purchases, admin grants and subscription funding on the server. A balance shortfall must fail, never consume a residual App/platform subscription. Keep proxy and OAuth user IDs, orders and assets independent.
+
+The following `/oauth/*` table and token-derived App scoping describe **OAuth mode**. OAuth tokens cannot reach dashboard `/api/*`; do not send the proxy-mode PAT to `/oauth/*`.
 
 Every call is scoped by the access token, not by request data: the token's `client_id` selects the App, and a request body `app_id` is only rejected when it does not match. Plans and products of other Apps, and platform plans (`app_id = 0`), are never returned or purchasable through it.
 
@@ -222,7 +241,7 @@ Every call is scoped by the access token, not by request data: the token's `clie
 - **Balance top-up is a transfer, not a grant**: `payment_method: "balance"` debits the user's platform wallet by the quota converted from `amount` and credits that same quota to the App pool. Insufficient platform balance or a violated minimum/maximum returns HTTP `400` `checkout_failed`; nothing is minted. `waffo_pancake` (the default when `payment_method` is omitted) credits the pool only after the provider confirms payment.
 - **Payment matrix** — plans: `balance`, `epay`, `stripe`, `creem`, `waffo_pancake`; products: `balance`, `waffo_pancake`; App top-up: `balance`, `waffo_pancake`. Any other value returns `400` `unsupported_payment_method`. `balance` on a plan or product debits the App pool; `balance` on top-up moves platform balance into the App pool.
 - **Cross-App purchase is rejected**: a plan or product owned by another App, a disabled plan/product, or a reached per-user purchase limit returns `403 access_denied` or `400 checkout_failed`; a missing `plan_id` / `product_id` returns `400 invalid_request`, as does an omitted `payment_method` on plan or product checkout (top-up defaults to `waffo_pancake`).
-- **No OAuth endpoint reads App subscription state or App order history yet**: treat the checkout response as an order handle, confirm top-up/product effects by re-reading `/oauth/userinfo` (`app_quota`), keep your own record for plans, and never treat a browser return URL or a `pending` order as proof of payment.
+- **Subscription state and order confirmation differ**: `/oauth/userinfo` includes the active App subscription. A balance change cannot prove a particular order succeeded; verify the target server's order-query capability and confirm the order itself, never a browser return URL or `pending` response. Proxy mode does not expose subscriptions.
 - Link accounts on `sub` from `GET /oauth/userinfo`; `username` and `email` are mutable and email may be empty. OAuth login never creates a new-api user.
 - 外部 app 用 OAuth access token 调 `/oauth/userinfo` 拿身份与额度，站内充值走 `/oauth/topup/checkout`（modal），套餐/商品走 `/oauth/subscription/*` 和 `/oauth/products*`，日志走 `/oauth/logs`；不要跳 newapi 仪表板。
 - 每个 App 在后台独立配置自己的套餐与商品（按 `app_id` 归属），外部 app 只看到自己 App 的那一份；后台按 App 筛选用户与订单见 `references/standards/api-contract.md`。
@@ -241,9 +260,9 @@ Mandatory for any app that stores new-api users or business data in Supabase; co
 | Session refresh | `proxy.ts` (`middleware.ts` before Next.js 16) | `getUser()` keeps the cookie session fresh and protects routes |
 | Trusted server / Edge Function | `service_role` / secret | Bypasses RLS; never expose it and never prefix it with `NEXT_PUBLIC_` |
 
-- **RLS + `client_id` is the enforcement point**: every business table carries `client_id text not null`; policies enforce both `current_app_client_id()` and `auth.uid()`. Derive the App from trusted server-controlled mapping/config, bound to exactly one verified `auth.identities` row with `provider = 'custom:newapi'` and its provider-owned `identity_data.sub` / audience. Use the fail-closed helper in `references/standards/supabase.md` §3; missing, malformed, mismatched, or ambiguous identities must deny access.
+- **RLS + trusted App ownership is the enforcement point**: policies enforce both the configured App and `auth.uid()`. Proxy mode needs a protected user/App mapping compatible with native Supabase identities; the existing OIDC helper is not a proxy implementation. In OAuth mode, every business table carries `client_id text not null`; policies enforce `current_app_client_id()` and `auth.uid()`, bound to exactly one verified `auth.identities` row with `provider = 'custom:newapi'` and its provider-owned `identity_data.sub` / audience. Use the fail-closed helper in `references/standards/supabase.md` §3 for that OAuth path; missing, malformed, mismatched, or ambiguous identities must deny access.
   - Never trust `user_metadata`, `raw_user_meta_data`, or request fields for tenant, gateway identity, or admin grants — users can edit that metadata, including `aud` and `sub`. Supabase's automatically populated `app_metadata.provider` / `providers` is not an App binding; any server-written mapping must first verify the provider identity and configured issuer/client. Empty RLS results are not a reason to fall back to editable claims or anon Storage access.
-- Edge Functions verify the caller with `supabase.auth.getUser()`, resolve `gateway_user_id` / `client_id` through the same protected provider identity and server mapping/config, and use the service-role key only inside the function. Work beyond the function limits returns a job id (see **Long-Running Work and Supabase Limits** in `references/standards/supabase.md`).
+- Edge Functions verify the caller with `supabase.auth.getUser()`, resolve gateway user/App ownership through the selected mode's protected mapping, and use the service-role key only inside the function. Work beyond the function limits returns a job id (see **Long-Running Work and Supabase Limits** in `references/standards/supabase.md`).
 - **Media goes to Supabase Storage**: the database keeps only `bucket` + `path` (`{client_id}/{user_id}/{uuid}.{ext}`), reads use short-lived signed URLs from a private bucket, and MIME type and size are validated server-side.
 - The app-side `seed-assets.ts` uploads a `pack.json` asset library and upserts by `(client_id, provider_id)`; bootstrap runs it when a pack root is given (see **Seeding the Asset Packs** in `references/standards/supabase.md`).
 
@@ -267,6 +286,8 @@ Conventions: `references/standards/nextjs.md`, `references/standards/daisyui.md`
 
 Deployment commands, preview handling, and rollback: `references/standards/vercel.md`.
 
+The OAuth issuer/client variables and provider-origin rules below apply only to OAuth mode. Proxy mode keeps its App ID, management PAT and per-user credential store server-only; it does not need a gateway OAuth client or provider issuer. Keep native Supabase Site URL and callback allow lists aligned with the deployed app.
+
 | Variable | Exposure | Purpose |
 |----------|----------|---------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Browser | Supabase project URL |
@@ -284,13 +305,13 @@ Deployment commands, preview handling, and rollback: `references/standards/verce
 
 ## Step 8: Admin Dashboard
 
-Optional surface with a different stack: Next.js App Router + Ant Design 5 + `@refinedev/core` + Supabase. Conventions: `references/standards/admin-dashboard.md`.
+Optional surface with a different stack: Next.js App Router + Ant Design 5 + `@refinedev/core` + Supabase. Conventions: `references/standards/admin-dashboard.md`. Proxy mode identifies app admins through verified Supabase identities and the app's trusted role store; the OAuth-subject bootstrap below applies only to OAuth mode.
 
 - What OAuth gives the console: `sub` always, `username` / `name` with `profile`, `email` with `email`; the `id_token` carries no name, email, or role. Key the admin account on `sub`.
 - **The app's admin role is not the new-api role** (`1` / `10` / `100`): store it in `auth.users.app_metadata.admin_role` (service-role writes only) or in an `app_admins` table; never read a role from `user_metadata`, a query string, or a request body.
 - Every admin Route Handler and the admin layout call the same `requireAdmin()`; client checks and `proxy.ts` are not authorization boundaries.
 - Ant Design (admin) and Tailwind + DaisyUI (consumer) never share a layout or route tree; `accessControlProvider` mirrors the server guard, never replaces it.
-- **The first admin defaults to the developer who created the OAuth app**: `oauth_apps.created_by` equals their `sub`, so set `INITIAL_ADMIN_SUB` and seed `app_admins` once out of band. No endpoint or "first signup wins" rule may create an admin; block self-promotion and removing the last owner.
+- **Grant the first owner out of band**: proxy mode uses an explicitly selected, verified native Supabase UUID and fixed App; it requires no OAuth login. Only the OAuth branch resolves the app developer's gateway `sub` through the protected provider identity. See the mode-specific procedure in `references/standards/admin-dashboard.md`; block self-promotion and removing the last owner.
 
 ## Hard-Won Constraints (from production bugs)
 
@@ -309,6 +330,10 @@ Each entry is a rule distilled from a real fix; the short hash links it to the c
 
 ## Security Checklist
 
+- [ ] Proxy mode validates the Supabase session, resolves user/App ownership server-side, and keeps each user's API key and scoped admin PAT outside browser code, profile metadata, and logs.
+- [ ] Proxy mode verifies the actual key funding pool and specified-user checkout contract; ordinary platform keys are not assumed to spend App quota.
+- [ ] Proxy/OAuth users remain independent, including on dual-mode Apps; proxy subscription reads, checkout, admin grants and funding are rejected, and quota-rule limits are not treated as subscriptions.
+- [ ] OAuth-only callback, PKCE, state/nonce, and provider-refresh checks below apply when OAuth is selected; they are not prerequisites for native Supabase login.
 - [ ] Confidential clients keep `client_secret` in backend env vars only; public clients have no secret and rely on PKCE.
 - [ ] `redirect_uri` exactly matches a registered URI, and the PKCE verifier from that request is validated on callback.
 - [ ] `state` is validated against a server-held value; `nonce` is per request and validated when an `id_token` is consumed.
@@ -324,6 +349,8 @@ Each entry is a rule distilled from a real fix; the short hash links it to the c
 Full list: `references/standards/security.md`.
 
 ## Token Lifecycle
+
+Proxy mode manages its backend-held API keys and PATs through their actual expiry, revocation, and rotation controls; it does not mint or refresh OAuth provider tokens. The TTLs and refresh procedure below describe **OAuth mode**.
 
 - **Access token**: JWT, 1 hour TTL, used to call AI APIs and userinfo.
 - **Refresh token**: Opaque, 30 day TTL, rotated on each use.
@@ -353,4 +380,4 @@ Each OAuth App in new-api can restrict which AI models are available:
 ai_model_whitelist = '["gpt-4o-mini","gpt-4o"]'
 ```
 
-When set, the relay rejects any model not in the list. Leave empty to allow all models. This is enforced in `controller/relay.go` via `service.CheckOAuthAppModelWhitelist()`.
+For OAuth calls, the relay enforces this through `service.CheckOAuthAppModelWhitelist()`. Ordinary API keys currently bypass this App policy; App-bound-key enforcement is planned and must be verified before claiming proxy-mode App isolation.

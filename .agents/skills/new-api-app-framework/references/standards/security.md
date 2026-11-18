@@ -1,8 +1,20 @@
 # Security Standard (Checklist and Token Lifecycle)
 
-This file is the full security contract behind **Security Checklist** and
-**Token Lifecycle** in `../../SKILL.md`. Nothing here is optional: an
-integration that skips one item is not built to this standard.
+This file is the security contract behind **Security Checklist** and **Token Lifecycle** in `../../SKILL.md`. Apply the common controls and the selected mode's controls. Callback, PKCE and provider-token rules apply to OAuth; native Supabase proxy mode does not need an OIDC provider.
+
+## Proxy Mode
+
+- A natural person using multiple Apps has a separate proxy gateway user ID per App. The proxy account has immutable App ownership: never create another App's key for that account or reuse it across Apps. Existing OAuth/platform account behavior is unchanged.
+- Controlled provisioning atomically binds external identity, proxy origin and App ownership, with authorized recovery and no reactivation by retry; see `identity.md`.
+- Planned rotation must preserve one logical spending budget across old/new credentials: lifetime/remaining limits, periodic usage and in-flight reservations, settlement and refunds. A new key ID or one-time copy of counters must not reset or duplicate the budget. With cap 100 and usage 90, only 10 remains across both keys, including concurrent requests and late old-key settlement; retries cannot double reserve/refund. If the deployed server cannot preserve this continuity, reject rotation of budget-bound keys explicitly. This adds no wallet and does not claim the independent quota-rule development is shipped.
+
+- Validate the Supabase session before resolving the trusted new-api user/App mapping. Browser-supplied user IDs, user-editable metadata and UI mode selection cannot authorize another user's key or wallet.
+- Keep proxy and OAuth users independent; do not share IDs/assets or reuse OAuth profiles for native users. Reject ambiguous Supabase auto-linked identities. Enforce proxy subscription unsupported at reads, checkout, admin grants and funding, even on dual-mode Apps.
+- Keep per-user keys, admin PATs and Supabase secret keys in server-only stores. Scope PATs to the operations needed, support expiry/revocation, and exclude credentials from logs, client responses and profile/JWT metadata.
+- Verify the deployed server supports the specified-user and App funding operations before using them. Ordinary keys do not gain App wallet isolation because the caller supplies `app_id`; admin PAT authority is not App-restricted by that parameter either.
+- Keep payment order ownership fixed, accept only verified provider confirmation for crediting, and query the actual order state. Do not replay generation requests to recover a revoked key or treat OAuth refresh as API-key rotation.
+- Normal key rotation saves/verifies a replacement before switching and revoking the old key, with operation-ID recovery after timeouts or storage failure. Emergency revocation remains immediate. Disabled Apps still permit authorized historical order queries and settlement of valid accepted orders; new purchases/calls stay blocked.
+- App-mode flags and selector hiding are planned product controls; when implemented, authorization must also run on the server. Hiding a control does not revoke credentials or remove assets, and disabling a mode must not prevent accepted tasks from settling/refunding.
 
 ## Security Checklist
 
@@ -22,11 +34,13 @@ integration that skips one item is not built to this standard.
 - [ ] Admin console permissions come from `app_metadata`/`app_admins`, and every admin Route Handler calls the server guard; the browser role is UX only.
 - [ ] `SUPABASE_SECRET_KEY` is imported only by a `server-only` module and never exposed through `NEXT_PUBLIC_*`.
 - [ ] Admin (Ant Design) and consumer (Tailwind + DaisyUI) UIs never share a layout or styling system.
-- [ ] The first admin defaults to the OAuth app developer (`oauth_apps.created_by` → `INITIAL_ADMIN_SUB`) and is granted once out of band; no endpoint or first-signup rule can create an admin.
+- [ ] The first admin is granted once out of band; no endpoint or first-signup rule can create an admin. OAuth mode uses the OAuth app developer (`oauth_apps.created_by` → `INITIAL_ADMIN_SUB`); proxy mode uses an explicitly trusted Supabase user.
 - [ ] All media assets are stored in Supabase Storage private buckets; only `bucket` + `path` is stored in Postgres, and reads use short-lived signed URLs.
-- [ ] Balance, credits, top-up orders, and usage come from new-api (`/oauth/userinfo` for `app_quota`, `/api/user/self`, `/api/user/topup/self`, `/api/log/self`, `/oauth/logs`); there is no local ledger, and App top-up/purchases go through `/oauth/*` checkout instead of a reimplemented payment flow.
+- [ ] Balance, credits, orders and usage come from new-api, with no local ledger. OAuth mode uses its `/oauth/*` contracts; proxy mode uses only verified specified-user contracts and never substitutes the administrator's self wallet.
 
 ## Token Lifecycle
+
+The TTLs and provider-refresh procedure below apply to **OAuth credentials**. Proxy mode instead uses its API keys' and PATs' actual expiry, revocation and rotation contracts.
 
 - **Access token**: JWT, 1 hour TTL, used to call AI APIs and userinfo.
 - **Refresh token**: Opaque, 30 day TTL, rotated on each use.

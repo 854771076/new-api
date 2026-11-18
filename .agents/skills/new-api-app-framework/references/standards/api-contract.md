@@ -253,9 +253,11 @@ Next.js 信封约定，直接对接时按本节处理。
 `waffo_pancake`）。`amount` 是配置的展示单位整数，不是 quota。
 
 App 额度语义：App token 的 relay 预扣、结算、退款只作用于 token 所属 App 的额度池
-（以及该 App 的订阅额度），不扣平台 `quota`。目前没有 OAuth 接口读取 App 订阅状态或
-App 订单历史：充值和商品可用重新读 `/oauth/userinfo` 的 `app_quota` 确认到账，套餐只能
-依赖本地订单记录。
+（以及该 App 的订阅额度），不扣平台 `quota`。`/oauth/userinfo` 的活跃订阅摘要与
+`app_quota` 都不能证明某笔订单已支付。后端保存订单标识及可信用户/App 归属，通过目标
+实例已支持且有权限的订单查询确认该订单成功后，再刷新余额或订阅；本地订单仅作缓存。
+缺少对应查询能力时保持“待确认”，不以余额变化、本地记录或浏览器回跳替代订单终态，
+也不假定已有新的 OAuth 订单查询接口。
 
 ### 3.2 管理端接口（admin session 或 admin PAT）
 
