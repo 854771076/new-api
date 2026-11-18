@@ -18,6 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+import type { QuotaRule } from '@/features/quota-rules/api'
+
 // ============================================================================
 // API Key Schema & Types
 // ============================================================================
@@ -30,6 +32,9 @@ export const apiKeySchema = z.object({
   remain_quota: z.number(),
   used_quota: z.number(),
   unlimited_quota: z.boolean(),
+  quota_rule_id: z.number().optional(),
+  quota_rule: z.custom<QuotaRule>().optional(),
+  quota_rule_used: z.number().optional(),
   expired_time: z.number(), // -1 for never expires
   created_time: z.number(),
   accessed_time: z.number(),
@@ -108,6 +113,7 @@ export interface TokenAutoGroupsConfig {
 // ============================================================================
 
 export type ApiKeysDialogType =
+  | 'quota-rule'
   | 'create'
   | 'update'
   | 'delete'

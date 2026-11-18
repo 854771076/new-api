@@ -5,6 +5,8 @@ import (
 	"math"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,7 +44,8 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 		{common.DatabaseTypePostgreSQL, "TEST_FIXED_POSTGRES_DSN", "TEST_FIXED_POSTGRES_LOG_DSN"},
 	} {
 		t.Run(string(dialect.name), func(t *testing.T) {
-			var driver gorm.Dialector = sqlite.Open(":memory:")
+			// Match the production SQLite DSN so concurrent writers use BEGIN IMMEDIATE.
+			var driver gorm.Dialector = sqlite.Open(filepath.Join(t.TempDir(), "quota.db") + "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_txlock=immediate")
 			if dialect.env != "" {
 				dsn := os.Getenv(dialect.env)
 				if dsn == "" {
@@ -90,8 +93,181 @@ func TestFixedPriceBillingDatabaseMatrix(t *testing.T) {
 			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 			t.Logf("database: %s", version)
 			runFixedPriceAccountingCases(t, db, logDB)
+			t.Run("token quota rules", func(t *testing.T) { runTokenQuotaRuleCases(t, db) })
 		})
 	}
+}
+
+func runTokenQuotaRuleCases(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.AutoMigrate(&model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}))
+	user := model.User{Username: "rule-" + common.GetRandomString(8), Quota: 1000, Status: common.UserStatusEnabled, AffCode: common.GetRandomString(8)}
+	require.NoError(t, db.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Key: common.GetRandomString(32), Name: "rule-token", Status: common.TokenStatusEnabled, UnlimitedQuota: true, ExpiredTime: -1}
+	require.NoError(t, token.Insert())
+	rule := model.TokenQuotaRule{UserId: user.Id, Name: "Per-token budget", Enabled: true, QuotaLimitEnabled: true, QuotaPeriod: "daily", QuotaLimit: 100, TimeWindowTimezone: "UTC", AllowedWeekdays: "[1,2,3,4,5,6,7]"}
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	t.Cleanup(func() {
+		db.Where("token_id = ?", token.Id).Delete(&model.TokenQuotaRuleUsage{})
+		db.Unscoped().Delete(&token)
+		db.Delete(&rule)
+		db.Delete(&user)
+	})
+	require.Error(t, model.SetTokenQuotaRuleBinding(user.Id+1, token.Id, rule.Id))
+	require.Error(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, -1))
+	require.Error(t, model.SaveTokenQuotaRule(&model.TokenQuotaRule{Id: rule.Id, UserId: user.Id + 1, Name: "foreign", QuotaPeriod: "daily", TimeWindowTimezone: "UTC", AllowedWeekdays: "[]"}))
+	require.Error(t, model.DeleteTokenQuotaRule(user.Id+1, rule.Id))
+	require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, rule.Id))
+	require.Error(t, model.DeleteTokenQuotaRule(user.Id, rule.Id))
+	rules, total, err := model.ListTokenQuotaRules(user.Id, 0, 10, "Per-token", "enabled", "bound")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), total)
+	assert.Equal(t, int64(1), rules[0].BoundTokenCount)
+	_, total, err = model.ListTokenQuotaRules(user.Id+1, 0, 10, "", "", "")
+	require.NoError(t, err)
+	assert.Zero(t, total)
+
+	context, _ := gin.CreateTestContext(httptest.NewRecorder())
+	context.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	newInfo := func() *relaycommon.RelayInfo {
+		return &relaycommon.RelayInfo{UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, TokenUnlimited: true, UserSetting: dto.UserSetting{BillingPreference: "wallet_only"}}
+	}
+	used := func() int64 {
+		var usage model.TokenQuotaRuleUsage
+		require.NoError(t, db.Where("token_id = ? AND rule_id = ?", token.Id, rule.Id).First(&usage).Error)
+		return usage.UsedQuota
+	}
+	info := newInfo()
+	_, err = model.ReserveTokenQuotaRule(token.Id, 0, true)
+	require.NoError(t, err)
+	assert.Zero(t, used(), "zero-estimate admission must not reserve an artificial charge")
+	session, apiErr := NewBillingSession(context, info, 60)
+	require.Nil(t, apiErr)
+	assert.False(t, session.trusted, "unlimited/trusted tokens must still enforce the periodic budget")
+	assert.Equal(t, int64(60), used())
+	_, apiErr = NewBillingSession(context, newInfo(), 60)
+	require.NotNil(t, apiErr)
+	require.NoError(t, session.Reserve(100))
+	require.Error(t, session.Reserve(101))
+	assert.Equal(t, int64(100), used())
+	require.NoError(t, session.Settle(110))
+	require.NoError(t, session.Settle(110))
+	assert.Equal(t, int64(110), used(), "actual cost above the reservation must be recorded once")
+	_, err = model.ReserveTokenQuotaRule(token.Id, 1, true)
+	require.ErrorIs(t, err, model.ErrTokenQuotaExhausted)
+	_, err = model.ReserveTokenQuotaRule(token.Id, 0, true)
+	require.ErrorIs(t, err, model.ErrTokenQuotaExhausted, "zero estimates must not bypass an overdrawn budget")
+	_, err = model.ReserveTokenQuotaRule(token.Id, 0, false)
+	require.NoError(t, err, "free checks must still work after budget exhaustion")
+	require.NoError(t, db.First(&token, token.Id).Error)
+	require.NoError(t, model.AttachTokenQuotaRuleUsage([]*model.Token{&token}))
+	assert.Equal(t, int64(110), token.QuotaRuleUsed)
+	require.NotNil(t, token.QuotaRule)
+	// Legacy final settlement must account for upstream overages too.
+	legacyInfo := newInfo()
+	legacyInfo.TokenQuotaReservation = info.TokenQuotaReservation
+	require.NoError(t, SettleBilling(context, legacyInfo, 10))
+	assert.Equal(t, int64(120), used())
+
+	// A durable task retains the original usage row after unbinding/deletion.
+	data := model.TaskPrivateData{TokenId: token.Id, TokenQuotaReservation: info.TokenQuotaReservation}
+	encoded, err := data.Value()
+	require.NoError(t, err)
+	var restored model.TaskPrivateData
+	require.NoError(t, restored.Scan(encoded))
+	require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, 0))
+	require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, rule.Id))
+	_, err = model.ReserveTokenQuotaRule(token.Id, 1, true)
+	require.ErrorIs(t, err, model.ErrTokenQuotaExhausted, "rebinding must not reset usage")
+	require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, 0))
+	require.NoError(t, model.DeleteTokenQuotaRule(user.Id, rule.Id))
+	taskAdjustTokenQuota(context, &model.Task{PrivateData: restored}, -120)
+	assert.Zero(t, used())
+
+	// A new rule exercises request failures, weekday gates and concurrent admission.
+	rule.Id = 0
+	rule.TimeWindowEnabled = true
+	day := int(time.Now().UTC().Weekday())
+	if day == 0 {
+		day = 7
+	}
+	rule.AllowedWeekdays = fmt.Sprintf("[%d]", day%7+1)
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, token.Id, rule.Id))
+	_, err = model.ReserveTokenQuotaRule(token.Id, 0, false)
+	require.ErrorIs(t, err, model.ErrTokenQuotaWindowDenied, "free requests must obey weekday gates")
+	rule.AllowedWeekdays = "[1,2,3,4,5,6,7]"
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	ruleInfo := newInfo()
+	failing := &BillingSession{relayInfo: ruleInfo, funding: &WalletFunding{userId: user.Id + 1000000}}
+	require.NotNil(t, failing.preConsume(context, 20))
+	assert.Zero(t, used(), "failed funding must roll back rule reservations")
+	require.NoError(t, db.AutoMigrate(&model.Midjourney{}))
+	mjInfo := newInfo()
+	release, err := ReserveMidjourneyQuotaRule(mjInfo, 40)
+	require.NoError(t, err)
+	assert.Equal(t, int64(40), used())
+	mjTask := &model.Midjourney{UserId: user.Id, MjId: "quota-" + common.GetRandomString(8)}
+	prepared, err := PrepareMidjourneyTaskBilling(mjInfo, mjTask, 40, true)
+	require.NoError(t, err)
+	require.NoError(t, db.Create(mjTask).Error)
+	billed, err := SettleMidjourneyTaskBilling(context, mjInfo, mjTask, prepared)
+	require.NoError(t, err)
+	assert.True(t, billed)
+	release()
+	assert.Equal(t, int64(40), used(), "Midjourney reservation and final charge must count once")
+	assert.True(t, RefundMidjourneyQuota(context, mjTask, "failed"))
+	assert.Zero(t, used())
+	require.NoError(t, db.Delete(mjTask).Error)
+	refunding, apiErr := NewBillingSession(context, newInfo(), 20)
+	require.Nil(t, apiErr)
+	refunding.Refund(context)
+	refunding.Refund(context)
+	require.Eventually(t, func() bool {
+		var usage model.TokenQuotaRuleUsage
+		return db.Where("token_id = ? AND rule_id = ?", token.Id, rule.Id).First(&usage).Error == nil && usage.UsedQuota == 0
+	}, time.Second*3, time.Millisecond*10)
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(4)
+	defer sqlDB.SetMaxOpenConns(1)
+	for _, tc := range []struct {
+		name      string
+		amount    int64
+		successes int
+		used      int64
+	}{
+		{"both fit", 10, 2, 20},
+		{"only one fits", 100, 1, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, db.Model(&model.TokenQuotaRuleUsage{}).Where("token_id = ?", token.Id).Update("used_quota", 0).Error)
+			results := make(chan error, 2)
+			start := make(chan struct{})
+			var group sync.WaitGroup
+			for range 2 {
+				group.Go(func() { <-start; _, err := model.ReserveTokenQuotaRule(token.Id, tc.amount, true); results <- err })
+			}
+			close(start)
+			group.Wait()
+			close(results)
+			successes := 0
+			for err := range results {
+				if err == nil {
+					successes++
+				} else {
+					require.ErrorIs(t, err, model.ErrTokenQuotaExhausted)
+				}
+			}
+			assert.Equal(t, tc.successes, successes)
+			assert.Equal(t, tc.used, used())
+		})
+	}
+	_, err = model.ReserveTokenQuotaRule(token.Id, 0, true)
+	require.ErrorIs(t, err, model.ErrTokenQuotaExhausted, "a fully used budget must reject zero estimates too")
+	_, err = ReserveMidjourneyQuotaRule(newInfo(), 1)
+	assert.Error(t, err, "exhausted Midjourney requests must be rejected before submission")
 }
 
 func runFixedPriceAccountingCases(t *testing.T, db, logDB *gorm.DB) {

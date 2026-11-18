@@ -211,6 +211,14 @@ func TokenOperationAudit() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var action, content string
 		switch c.Request.Method + " " + c.FullPath() {
+		case "POST /api/token/quota_rules":
+			action, content = "token.quota_rule_create", "API token quota rule creation"
+		case "PUT /api/token/quota_rules/:id":
+			action, content = "token.quota_rule_update", "API token quota rule update"
+		case "DELETE /api/token/quota_rules/:id":
+			action, content = "token.quota_rule_delete", "API token quota rule deletion"
+		case "PUT /api/token/:id/quota_rule":
+			action, content = "token.quota_rule_bind", "API token quota rule binding update"
 		case "POST /api/token/":
 			action, content = "token.create", "API token creation"
 		case "PUT /api/token/":

@@ -73,6 +73,24 @@ export function ApiKeyQuotaCell(props: ApiKeyQuotaCellProps) {
     : `${remainingDescription}; ${usageDescription}`
 
   const details = []
+  const rule = props.apiKey.quota_rule
+  if (rule) {
+    details.push({ label: t('Quota rule'), value: rule.name })
+    details.push({
+      label: t('Status'),
+      value: rule.enabled ? t('Enabled') : t('Disabled'),
+    })
+    if (rule.quota_limit_enabled) {
+      details.push({
+        label: t('Periodic quota limit'),
+        value: formatQuotaWithCurrency(rule.quota_limit),
+      })
+      details.push({
+        label: t('Period usage'),
+        value: formatQuotaWithCurrency(props.apiKey.quota_rule_used ?? 0),
+      })
+    }
+  }
   if (!props.apiKey.unlimited_quota) {
     details.push({ label: t('Remaining'), value: formattedRemaining })
   }

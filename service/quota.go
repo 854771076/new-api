@@ -28,6 +28,16 @@ type TokenDetails struct {
 	AudioTokens int
 }
 
+func TokenQuotaRuleError(err error, lang string) error {
+	if errors.Is(err, model.ErrTokenQuotaWindowDenied) {
+		return errors.New(i18n.Translate(lang, i18n.MsgTokenQuotaWindowDenied))
+	}
+	if errors.Is(err, model.ErrTokenQuotaExhausted) {
+		return errors.New(i18n.Translate(lang, i18n.MsgTokenQuotaExhausted))
+	}
+	return err
+}
+
 type QuotaInfo struct {
 	InputDetails  TokenDetails
 	OutputDetails TokenDetails
@@ -444,11 +454,35 @@ type postConsumeQuotaResult struct {
 }
 
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) error {
-	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail)
+	_, err := postConsumeQuotaWithResult(relayInfo, quota, preConsumedQuota, sendEmail, true)
 	return err
 }
 
-func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (result postConsumeQuotaResult, err error) {
+func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail, enforceRuleLimit bool) (result postConsumeQuotaResult, err error) {
+	var ruleReservation *relaycommon.TokenQuotaReservation
+	if quota > 0 && !relayInfo.IsPlayground {
+		if enforceRuleLimit {
+			ruleReservation, err = model.ReserveTokenQuotaRule(relayInfo.TokenId, int64(quota), true)
+		} else {
+			ruleReservation = relayInfo.TokenQuotaReservation
+			if ruleReservation == nil {
+				ruleReservation, err = model.ReserveTokenQuotaRule(relayInfo.TokenId, 0, false)
+			}
+			if err == nil {
+				err = model.AdjustTokenQuotaRuleUsage(ruleReservation, int64(quota), false)
+			}
+		}
+		if err != nil {
+			return result, TokenQuotaRuleError(err, relayInfo.UserSetting.Language)
+		}
+		defer func() {
+			if !result.FundingApplied && ruleReservation != nil {
+				if rollbackErr := model.AdjustTokenQuotaRuleUsage(ruleReservation, -int64(quota), false); rollbackErr != nil {
+					common.SysError(common.LogText("failed to roll back quota rule: %s", rollbackErr))
+				}
+			}
+		}()
+	}
 
 	// 1) Consume from wallet quota OR subscription item
 	if relayInfo != nil && relayInfo.BillingSource == BillingSourceSubscription {
@@ -480,6 +514,9 @@ func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, pre
 		}
 	}
 	result.FundingApplied = true
+	if ruleReservation != nil {
+		relayInfo.TokenQuotaReservation = ruleReservation
+	}
 
 	if !relayInfo.IsPlayground {
 		if quota > 0 {
@@ -491,6 +528,11 @@ func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, pre
 			return result, err
 		}
 		result.TokenApplied = true
+	}
+	if quota < 0 {
+		if err := model.AdjustTokenQuotaRuleUsage(relayInfo.TokenQuotaReservation, int64(quota), false); err != nil {
+			return result, err
+		}
 	}
 
 	if sendEmail {

@@ -30,6 +30,23 @@ func CovertMjpActionToModelName(mjAction string) string {
 	return modelName
 }
 
+// ReserveMidjourneyQuotaRule gates submission; the returned cleanup releases the
+// reservation after the legacy billing stages have recorded the actual charge.
+func ReserveMidjourneyQuotaRule(info *relaycommon.RelayInfo, quota int) (func(), error) {
+	reservation, err := model.ReserveTokenQuotaRule(info.TokenId, int64(quota), quota > 0)
+	if err != nil {
+		return nil, TokenQuotaRuleError(err, info.UserSetting.Language)
+	}
+	info.TokenQuotaReservation = reservation
+	return func() {
+		if reservation != nil {
+			if err := model.AdjustTokenQuotaRuleUsage(reservation, -reservation.Amount, false); err != nil {
+				common.SysError(common.LogText("failed to release Midjourney quota rule reservation: %s", err))
+			}
+		}
+	}, nil
+}
+
 // PrepareMidjourneyTaskBilling sets the durable refund marker before the task is inserted.
 func PrepareMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.Midjourney, quota int, shouldBill bool) (bool, error) {
 	if task == nil {
@@ -75,7 +92,7 @@ func SettleMidjourneyTaskBilling(ctx context.Context, relayInfo *relaycommon.Rel
 		return false, errors.New("Midjourney task must be persisted before billing")
 	}
 
-	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true)
+	result, billingErr := postConsumeQuotaWithResult(relayInfo, task.Quota, 0, true, relayInfo.TokenQuotaReservation == nil)
 	if !result.FundingApplied {
 		task.Quota = 0
 		task.TokenId = 0
@@ -89,6 +106,9 @@ func SettleMidjourneyTaskBilling(ctx context.Context, relayInfo *relaycommon.Rel
 	task.TokenId = 0
 	if result.TokenApplied {
 		task.TokenId = relayInfo.TokenId
+	}
+	if relayInfo.TokenQuotaReservation != nil {
+		task.QuotaRuleUsageId = relayInfo.TokenQuotaReservation.UsageID
 	}
 	if relayInfo.AppId > 0 && task.Quota > 0 {
 		// The legacy Midjourney route deducts the app wallet directly instead
@@ -124,6 +144,9 @@ func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason s
 		return false
 	}
 
+	if err := model.AdjustTokenQuotaRuleUsage(&relaycommon.TokenQuotaReservation{UsageID: task.QuotaRuleUsageId}, -int64(quota), false); err != nil {
+		logger.LogError(ctx, common.LogText("failed to refund Midjourney quota rule (task=%s): %s", task.MjId, err))
+	}
 	if task.TokenId > 0 {
 		tokenKey := resolveTokenKey(ctx, task.TokenId, task.MjId)
 		if tokenKey != "" {

@@ -60,6 +60,66 @@ func setupAccessTokenAudit(t *testing.T) (*model.User, string) {
 	return user, token
 }
 
+func TestTokenQuotaRuleAuthorizationAndAudit(t *testing.T) {
+	user, _ := setupAccessTokenAudit(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}, &model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}))
+	readOnly, _ := createScopedAccessToken(t, user.Id, time.Now().Unix()+3600, "api_key:read")
+	write, _ := createScopedAccessToken(t, user.Id, time.Now().Unix()+3600, "api_key:read", "api_key:write")
+	// The foreign identity needs a real owner, just like every production PAT.
+	other := &model.User{Id: user.Id + 1, Username: "quota-foreign", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AuthVersion: 1, AffCode: "quota-foreign"}
+	require.NoError(t, model.DB.Create(other).Error)
+	foreign, _ := createScopedAccessToken(t, other.Id, time.Now().Unix()+3600, "api_key:write")
+	token := seedToken(t, model.DB, user.Id, "owned-key", strings.Repeat("s", 48))
+	router := gin.New()
+	router.Use(middleware.RequestId(), middleware.AccessTokenAudit())
+	group := router.Group("/api/token", middleware.UserAuth(), middleware.TokenOperationAudit())
+	group.GET("/quota_rules", ListTokenQuotaRules)
+	group.POST("/quota_rules", SaveTokenQuotaRule)
+	group.PUT("/quota_rules/:id", SaveTokenQuotaRule)
+	group.DELETE("/quota_rules/:id", DeleteTokenQuotaRule)
+	group.PUT("/:id/quota_rule", BindTokenQuotaRule)
+	group.GET("/", GetAllTokens)
+	body := `{"name":"daily-budget","user_id":99999,"created_at":1,"enabled":true,"quota_limit_enabled":true,"quota_period":"daily","quota_limit":100,"time_window_timezone":"UTC","allowed_weekdays":"[1,2,3,4,5,6,7]","key":"body-secret"}`
+	assert.Equal(t, http.StatusUnauthorized, accessTokenRequest(router, "GET", "/api/token/quota_rules", "", "", "").Code)
+	assert.Equal(t, http.StatusForbidden, accessTokenRequest(router, "POST", "/api/token/quota_rules", readOnly, "", body).Code)
+	response := decodeAPIResponse(t, accessTokenRequest(router, "POST", "/api/token/quota_rules", write, "", body))
+	require.True(t, response.Success, response.Message)
+	var rule model.TokenQuotaRule
+	require.NoError(t, common.Unmarshal(response.Data, &rule))
+	assert.Equal(t, user.Id, rule.UserId)
+	assert.Greater(t, rule.CreatedAt, int64(1))
+	path := fmt.Sprintf("/api/token/quota_rules/%d", rule.Id)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, foreign, "", body))
+	assert.False(t, response.Success)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "DELETE", path, foreign, "", ""))
+	assert.False(t, response.Success)
+	bindingPath := fmt.Sprintf("/api/token/%d/quota_rule", token.Id)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindingPath, write, "", fmt.Sprintf(`{"rule_id":%d}`, rule.Id)))
+	require.True(t, response.Success, response.Message)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindingPath, foreign, "", `{"rule_id":0}`))
+	assert.False(t, response.Success)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindingPath, write, "", `{}`))
+	assert.False(t, response.Success)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "DELETE", path, write, "", ""))
+	assert.False(t, response.Success, "bound templates cannot be deleted")
+	listed := accessTokenRequest(router, "GET", "/api/token/", readOnly, "", "")
+	assert.True(t, decodeAPIResponse(t, listed).Success)
+	assert.Contains(t, listed.Body.String(), `"quota_rule"`)
+	assert.NotContains(t, listed.Body.String(), token.Key)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindingPath, write, "", `{"rule_id":0}`))
+	require.True(t, response.Success)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "DELETE", path, write, "", ""))
+	require.True(t, response.Success)
+	var audits []model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action LIKE ?", "token.quota_rule_%").Find(&audits).Error)
+	require.NotEmpty(t, audits)
+	encoded, err := common.Marshal(audits)
+	require.NoError(t, err)
+	for _, secret := range []string{write, readOnly, foreign, token.Key, "body-secret"} {
+		assert.NotContains(t, string(encoded), secret)
+	}
+}
+
 func auditRequest(router http.Handler, method, path, token string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, path, strings.NewReader(`{"secret":"body-must-not-be-logged"}`))
 	request.Header.Set("Authorization", "Bearer "+token)

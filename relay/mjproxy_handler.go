@@ -229,6 +229,11 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	requestURL := getMjRequestPath(c.Request.URL.String())
 	baseURL := c.GetString("base_url")
 	fullRequestURL := fmt.Sprintf("%s%s", baseURL, requestURL)
+	releaseRule, err := service.ReserveMidjourneyQuotaRule(info, priceData.Quota)
+	if err != nil {
+		return service.MidjourneyErrorWrapper(constant.MjRequestError, err.Error())
+	}
+	defer releaseRule()
 	service.RequestPolicy(c).BeginAttempt(&model.Channel{Id: c.GetInt("channel_id")}, info.UsingGroup)
 	mjResp, _, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
 	accepted := service.RecordMidjourneyPolicyResponse(c, mjResp, err)
@@ -551,6 +556,15 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		}
 	}
 
+	ruleQuota := 0
+	if consumeQuota {
+		ruleQuota = priceData.Quota
+	}
+	releaseRule, err := service.ReserveMidjourneyQuotaRule(relayInfo, ruleQuota)
+	if err != nil {
+		return service.MidjourneyErrorWrapper(constant.MjRequestError, err.Error())
+	}
+	defer releaseRule()
 	service.RequestPolicy(c).BeginAttempt(&model.Channel{Id: c.GetInt("channel_id")}, relayInfo.UsingGroup)
 	midjResponseWithStatus, responseBody, err := service.DoMidjourneyHttpRequest(c, time.Second*60, fullRequestURL)
 	accepted := service.RecordMidjourneyPolicyResponse(c, midjResponseWithStatus, err)

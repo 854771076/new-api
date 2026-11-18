@@ -19,6 +19,16 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Invalid quota rule',
+  'Invalid quota period',
+  'Quota rule name is required (up to 128 characters); description allows up to 255 characters',
+  'Quota rule timezone must be UTC or Asia/Shanghai',
+  'Unbind all API keys before deleting this quota rule',
+  'This API key cannot be used on the current weekday',
+  'API key quota for the current period is exhausted',
+  'Quota rule limit must be a positive safe integer',
+  'Select valid weekdays for the quota rule',
+
   'The adjusted price is outside the supported range.',
   'This expression cannot be adjusted automatically. Keep the source price or edit it manually.',
   'Task usage metadata is unavailable. Pricing details cannot be displayed.',

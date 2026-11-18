@@ -129,6 +129,9 @@ func taskIsAppWallet(task *model.Task) bool {
 // taskAdjustTokenQuota 调整任务的令牌额度，delta > 0 表示扣费，delta < 0 表示退还。
 // 需要通过 resolveTokenKey 运行时获取 key（不从 PrivateData 中读取）。
 func taskAdjustTokenQuota(ctx context.Context, task *model.Task, delta int) {
+	if err := model.AdjustTokenQuotaRuleUsage(task.PrivateData.TokenQuotaReservation, int64(delta), false); err != nil {
+		logger.LogWarn(ctx, common.LogText("failed to adjust task quota rule (task=%s): %s", task.TaskID, err))
+	}
 	if task.PrivateData.TokenId <= 0 || delta == 0 {
 		return
 	}

@@ -49,7 +49,7 @@ func TestProductionStartupSchemaUpgrade(t *testing.T) {
 		{"fresh", ""},
 		{"mergebase", "8faf1d45e8c101974dc7483324d3d91c8a462ffe"},
 		{"pre_app_billing", "b6751e593f9f6b5dedfa6b6aa28e2a83a6e589b2"},
-		{"latest_release", "7565092ab0db9b1c99163af65c07c1cae7264831"},
+		{"latest_release", "7407f95866b443b7fa040d6ec79f5797c5593219"}, // v2026.11.12.4
 	}
 	binaries := make(map[string]string)
 	owner := t
@@ -98,8 +98,8 @@ func TestProductionStartupSchemaUpgrade(t *testing.T) {
 						before = append(before, snapshotStartupTables(t, oldLog, true)...)
 						if fixture.name != "latest_release" {
 							assert.False(t, oldMain.Migrator().HasColumn("subscription_plans", "app_id"))
+							assert.False(t, oldMain.Migrator().HasColumn("tasks", "app_id"))
 						}
-						assert.False(t, oldMain.Migrator().HasColumn("tasks", "app_id"))
 					}
 					require.NoError(t, closeDB(oldMain))
 					require.NoError(t, closeDB(oldLog))
@@ -352,6 +352,15 @@ func startupIndexes(t *testing.T, db *gorm.DB, table string) []startupIndex {
 
 func verifyStartupAppSchema(t *testing.T, seeded bool) {
 	t.Helper()
+	assert.True(t, DB.Migrator().HasTable(&TokenQuotaRule{}))
+	assert.True(t, DB.Migrator().HasTable(&TokenQuotaRuleUsage{}))
+	assert.True(t, DB.Migrator().HasColumn(&Token{}, "quota_rule_id"))
+	assert.Contains(t, startupIndexes(t, DB, "token_quota_rule_usages"), startupIndex{"idx_token_rule_period", "token_id,rule_id,period_key", true})
+	if seeded {
+		var token Token
+		require.NoError(t, DB.First(&token, 101).Error)
+		assert.Zero(t, token.QuotaRuleId, "upgraded tokens retain unrestricted access")
+	}
 	for _, table := range []string{"subscription_plans", "subscription_orders", "user_subscriptions", "top_ups", "tasks", "midjourneys"} {
 		assert.True(t, DB.Migrator().HasColumn(table, "app_id"), table)
 		columns, err := DB.Migrator().ColumnTypes(table)

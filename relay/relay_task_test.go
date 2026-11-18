@@ -2,11 +2,13 @@ package relay
 
 import (
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -22,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -51,6 +54,146 @@ func setupRelayChannelDB(t *testing.T) *gorm.DB {
 		require.NoError(t, sqlDB.Close())
 	})
 	return database
+}
+
+func setupRelayQuotaRule(t *testing.T) (*gin.Context, *relaycommon.RelayInfo) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
+	database := setupRelayChannelDB(t)
+	previousBatch, previousRedis := common.BatchUpdateEnabled, common.RedisEnabled
+	common.BatchUpdateEnabled, common.RedisEnabled = false, false
+	t.Cleanup(func() { common.BatchUpdateEnabled, common.RedisEnabled = previousBatch, previousRedis })
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Token{}, &model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}))
+	user := model.User{Username: "quota-owner", AffCode: "quota-aff", Quota: 1000, Status: common.UserStatusEnabled}
+	require.NoError(t, database.Create(&user).Error)
+	rule := model.TokenQuotaRule{UserId: user.Id, Name: "Request quota", Enabled: true, QuotaLimitEnabled: true, QuotaLimit: 100, QuotaPeriod: "daily", TimeWindowTimezone: "UTC", AllowedWeekdays: "[1,2,3,4,5,6,7]"}
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	token := model.Token{UserId: user.Id, Key: "quota-key", Status: common.TokenStatusEnabled, ExpiredTime: -1, QuotaRuleId: rule.Id, UnlimitedQuota: true}
+	require.NoError(t, database.Create(&token).Error)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/realtime", nil)
+	info := &relaycommon.RelayInfo{UserId: user.Id, TokenId: token.Id, TokenKey: token.Key, TokenUnlimited: true, UsingGroup: "default", UserGroup: "default", OriginModelName: "quota-free", UserSetting: kitdto.UserSetting{Language: "en", BillingPreference: "wallet_only"}}
+	return c, info
+}
+
+func TestFreeModelEnforcesWeekdayRuleWithoutWallet(t *testing.T) {
+	c, info := setupRelayQuotaRule(t)
+	previousRatios := ratio_setting.ModelRatio2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"quota-free":0}`))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios)) })
+	previousCount := constant.CountToken
+	constant.CountToken = false
+	t.Cleanup(func() { constant.CountToken = previousCount })
+	settings := operation_setting.GetQuotaSetting()
+	previousFree := settings.EnableFreeModelPreConsume
+	settings.EnableFreeModelPreConsume = false
+	t.Cleanup(func() { settings.EnableFreeModelPreConsume = previousFree })
+	_, err := model.ReserveTokenQuotaRule(info.TokenId, 100, true)
+	require.NoError(t, err)
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", info.UserId).Update("quota", 0).Error)
+	day := int(time.Now().UTC().Weekday())
+	if day == 0 {
+		day = 7
+	}
+	for _, tc := range []struct {
+		name    string
+		weekday int
+		allowed bool
+	}{
+		{"forbidden weekday", day%7 + 1, false},
+		{"allowed weekday with empty wallet", day, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, model.DB.Model(&model.TokenQuotaRule{}).Where("user_id = ?", info.UserId).Updates(map[string]any{"time_window_enabled": true, "allowed_weekdays": fmt.Sprintf("[%d]", tc.weekday)}).Error)
+			apiErr := PrepareRequestBilling(c, info)
+			if tc.allowed {
+				require.Nil(t, apiErr)
+				assert.Nil(t, info.Billing)
+			} else {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+			}
+		})
+	}
+}
+
+func TestPaidZeroEstimateChecksRemainingRuleQuota(t *testing.T) {
+	for _, transport := range []struct {
+		name   string
+		format kittypes.RelayFormat
+		count  bool
+	}{
+		{"realtime", kittypes.RelayFormatOpenAIRealtime, true},
+		{"HTTP estimation disabled", kittypes.RelayFormatOpenAI, false},
+	} {
+		for _, used := range []int64{99, 100, 110} {
+			t.Run(fmt.Sprintf("%s/used_%d", transport.name, used), func(t *testing.T) {
+				c, info := setupRelayQuotaRule(t)
+				previousRatios := ratio_setting.ModelRatio2JSONString()
+				require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"quota-metered":1}`))
+				t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios)) })
+				previousCount := constant.CountToken
+				constant.CountToken = transport.count
+				t.Cleanup(func() { constant.CountToken = previousCount })
+				info.OriginModelName = "quota-metered"
+				info.RelayFormat = transport.format
+				if !transport.count {
+					info.Request = &kitdto.GeneralOpenAIRequest{Model: "quota-metered", Messages: []kitdto.Message{{Role: "user", Content: "hello"}}}
+				}
+				reservation, err := model.ReserveTokenQuotaRule(info.TokenId, min(used, 100), true)
+				require.NoError(t, err)
+				require.NoError(t, model.AdjustTokenQuotaRuleUsage(reservation, max(used-100, 0), false))
+				apiErr := PrepareRequestBilling(c, info)
+				assert.False(t, info.PriceData.FreeModel)
+				if used >= 100 {
+					require.NotNil(t, apiErr, "paid requests must be rejected when the rule is exhausted")
+					assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+					assert.Nil(t, info.Billing)
+				} else {
+					require.Nil(t, apiErr)
+					require.NotNil(t, info.Billing)
+					assert.Zero(t, info.Billing.GetPreConsumedQuota())
+					require.NoError(t, info.Billing.Settle(11), "actual costs may exceed the estimate")
+					used += 11
+				}
+				var usage model.TokenQuotaRuleUsage
+				require.NoError(t, model.DB.Where("token_id = ?", info.TokenId).First(&usage).Error)
+				assert.Equal(t, used, usage.UsedQuota)
+				var user model.User
+				require.NoError(t, model.DB.First(&user, info.UserId).Error)
+				if apiErr != nil {
+					assert.Equal(t, 1000, user.Quota, "a rejection must not change wallet quota")
+				} else {
+					assert.Equal(t, 989, user.Quota)
+				}
+			})
+		}
+	}
+}
+
+func TestRealtimeFailureRefundsOriginalRuleReservation(t *testing.T) {
+	c, info := setupRelayQuotaRule(t)
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"quota-paid":0.0001}`))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices)) })
+	info.OriginModelName = "quota-paid"
+	require.Nil(t, PrepareRequestBilling(c, info))
+	reservation := info.TokenQuotaReservation
+	require.NotNil(t, reservation)
+	require.Equal(t, int64(50), reservation.Amount)
+	apiErr := WssHelper(c, info)
+	require.NotNil(t, apiErr, "the upstream request has no URL and must fail")
+	assert.Same(t, reservation, info.TokenQuotaReservation)
+	require.NotNil(t, RefundFailedRequestBilling(c, info, apiErr))
+	require.Eventually(t, func() bool {
+		var user model.User
+		var token model.Token
+		return model.DB.First(&user, info.UserId).Error == nil && user.Quota == 1000 &&
+			model.DB.First(&token, info.TokenId).Error == nil && token.UsedQuota == 0
+	}, 3*time.Second, 10*time.Millisecond)
+	var usage model.TokenQuotaRuleUsage
+	require.NoError(t, model.DB.Where("token_id = ?", info.TokenId).First(&usage).Error)
+	assert.Zero(t, usage.UsedQuota)
 }
 
 func TestRealtimeFetchAppliesChannelHeaderOverrides(t *testing.T) {

@@ -91,6 +91,11 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             icon: Key,
           },
           {
+            title: t('Quota management'),
+            url: '/quota-rules',
+            icon: Wallet,
+          },
+          {
             title: t('Usage Logs'),
             url: '/usage-logs/common',
             icon: FileText,

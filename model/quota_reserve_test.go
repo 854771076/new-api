@@ -11,6 +11,46 @@ import (
 	"gorm.io/gorm"
 )
 
+func TestTokenQuotaRuleCalendarPeriods(t *testing.T) {
+	for _, tc := range []struct{ timestamp, zone, period, key string }{
+		{"2024-12-30T01:00:00Z", "UTC", "weekly", "UTC:weekly:2025-W01"},
+		{"2021-01-01T01:00:00Z", "UTC", "weekly", "UTC:weekly:2020-W53"},
+		{"2026-11-30T16:00:00Z", "Asia/Shanghai", "monthly", "Asia/Shanghai:monthly:2026-12"},
+		{"2026-11-18T16:00:00Z", "Asia/Shanghai", "daily", "Asia/Shanghai:daily:2026-11-19"},
+		{"2026-11-18T16:00:00Z", "UTC", "daily", "UTC:daily:2026-11-18"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339, tc.timestamp)
+			require.NoError(t, err)
+			assert.Equal(t, tc.key, tokenQuotaRulePeriod(now, tc.zone, tc.period))
+		})
+	}
+}
+
+func TestTokenQuotaRuleValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*TokenQuotaRule)
+	}{
+		{"missing name", func(r *TokenQuotaRule) { r.Name = " " }},
+		{"unknown period", func(r *TokenQuotaRule) { r.QuotaPeriod = "yearly" }},
+		{"zero limit", func(r *TokenQuotaRule) { r.QuotaLimit = 0 }},
+		{"negative limit", func(r *TokenQuotaRule) { r.QuotaLimit = -1 }},
+		{"unsafe limit", func(r *TokenQuotaRule) { r.QuotaLimit = int64(common.MaxWalletQuota) + 1 }},
+		{"unknown timezone", func(r *TokenQuotaRule) { r.TimeWindowTimezone = "Local" }},
+		{"null weekdays", func(r *TokenQuotaRule) { r.AllowedWeekdays = "null" }},
+		{"empty weekdays", func(r *TokenQuotaRule) { r.AllowedWeekdays = "[]" }},
+		{"invalid weekday", func(r *TokenQuotaRule) { r.AllowedWeekdays = "[0,8]" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := TokenQuotaRule{Name: "Rule", QuotaLimitEnabled: true, QuotaLimit: 1, QuotaPeriod: "daily", TimeWindowEnabled: true, TimeWindowTimezone: "UTC", AllowedWeekdays: "[1,7]"}
+			require.NoError(t, rule.Validate())
+			tc.change(&rule)
+			assert.Error(t, rule.Validate())
+		})
+	}
+}
+
 func createReserveTestUser(t *testing.T, quota int) User {
 	t.Helper()
 	user := User{

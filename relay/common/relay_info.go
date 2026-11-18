@@ -24,6 +24,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+type TokenQuotaReservation struct {
+	RuleID  int   `json:"rule_id"`
+	UsageID int   `json:"usage_id"`
+	Amount  int64 `json:"amount"`
+}
+
 type ThinkingContentInfo struct {
 	IsFirstThinkingContent  bool
 	SendLastThinkingContent bool
@@ -81,10 +87,11 @@ type TokenCountMeta struct {
 }
 
 type RelayInfo struct {
-	TokenId    int
-	TokenKey   string
-	TokenGroup string
-	UserId     int
+	TokenQuotaReservation *TokenQuotaReservation
+	TokenId               int
+	TokenKey              string
+	TokenGroup            string
+	UserId                int
 	// AppId is the OAuth App that owns an OAuth access token. Non-zero means
 	// billing is charged against the app-scoped quota pool instead of the
 	// platform user quota. It is 0 for dashboard keys, PATs, and sessions.

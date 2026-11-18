@@ -450,6 +450,10 @@ export function formatDuration(
  * translatable instead of being frozen to whatever language was written to DB.
  */
 const AUDIT_TEMPLATES: Record<string, string> = {
+  'token.quota_rule_create': 'Create quota rule',
+  'token.quota_rule_update': 'Edit quota rule',
+  'token.quota_rule_delete': 'Delete quota rule',
+  'token.quota_rule_bind': 'Bind quota rule',
   'token.create': 'API token creation',
   'token.update': 'API token configuration update',
   'token.status_update': 'API token status update',

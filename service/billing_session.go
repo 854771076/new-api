@@ -52,6 +52,9 @@ func (s *BillingSession) Settle(actualQuota int) error {
 	if s.settled {
 		return nil
 	}
+	if actualQuota < 0 || actualQuota > common.MaxWalletQuota {
+		return errors.New("invalid actual quota")
+	}
 	delta := actualQuota - s.preConsumedQuota
 	if delta == 0 {
 		_ = s.recordAppWalletUsedQuota(actualQuota)
@@ -79,6 +82,10 @@ func (s *BillingSession) Settle(actualQuota int) error {
 			common.SysLog(common.LogText("error adjusting token quota after funding settled (userId=%d, tokenId=%d, delta=%d): %s",
 				s.relayInfo.UserId, s.relayInfo.TokenId, delta, tokenErr.Error()))
 		}
+	}
+	if ruleErr := model.AdjustTokenQuotaRuleUsage(s.relayInfo.TokenQuotaReservation, int64(delta), false); ruleErr != nil {
+		common.SysError(common.LogText("failed to settle token quota rule (tokenId=%d): %s", s.relayInfo.TokenId, ruleErr))
+		tokenErr = errors.Join(tokenErr, ruleErr)
 	}
 	// 3) 更新 relayInfo 上的订阅 PostDelta（用于日志）
 	if s.funding.Source() == BillingSourceSubscription {
@@ -139,6 +146,7 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	subscriptionId := s.relayInfo.SubscriptionId
 	funding := s.funding
 	appUsedQuota := s.appUsedQuota
+	ruleReservation := s.relayInfo.TokenQuotaReservation
 	s.mu.Unlock()
 
 	logger.LogInfo(c, common.LogText("user %d request failed, refunding the pre-consumed quota (token_quota=%s, funding=%s)",
@@ -148,6 +156,11 @@ func (s *BillingSession) Refund(c *gin.Context) {
 	))
 
 	gopool.Go(func() {
+		if ruleReservation != nil {
+			if err := model.AdjustTokenQuotaRuleUsage(ruleReservation, -ruleReservation.Amount, false); err != nil {
+				common.SysError(common.LogText("failed to refund token quota rule (tokenId=%d): %s", tokenId, err))
+			}
+		}
 		// 1) 退还资金来源
 		if err := funding.Refund(); err != nil {
 			common.SysLog(common.LogText("error refunding billing source: %s", err.Error()))
@@ -248,8 +261,23 @@ func (s *BillingSession) reserve(targetQuota int, requireAvailableQuota bool) er
 
 // preConsume 执行预扣费：信任检查 -> 令牌预扣 -> 资金来源预扣。
 // 任一步骤失败时原子回滚已完成的步骤。
-func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIError {
+func (s *BillingSession) preConsume(c *gin.Context, quota int) (apiErr *types.NewAPIError) {
 	effectiveQuota := quota
+	if !s.relayInfo.IsPlayground {
+		reservation, err := model.ReserveTokenQuotaRule(s.relayInfo.TokenId, int64(quota), true)
+		if err != nil {
+			return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+		}
+		s.relayInfo.TokenQuotaReservation = reservation
+		defer func() {
+			if apiErr != nil && reservation != nil {
+				if err := model.AdjustTokenQuotaRuleUsage(reservation, -reservation.Amount, false); err != nil {
+					common.SysError(common.LogText("failed to roll back token quota rule (tokenId=%d): %s", s.relayInfo.TokenId, err))
+				}
+				s.relayInfo.TokenQuotaReservation = nil
+			}
+		}()
+	}
 
 	// ---- 信任额度旁路 ----
 	if s.shouldTrust(c) {
@@ -380,14 +408,27 @@ func (s *BillingSession) reserveToken(delta int) error {
 	if delta <= 0 || s.relayInfo.IsPlayground {
 		return nil
 	}
+	reservation := s.relayInfo.TokenQuotaReservation
+	if err := model.AdjustTokenQuotaRuleUsage(reservation, int64(delta), true); err != nil {
+		return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
 	if err := PreConsumeTokenQuota(s.relayInfo, delta); err != nil {
+		if rollbackErr := model.AdjustTokenQuotaRuleUsage(reservation, -int64(delta), false); rollbackErr != nil {
+			common.SysError(common.LogText("failed to roll back token quota rule reservation: %s", rollbackErr))
+		}
 		return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+	}
+	if reservation != nil {
+		reservation.Amount += int64(delta)
 	}
 	return nil
 }
 
 // shouldTrust 统一信任额度检查，适用于钱包和订阅。
 func (s *BillingSession) shouldTrust(c *gin.Context) bool {
+	if s.relayInfo.TokenQuotaReservation != nil {
+		return false
+	}
 	// 异步任务（ForcePreConsume=true）必须预扣全额，不允许信任旁路
 	if s.relayInfo.ForcePreConsume {
 		return false

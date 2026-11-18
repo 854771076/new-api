@@ -26,6 +26,7 @@ type Midjourney struct {
 	Properties  string `json:"properties"`
 
 	TokenId          int `json:"-" gorm:"default:0"`
+	QuotaRuleUsageId int `json:"-" gorm:"default:0"`
 	BillingChannelId int `json:"-" gorm:"default:0"`
 }
 
@@ -193,7 +194,7 @@ func (midjourney *Midjourney) Update() error {
 
 func (midjourney *Midjourney) UpdateBillingState() error {
 	return DB.Model(midjourney).
-		Select("quota", "token_id", "billing_channel_id").
+		Select("quota", "token_id", "billing_channel_id", "quota_rule_usage_id").
 		Updates(midjourney).Error
 }
 

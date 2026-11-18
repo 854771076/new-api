@@ -692,6 +692,10 @@ func executeTaskSubmissionWith(
 	task.PrivateData.BillingSource = relayInfo.BillingSource
 	task.PrivateData.SubscriptionId = relayInfo.SubscriptionId
 	task.PrivateData.TokenId = relayInfo.TokenId
+	if reservation := relayInfo.TokenQuotaReservation; reservation != nil {
+		snapshot := *reservation
+		task.PrivateData.TokenQuotaReservation = &snapshot
+	}
 	task.PrivateData.NodeName = common.NodeName
 	task.PrivateData.BillingContext = &model.TaskBillingContext{
 		ModelPrice:      relayInfo.PriceData.ModelPrice,
