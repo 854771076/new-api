@@ -62,6 +62,9 @@ func IsProviderUserIdTaken(providerId int, providerUserId string) bool {
 
 // CreateUserOAuthBinding creates a new OAuth binding
 func CreateUserOAuthBinding(binding *UserOAuthBinding) error {
+	if err := RequireNativeUserTx(DB, binding.UserId); err != nil {
+		return err
+	}
 	if binding.UserId == 0 {
 		return errors.New("user ID is required")
 	}
@@ -83,6 +86,9 @@ func CreateUserOAuthBinding(binding *UserOAuthBinding) error {
 
 // CreateUserOAuthBindingWithTx creates a new OAuth binding within a transaction
 func CreateUserOAuthBindingWithTx(tx *gorm.DB, binding *UserOAuthBinding) error {
+	if err := RequireNativeUserTx(tx, binding.UserId); err != nil {
+		return err
+	}
 	if binding.UserId == 0 {
 		return errors.New("user ID is required")
 	}
@@ -106,6 +112,9 @@ func CreateUserOAuthBindingWithTx(tx *gorm.DB, binding *UserOAuthBinding) error 
 
 // UpdateUserOAuthBinding updates an existing OAuth binding (e.g., rebind to different OAuth account)
 func UpdateUserOAuthBinding(userId, providerId int, newProviderUserId string) error {
+	if err := RequireNativeUserTx(DB, userId); err != nil {
+		return err
+	}
 	// Check if the new provider user ID is already taken by another user
 	var existingBinding UserOAuthBinding
 	err := DB.Where("provider_id = ? AND provider_user_id = ?", providerId, newProviderUserId).First(&existingBinding).Error

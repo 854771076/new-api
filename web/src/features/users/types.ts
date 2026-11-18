@@ -33,6 +33,8 @@ export const userRoleSchema = z.number()
 export type UserRole = z.infer<typeof userRoleSchema>
 
 export const userSchema = z.object({
+  identity_source: z.string().optional(),
+  owner_app_id: z.number().optional(),
   id: z.number(),
   username: z.string(),
   display_name: z.string(),
@@ -45,6 +47,9 @@ export const userSchema = z.object({
   quota: z.number(),
   used_quota: z.number(),
   app_quota: z.number().optional(),
+  app_credits: z.string().nullable().optional(),
+  app_used_credits: z.string().nullable().optional(),
+  quota_per_credit: z.number().nullable().optional(),
   app_used_quota: z.number().optional(),
   request_count: z.number(),
   group: z.string(),
@@ -91,6 +96,7 @@ export type UserSortBy =
 export type UserSortOrder = 'asc' | 'desc'
 
 export interface GetUsersParams {
+  identity_source?: string
   p?: number
   page_size?: number
   sort_by?: UserSortBy
@@ -110,6 +116,7 @@ export interface GetUsersResponse {
 }
 
 export interface SearchUsersParams {
+  identity_source?: string
   keyword?: string
   group?: string
   role?: string

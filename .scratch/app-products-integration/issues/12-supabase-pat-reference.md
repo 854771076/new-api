@@ -4,20 +4,28 @@
 
 **Blocked by:** 02 — 管理员 PAT 为指定用户打开收银台并查询支付结果；03 — 后端管理指定用户的 App Key，并从对应 App 资金来源扣费；05 — 按用户与 App 返回统一余额、积分及可信统计；06 — 子 App 定价与 quote 返回积分，并处理提交前价格变化
 
-**Status:** draft — 待确认拆分及 tracker 后，以 ready-for-agent 发布
+**Status:** local implementation — 已实现；本地验证与剩余验收见下文，未发布tracker
 
-- [ ] 参考 starter/子 App 的服务端以已验证的 Supabase 原生身份定位用户，映射包含项目、UUID、App 和 proxy 来源，调用 01 的受控代理开户/恢复合同获取稳定 user_id/source/app_id，不用现有普通 CreateUser 冒充。网关成功后保存 Supabase 映射，响应丢失/映射写入失败重试取回同一 ID，Key 初始化单独恢复；只复用可信同来源且同 App 映射。同一自然人跨 App 使用不同网关用户，代理账户不能改 App。
-- [ ] 保留旧 OAuth 用户 ID、profile、订单和订阅，代理另建独立来源用户，不关联或复制旧 OAuth 映射。相同邮箱不能合并；Supabase 自动关联产生来源歧义时隔离身份域或拒绝，不能共享网关账户。实现并验证代理用户无法登录为 OAuth 用户，客户端不能自选来源或目标 ID。
-- [ ] 映射与凭据存储权限分离：用户可读业务 profile 不包含 Key/PAT，普通用户与其他 App 无法读写服务端凭据；验证真实 RLS/访问权限。
-- [ ] App 后端使用最少必要的 PAT scopes，固定配置 App，浏览器只能请求自己的余额、报价、AI、充值/一次性商品及订单，不接受自选网关 user_id。不提供订阅 UI；订阅读取、购买、授予及扣费接口拒绝，余额不足不回退订阅。
-- [ ] 未认证、伪造/过期 JWT、其他项目 JWT、客户端篡改身份及参数被拒绝；停用 App/模式阻止新调用/下单，授权历史读取与既有订单处理按 02 保留，用户权限撤销不被绕过；敏感操作满足会话/CSRF与撤销策略。
+- [x] 参考 starter/子 App 的服务端以已验证的 Supabase 原生身份定位用户，映射包含项目、UUID、App 和 proxy 来源，调用 01 的受控代理开户/恢复合同获取稳定 user_id/source/app_id，不用现有普通 CreateUser 冒充。网关成功后保存 Supabase 映射，响应丢失/映射写入失败重试取回同一 ID，Key 初始化单独恢复；只复用可信同来源且同 App 映射。同一自然人跨 App 使用不同网关用户，代理账户不能改 App。
+- [x] 保留旧 OAuth 用户 ID、profile、订单和订阅，代理另建独立来源用户，不关联或复制旧 OAuth 映射。相同邮箱不能合并；Supabase 自动关联产生来源歧义时隔离身份域或拒绝，不能共享网关账户。实现并验证代理用户无法登录为 OAuth 用户，客户端不能自选来源或目标 ID。
+- [x] 映射与凭据存储权限分离：用户可读业务 profile 不包含 Key/PAT，普通用户与其他 App 无法读写服务端凭据；验证真实 RLS/访问权限。
+- [x] App 后端使用最少必要的 PAT scopes，固定配置 App，浏览器只能请求自己的余额、报价、AI、充值/一次性商品及订单，不接受自选网关 user_id。不提供订阅 UI；订阅读取、购买、授予及扣费接口拒绝，余额不足不回退订阅。
+- [x] 未认证、伪造/过期 JWT、其他项目 JWT、客户端篡改身份及参数被拒绝；停用 App/模式阻止新调用/下单，授权历史读取与既有订单处理按 02 保留，用户权限撤销不被绕过；敏感操作满足会话/CSRF与撤销策略。
 - [ ] 真实用户完成登录、读取积分、查看报价、使用个人 App Key、打开指定用户收银台与查询订单；不把 getSession 解出的未验证身份作为授权依据。
-- [ ] 提供保留 OAuth 的兼容模式和明确的迁移步骤；PAT 模式不再要求 provider_token、provider refresh 或二次 OAuth 登录。
-- [ ] 参考配置采用仅托管 Key 或双模式，创建用户 Key 时固定本 App；仅托管模式不出现在 new-api 顶部/钱包选择器，代理用户从子 App 查看积分和订单；即使双模式也不显示另一来源资产。
-- [ ] 更新现有框架 skill、相关标准、参考实现与 starter，SDK/OpenAPI 同步新增公开合同；若触及 CLI 行为则同时同步两个打包 skill，不创建无关文档或新 CLI 命令。
-- [ ] skill 的入口描述、默认接入步骤及身份/relay/支付/安全/Supabase 参考均优先推荐代理模式，OAuth 按需选择；不自动运行 OAuth bootstrap，不将现有 OAuth starter 宣称为代理实现，并区分已发布能力与待开发合同。打包时确认携带更新后的源 skill。
-- [ ] 后台管理参考按原生 Supabase UUID 初始化代理控制台管理员，OAuth 初始化仅用于 OAuth 分支；Key 轮换按 03 的可恢复流程保持同一消费预算，旧/新 Key 并发及在途退款不重置或复制限额；缺此能力时拒绝受限轮换。余额读取采用 05 的规范化钱包，不把旧 OAuth 平台 quota 当 App quota。参考流程不等待 new-api 钱包/订阅 UI（08/09），不能重新引入 09 的依赖。
-- [ ] 聚焦测试覆盖身份映射、初始化并发/失败恢复、浏览器秘密检查与完整 HTTP 行为；Supabase schema/RLS 验证真实 PostgreSQL，网关数据库改动仍遵守三数据库规则。
-- [ ] 实施时核对最新适用 Supabase/OWASP 文档，记录 ASVS 版本与实际采用控制；附实际命令、前端检查、适用构建与基线审计，未完成真实外部验收时保持相应项未勾选。
+- [x] 提供保留 OAuth 的兼容模式和明确的迁移步骤；PAT 模式不再要求 provider_token、provider refresh 或二次 OAuth 登录。
+- [x] 参考配置采用仅托管 Key 或双模式，创建用户 Key 时固定本 App；仅托管模式不出现在 new-api 顶部/钱包选择器，代理用户从子 App 查看积分和订单；即使双模式也不显示另一来源资产。
+- [x] 更新现有框架 skill、相关标准、参考实现与 starter，SDK/OpenAPI 同步新增公开合同；若触及 CLI 行为则同时同步两个打包 skill，不创建无关文档或新 CLI 命令。
+- [x] skill 的入口描述、默认接入步骤及身份/relay/支付/安全/Supabase 参考均优先推荐代理模式，OAuth 按需选择；不自动运行 OAuth bootstrap，不将现有 OAuth starter 宣称为代理实现，并区分已发布能力与待开发合同。打包时确认携带更新后的源 skill。
+- [x] 后台管理参考按原生 Supabase UUID 初始化代理控制台管理员，OAuth 初始化仅用于 OAuth 分支；Key 轮换按 03 的可恢复流程保持同一消费预算，旧/新 Key 并发及在途退款不重置或复制限额；缺此能力时拒绝受限轮换。余额读取采用 05 的规范化钱包，不把旧 OAuth 平台 quota 当 App quota。参考流程不等待 new-api 钱包/订阅 UI（08/09），不能重新引入 09 的依赖。
+- [x] 聚焦测试覆盖身份映射、初始化并发/失败恢复、浏览器秘密检查与完整 HTTP 行为；Supabase schema/RLS 验证真实 PostgreSQL，网关数据库改动仍遵守三数据库规则。
+- [x] 实施时核对最新适用 Supabase/OWASP 文档，记录 ASVS 版本与实际采用控制；附实际命令、前端检查、适用构建与基线审计，未完成真实外部验收时保持相应项未勾选。
 
 验收证据对应 checklist B01—B04、G05、G09、G11。只交付仓库内参考接入，不自动替换所有外部子 App 的线上登录配置。
+
+## 实现与证据（2026-11-19）
+
+实现位置：参考src/lib/gateway-proxy.ts、api/auth/login、私有Supabase迁移、SDK/OpenAPI、框架skill与bootstrap。
+
+实际结果：参考287测试/typecheck/lint/build、SDK3测试/build、真实Supabase Auth/RLS脚本及原生HTTPS浏览器登录/profile/admin/退出通过。真实AI/支付组合未验收；不替换外部App线上登录。
+
+完整命令、SQLite3.50.4/MySQL8.0.45/PostgreSQL16.15、Supabase PostgreSQL17.11、临时tunnel清理、OWASP/ASVS5.0.0、审计基线与限制统一见 [交付报告](../README.md)。相关实际命令为报告列出的后端focused/matrix/compatibility、根前端24项、参考287项及SDK3项，未运行的外部验收不因实现完成勾选。基线7407f95866b443b7fa040d6ec79f5797c5593219，包含未提交与新增文件；未发布issue/包或部署。

@@ -20,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
+	"github.com/stripe/stripe-go/v81/price"
 	"github.com/stripe/stripe-go/v81/webhook"
 	"github.com/thanhpk/randstr"
 )
@@ -281,6 +282,13 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 
 	LockOrder(referenceId)
 	defer UnlockOrder(referenceId)
+	if strings.Contains(referenceId, "-REQUEST-") {
+		amount, err := decimal.NewFromString(event.GetObjectValue("amount_total"))
+		if err != nil || model.VerifyAppCheckoutPayment(referenceId, amount.Shift(-2).String(), event.GetObjectValue("currency")) != nil {
+			logger.LogError(ctx, common.LogText("App checkout payment verification failed trade_no=%s", referenceId))
+			return
+		}
+	}
 	payload := map[string]any{
 		"customer":     customerId,
 		"amount_total": event.GetObjectValue("amount_total"),
@@ -392,7 +400,7 @@ func genStripeLink(referenceId string, customerId string, email string, amount i
 			},
 		},
 		Mode:                stripe.String(string(stripe.CheckoutSessionModePayment)),
-		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled),
+		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled && !strings.Contains(referenceId, "-REQUEST-")),
 	}
 
 	if "" == customerId {
@@ -433,7 +441,7 @@ func genStripeProductLink(referenceId string, customerId string, email string, p
 			},
 		},
 		Mode:                stripe.String(string(stripe.CheckoutSessionModePayment)),
-		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled),
+		AllowPromotionCodes: stripe.Bool(setting.StripePromotionCodesEnabled && !strings.Contains(referenceId, "-REQUEST-")),
 	}
 
 	if "" == customerId {
@@ -538,11 +546,27 @@ func generateStripeTopUpCheckout(ctx context.Context, user *model.User, amount i
 	}
 
 	tradeNo := fmt.Sprintf("STRIPE-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
+	tradeNo = model.AppCheckoutTradeNo(ctx, tradeNo)
+	paidMoney := float64(unitCount)
+	if model.AppCheckoutFromContext(ctx) != nil {
+		if !decimal.NewFromInt(unitCount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).Equal(decimal.NewFromInt(int64(creditedQuota))) {
+			return "", "", common.NewMessage("Invalid parameters")
+		}
+		if !strings.HasPrefix(setting.StripeApiSecret, "sk_") && !strings.HasPrefix(setting.StripeApiSecret, "rk_") {
+			return "", "", common.NewMessage("Stripe configuration is incomplete")
+		}
+		stripe.Key = setting.StripeApiSecret
+		configuredPrice, err := price.Get(setting.StripePriceId, &stripe.PriceParams{Params: stripe.Params{Context: ctx}})
+		if err != nil || !configuredPrice.Active || configuredPrice.Currency != stripe.CurrencyUSD || configuredPrice.Type != stripe.PriceTypeOneTime || configuredPrice.BillingScheme != stripe.PriceBillingSchemePerUnit || configuredPrice.UnitAmount <= 0 || (configuredPrice.UnitAmountDecimal != 0 && configuredPrice.UnitAmountDecimal != float64(configuredPrice.UnitAmount)) || configuredPrice.TransformQuantity != nil || configuredPrice.CustomUnitAmount != nil {
+			return "", "", common.NewMessage("Stripe configuration is incomplete")
+		}
+		paidMoney = decimal.NewFromInt(configuredPrice.UnitAmount).Mul(decimal.NewFromInt(unitCount)).Shift(-2).InexactFloat64()
+	}
 	topUp := &model.TopUp{
 		AppId:           appId,
 		UserId:          user.Id,
 		Amount:          amount,
-		Money:           float64(unitCount),
+		Money:           paidMoney,
 		TradeNo:         tradeNo,
 		PaymentMethod:   model.PaymentMethodStripe,
 		PaymentProvider: model.PaymentProviderStripe,
@@ -557,8 +581,10 @@ func generateStripeTopUpCheckout(ctx context.Context, user *model.User, amount i
 	payLink, err = genStripeLink(tradeNo, user.StripeCustomer, user.Email, unitCount, "", "")
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Stripe failed to create checkout session user_id=%d trade_no=%s error=%q", user.Id, tradeNo, err.Error()))
-		topUp.Status = common.TopUpStatusFailed
-		_ = topUp.Update()
+		if model.AppCheckoutFromContext(ctx) == nil {
+			topUp.Status = common.TopUpStatusFailed
+			_ = topUp.Update()
+		}
 		return "", "", common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText("Stripe top-up order created user_id=%d trade_no=%s amount=%d unit_count=%d", user.Id, tradeNo, amount, unitCount))

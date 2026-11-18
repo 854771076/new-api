@@ -3,9 +3,19 @@ import { expect, mock, test } from 'bun:test';
 mock.module('server-only', () => ({}));
 mock.module('@/lib/config', () => ({ config: { gatewayClientId: 'nac_outfit' } }));
 
-const { buildQuote, needsParsing } = await import('../quote');
+const { buildQuote, needsParsing, quotaCredits } = await import('../quote');
 
 const userId = '48e59578-1c61-489b-8a71-40a2019b28bd';
+
+test('credits truncate exactly without float rounding and preserve raw debt separately', () => {
+  expect(quotaCredits(1, 3)).toBe('0.333333');
+  expect(quotaCredits(-1, 3)).toBe('-0.333333');
+  expect(quotaCredits(-1, Number.MAX_SAFE_INTEGER)).toBe('0');
+  expect(quotaCredits(Number.MAX_SAFE_INTEGER, 1)).toBe('9007199254740991');
+  expect(quotaCredits(20, null)).toBeNull();
+  for (const ratio of [0, -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) expect(() => quotaCredits(1, ratio)).toThrow();
+  expect(() => buildQuote([], { parsePrice: 0, tryonPrice: Infinity })).toThrow();
+});
 
 function official(id) {
   return { id, source: 'official', user_id: null, parse_status: 'ready', product_bucket: null, product_path: null };

@@ -15,8 +15,11 @@ var ErrInvalidAppId = errors.New("app id must be greater than 0")
 // app. The embedded User keeps the platform fields and JSON shape unchanged.
 type UserWithAppQuota struct {
 	User
-	AppQuota     int `json:"app_quota"`
-	AppUsedQuota int `json:"app_used_quota"`
+	AppQuota       int     `json:"app_quota"`
+	AppUsedQuota   int     `json:"app_used_quota"`
+	AppCredits     *string `json:"app_credits" gorm:"-"`
+	AppUsedCredits *string `json:"app_used_credits" gorm:"-"`
+	QuotaPerCredit *int64  `json:"quota_per_credit" gorm:"-"`
 }
 
 var appUserSortColumns = map[string]string{
@@ -49,7 +52,8 @@ func (options UserSortOptions) applyApp(query *gorm.DB) *gorm.DB {
 
 func appUsersQuery(query *gorm.DB, appId int) *gorm.DB {
 	return query.Unscoped().Table("users").
-		Joins("LEFT JOIN user_app_wallets AS w ON w.user_id = users.id AND w.app_id = ?", appId)
+		Joins("LEFT JOIN user_app_wallets AS w ON w.user_id = users.id AND w.app_id = ?", appId).
+		Where("users.identity_source IS NULL OR users.identity_source <> ? OR users.owner_app_id = ?", UserSourceProxy, appId)
 }
 
 // GetAllUsersForApp lists users together with their quota in the given app.
@@ -70,7 +74,7 @@ func GetAllUsersForApp(appId int, pageInfo *common.PageInfo, sortOptions ...User
 		}
 	}()
 
-	query := appUsersQuery(tx, appId)
+	query := resolveUserSortOptions(sortOptions).FilterSource(appUsersQuery(tx, appId))
 	if err := query.Count(&total).Error; err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -88,7 +92,9 @@ func GetAllUsersForApp(appId int, pageInfo *common.PageInfo, sortOptions ...User
 	if err := tx.Commit().Error; err != nil {
 		return nil, 0, err
 	}
-	clearUserSecrets(users)
+	if err := enrichAppUsers(users, appId); err != nil {
+		return nil, 0, err
+	}
 	return users, total, nil
 }
 
@@ -111,7 +117,7 @@ func SearchUsersForApp(appId int, keyword string, group string, role *int, statu
 		}
 	}()
 
-	query := appUsersQuery(tx, appId)
+	query := resolveUserSortOptions(sortOptions).FilterSource(appUsersQuery(tx, appId))
 	likeCondition := "users.username LIKE ? OR users.email LIKE ? OR users.display_name LIKE ?"
 	likeArgs := []any{"%" + keyword + "%", "%" + keyword + "%", "%" + keyword + "%"}
 	if keywordInt, err := strconv.Atoi(keyword); err == nil {
@@ -149,17 +155,26 @@ func SearchUsersForApp(appId int, keyword string, group string, role *int, statu
 	if err := tx.Commit().Error; err != nil {
 		return nil, 0, err
 	}
-	clearUserSecrets(users)
+	if err := enrichAppUsers(users, appId); err != nil {
+		return nil, 0, err
+	}
 	return users, total, nil
 }
 
 // clearUserSecrets mirrors the password column omission of the platform list
 // queries after selecting users.* for the join.
-func clearUserSecrets(users []*UserWithAppQuota) {
+func enrichAppUsers(users []*UserWithAppQuota, appID int) error {
+	app, err := GetOAuthAppByID(appID)
+	if err != nil {
+		return err
+	}
 	for _, user := range users {
 		user.Password = ""
 		user.AccessToken = nil
+		user.AppCredits, user.AppUsedCredits = app.Credits(user.AppQuota), app.Credits(user.AppUsedQuota)
+		user.QuotaPerCredit = app.QuotaPerCredit
 	}
+	return nil
 }
 
 // UserAppWallet is the quota pool a user holds inside one external app.
@@ -218,7 +233,7 @@ func ensureUserAppWallet(db *gorm.DB, userId, appId int) (*UserAppWallet, error)
 
 // TransferUserQuotaToApp atomically moves platform quota into an app wallet and
 // records the completed balance top-up. Cache changes happen only after commit.
-func TransferUserQuotaToApp(userId, appId int, amount int64, quota int) error {
+func TransferUserQuotaToApp(userId, appId int, amount int64, quota int, checkout ...*AppCheckout) error {
 	if userId <= 0 || amount <= 0 {
 		return ErrInvalidTopUpQuota
 	}
@@ -252,7 +267,7 @@ func TransferUserQuotaToApp(userId, appId int, amount int64, quota int) error {
 		now := common.GetTimestamp()
 		return tx.Create(&TopUp{
 			UserId: userId, AppId: appId, Amount: amount,
-			TradeNo:       "APP_BALANCE-" + strconv.Itoa(appId) + "-" + strconv.Itoa(userId) + "-" + common.GetRandomString(16),
+			TradeNo:       CheckoutOrderTradeNo(checkout, "APP_BALANCE-"+strconv.Itoa(appId)+"-"+strconv.Itoa(userId)+"-"+common.GetRandomString(16)),
 			PaymentMethod: PaymentMethodBalance, PaymentProvider: PaymentProviderBalance,
 			CreateTime: now, CompleteTime: now, Status: common.TopUpStatusSuccess,
 		}).Error

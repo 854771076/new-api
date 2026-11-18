@@ -61,7 +61,7 @@ func firstConfiguredEpayMethod() (string, error) {
 // createEpaySubscriptionOrder validates the plan/payment method, persists the
 // pending subscription order and starts an epay payment. It is shared by the
 // dashboard and the OAuth app checkout endpoint.
-func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, paymentMethod string) (string, map[string]string, error) {
+func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, paymentMethod string, checkout ...*model.AppCheckout) (string, map[string]string, error) {
 	if err := paymentComplianceError(); err != nil {
 		return "", nil, err
 	}
@@ -70,6 +70,9 @@ func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, payme
 	}
 	if !plan.Enabled {
 		return "", nil, common.NewMessage("Subscription plan is not enabled")
+	}
+	if len(checkout) > 0 && checkout[0] != nil && !strings.EqualFold(plan.Currency, "CNY") {
+		return "", nil, common.NewMessage("Payment currency does not match the plan")
 	}
 	if plan.PriceAmount < 0.01 {
 		return "", nil, common.NewMessage("Plan amount is too low")
@@ -98,7 +101,7 @@ func createEpaySubscriptionOrder(userId int, plan *model.SubscriptionPlan, payme
 	}
 
 	tradeNo := fmt.Sprintf("%s%d", common.GetRandomString(6), time.Now().Unix())
-	tradeNo = fmt.Sprintf("SUBUSR%dNO%s", userId, tradeNo)
+	tradeNo = model.CheckoutOrderTradeNo(checkout, fmt.Sprintf("SUBUSR%dNO%s", userId, tradeNo))
 
 	client := GetEpayClient()
 	if client == nil {
@@ -177,6 +180,10 @@ func SubscriptionEpayNotify(c *gin.Context) {
 		return
 	}
 
+	if err := model.VerifyAppCheckoutPayment(verifyInfo.ServiceTradeNo, params["money"], "CNY"); err != nil {
+		_, _ = c.Writer.Write([]byte("fail"))
+		return
+	}
 	LockOrder(verifyInfo.ServiceTradeNo)
 	defer UnlockOrder(verifyInfo.ServiceTradeNo)
 
@@ -224,6 +231,11 @@ func SubscriptionEpayReturn(c *gin.Context) {
 	verifyInfo, err := client.Verify(params)
 	if err != nil || !verifyInfo.VerifyStatus {
 		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=fail"))
+		return
+	}
+	if strings.Contains(verifyInfo.ServiceTradeNo, "-REQUEST-") {
+		// Browser return is navigation only; the signed webhook settles the order.
+		c.Redirect(http.StatusFound, paymentReturnPath("/wallet?pay=pending"))
 		return
 	}
 	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {

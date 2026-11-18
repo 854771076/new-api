@@ -58,7 +58,7 @@ func authHelper(c *gin.Context, minRole int) {
 		writeDashboardAuthError(c, err)
 		return
 	}
-	if user.Status != common.UserStatusEnabled {
+	if user.IdentitySource == model.UserSourceProxy || user.Status != common.UserStatusEnabled {
 		abortWithWebMessage(c, http.StatusUnauthorized, "AUTH_USER_DISABLED", common.NewMessage("User has been banned"))
 		return
 	}
@@ -553,6 +553,17 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 			return
 		}
 
+		if userCache.IdentitySource == model.UserSourceProxy || token.AppId > 0 {
+			app, appErr := model.GetOAuthAppByID(token.AppId)
+			persisted, keyErr := model.GetTokenById(token.Id)
+			if appErr != nil || keyErr != nil || userCache.IdentitySource != model.UserSourceProxy || userCache.OwnerAppId != token.AppId || !app.IsEnabled() || !app.APIKeyEnabled || persisted.Status == common.TokenStatusDisabled || persisted.AppId != token.AppId || persisted.UserId != token.UserId {
+				abortWithOpenAiMessage(c, http.StatusForbidden, "app key is disabled or unavailable")
+				return
+			}
+			common.SetContextKey(c, constant.ContextKeyOAuthAppID, token.AppId)
+			c.Set("app_proxy", true)
+		}
+
 		c.Set("id", token.UserId)
 		c.Set("token_id", token.Id)
 		c.Set("token_key", token.Key)
@@ -719,6 +730,33 @@ func apiKeyFromWebSocketSubprotocol(protocols string) (string, bool) {
 func SetupContextForToken(c *gin.Context, token *model.Token, parts ...string) error {
 	if token == nil {
 		return fmt.Errorf("token is nil")
+	}
+	user, err := model.GetUserCache(token.UserId)
+	if err != nil {
+		abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "user is unavailable")
+		return err
+	}
+	if user.IdentitySource == model.UserSourceProxy || token.AppId > 0 {
+		if user.IdentitySource != model.UserSourceProxy || token.AppId <= 0 || user.OwnerAppId != token.AppId {
+			abortWithOpenAiMessage(c, http.StatusForbidden, "invalid app key ownership")
+			return model.ErrProxyIdentity
+		}
+		// Read persisted mode and key state: disabling an App/key must not wait for a cache TTL.
+		app, appErr := model.GetOAuthAppByID(token.AppId)
+		persisted, keyErr := model.GetTokenById(token.Id)
+		if appErr != nil || keyErr != nil || !app.IsEnabled() || !app.APIKeyEnabled || persisted.Status != common.TokenStatusEnabled || persisted.AppId != token.AppId || persisted.UserId != token.UserId {
+			abortWithOpenAiMessage(c, http.StatusForbidden, "app key is disabled or unavailable")
+			return model.ErrProxyIdentity
+		}
+		quota, quotaErr := model.GetUserAppQuota(token.UserId, token.AppId)
+		if quotaErr != nil {
+			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, "app wallet is unavailable")
+			return quotaErr
+		}
+		common.SetContextKey(c, constant.ContextKeyOAuthAppID, token.AppId)
+		common.SetContextKey(c, constant.ContextKeyOAuthAppClientID, app.ClientID)
+		common.SetContextKey(c, constant.ContextKeyUserQuota, quota)
+		c.Set("app_proxy", true)
 	}
 	c.Set("id", token.UserId)
 	c.Set("token_id", token.Id)

@@ -3,7 +3,6 @@ package controller
 import (
 	"maps"
 	"net/http"
-	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -20,33 +19,40 @@ import (
 // with the group ratio and quota-per-unit so an OAuth client can derive an
 // estimated quota without hard-coding the conversion constant.
 func OAuthPricing(c *gin.Context) {
-	token := extractBearerToken(c)
-	if token == "" {
-		c.Header("WWW-Authenticate", "Bearer")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "access token is required"})
+	user, app, ok := oauthAppAccess(c, model.OAuthScopeAPIRead)
+	if !ok {
 		return
 	}
+	renderAppPricing(c, user, app)
+}
 
-	user, scope, err := service.ValidateOAuthAccessToken(token)
+func AdminAppPricing(c *gin.Context) {
+	user, appID, ok := appProxyTarget(c)
+	if !ok {
+		return
+	}
+	app, err := model.GetOAuthAppByID(appID)
 	if err != nil {
-		c.Header("WWW-Authenticate", "Bearer error=\"invalid_token\"")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "access token is invalid or expired"})
+		appProxyError(c, err)
 		return
 	}
-
-	scopeSet := make(map[string]struct{})
-	for _, s := range strings.Fields(scope) {
-		scopeSet[s] = struct{}{}
-	}
-	if _, ok := scopeSet[model.OAuthScopeAPIRead]; !ok {
-		c.Header("WWW-Authenticate", "Bearer error=\"insufficient_scope\"")
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient_scope", "error_description": "api:read scope is required"})
+	if !app.IsEnabled() || !app.APIKeyEnabled || user.Status != common.UserStatusEnabled {
+		appProxyError(c, model.ErrProxyIdentity)
 		return
 	}
+	renderAppPricing(c, user, app)
+}
 
+func renderAppPricing(c *gin.Context, user *model.User, app *model.OAuthApp) {
 	group := user.Group
 	usableGroup := service.GetUserUsableGroups(group)
-	pricing := filterPricingByUsableGroups(model.GetPricing(), usableGroup)
+	visible := filterPricingByUsableGroups(model.GetPricing(), usableGroup)
+	pricing := make([]model.Pricing, 0, len(visible))
+	for _, entry := range visible {
+		if app.AllowsModel(entry.ModelName) {
+			pricing = append(pricing, entry)
+		}
+	}
 
 	groupRatio := map[string]float64{}
 	maps.Copy(groupRatio, ratio_setting.GetGroupRatioCopy())
@@ -63,7 +69,8 @@ func OAuthPricing(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":        true,
+		"success": true,
+		"app_id":  app.Id, "user_id": user.Id, "identity_source": user.Source(), "quota_per_credit": app.QuotaPerCredit,
 		"data":           pricing,
 		"group_ratio":    groupRatio,
 		"usable_group":   usableGroup,

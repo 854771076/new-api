@@ -11,6 +11,20 @@ import (
 // /oauth-apps. These endpoints are admin-only and let platform admins create,
 // update, rotate secrets for, and delete OAuth 2.0 client applications.
 func registerOAuthAppRoutes(apiRouter *gin.RouterGroup) {
+	proxy := apiRouter.Group("/app-proxy", middleware.AdminAuth(), middleware.DisableCache())
+	proxy.POST("/users", controller.ProvisionAppProxyUser)
+	proxy.POST("/users/:user_id/topup-preview", controller.ScopedAppTopupPreview)
+	proxy.POST("/users/:user_id/checkout", controller.ScopedAppCheckout)
+	proxy.GET("/users/:user_id/orders", controller.ScopedAppOrderList)
+	proxy.GET("/users/:user_id/orders/:order_id", controller.ScopedAppOrder)
+	proxy.GET("/users/:user_id/pricing", controller.AdminAppPricing)
+	proxy.GET("/users/:user_id/catalog", controller.AdminAppProxyCatalog)
+	proxy.GET("/users/:user_id/logs", controller.AdminAppProxyLogs)
+	proxy.GET("/users/:user_id/wallet", controller.AdminAppWallet)
+	proxy.POST("/users/:user_id/keys", controller.CreateAppProxyKey)
+	proxy.GET("/users/:user_id/keys", controller.ListAppProxyKeys)
+	proxy.PUT("/users/:user_id/keys/:token_id", controller.UpdateAppProxyKey)
+	proxy.POST("/users/:user_id/keys/:token_id/commit-rotation", controller.CommitAppProxyKeyRotation)
 	oauthAppRoute := apiRouter.Group("/oauth-apps")
 	oauthAppRoute.Use(middleware.AdminAuth())
 	{

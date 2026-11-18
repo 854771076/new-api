@@ -30,8 +30,9 @@ var userSortColumns = map[string]string{
 }
 
 type UserSortOptions struct {
-	SortBy    string
-	SortOrder string
+	SortBy         string
+	SortOrder      string
+	IdentitySource string
 }
 
 func NewUserSortOptions(sortBy string, sortOrder string) UserSortOptions {
@@ -78,6 +79,8 @@ func resolveUserSortOptions(sortOptions []UserSortOptions) UserSortOptions {
 // User if you add sensitive fields, don't forget to clean them in setupLogin function.
 // Otherwise, the sensitive information will be saved on local storage in plain text!
 type User struct {
+	IdentitySource       string                     `json:"identity_source" gorm:"type:varchar(16);<-:create"`
+	OwnerAppId           int                        `json:"owner_app_id" gorm:"index;<-:create"`
 	Id                   int                        `json:"id"`
 	Username             string                     `json:"username" gorm:"unique;index" validate:"max=20"`
 	Password             string                     `json:"password" gorm:"not null;" validate:"min=8,max=128"`
@@ -117,16 +120,18 @@ type User struct {
 
 func (user *User) ToBaseUser() *UserBase {
 	cache := &UserBase{
-		Id:          user.Id,
-		Group:       user.Group,
-		Quota:       user.Quota,
-		Status:      user.Status,
-		Role:        user.Role,
-		Username:    user.Username,
-		Setting:     user.Setting,
-		Email:       user.Email,
-		AuthVersion: user.AuthVersion,
-		CacheSchema: userCacheSchemaVersion,
+		Id:             user.Id,
+		IdentitySource: user.IdentitySource,
+		OwnerAppId:     user.OwnerAppId,
+		Group:          user.Group,
+		Quota:          user.Quota,
+		Status:         user.Status,
+		Role:           user.Role,
+		Username:       user.Username,
+		Setting:        user.Setting,
+		Email:          user.Email,
+		AuthVersion:    user.AuthVersion,
+		CacheSchema:    userCacheSchemaVersion,
 	}
 	return cache
 }
@@ -213,6 +218,9 @@ var userBindColumns = map[string]bool{
 // 读快照期间并发发生的封禁、降权或分组变更会被旧快照覆盖恢复。
 // 角色、状态、分组只允许通过各自带锁/CAS 的专用方法修改。
 func UpdateUserBindColumn(userId int, column string, value string) error {
+	if err := RequireNativeUserTx(DB, userId); err != nil {
+		return err
+	}
 	if userId <= 0 {
 		return common.NewMessage("ID is empty!")
 	}
@@ -414,7 +422,8 @@ func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (use
 	}()
 
 	// Get total count within transaction
-	err = tx.Unscoped().Model(&User{}).Count(&total).Error
+	query := resolveUserSortOptions(sortOptions).FilterSource(tx.Unscoped().Model(&User{}))
+	err = query.Count(&total).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -422,7 +431,7 @@ func GetAllUsers(pageInfo *common.PageInfo, sortOptions ...UserSortOptions) (use
 
 	// Get paginated users within same transaction
 	order := resolveUserSortOptions(sortOptions)
-	err = order.Apply(tx.Unscoped()).Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
+	err = order.Apply(query).Limit(pageInfo.GetPageSize()).Offset(pageInfo.GetStartIdx()).Omit("password", "access_token").Find(&users).Error
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -453,7 +462,7 @@ func SearchUsers(keyword string, group string, role *int, status *int, startIdx 
 	}()
 
 	// 构建基础查询
-	query := tx.Unscoped().Model(&User{})
+	query := resolveUserSortOptions(sortOptions).FilterSource(tx.Unscoped().Model(&User{}))
 
 	// 构建搜索条件
 	likeCondition := "username LIKE ? OR email LIKE ? OR display_name LIKE ?"
@@ -639,6 +648,9 @@ func (user *User) prepareForInsert(tx *gorm.DB) error {
 // user, serializing concurrent binds of the same email so two accounts cannot
 // end up sharing one address. The email is normalized before check and store.
 func BindEmailToUser(user *User, email string) error {
+	if err := RequireNativeUserTx(DB, user.Id); err != nil {
+		return err
+	}
 	email = NormalizeEmail(email)
 	if err := DB.Transaction(func(tx *gorm.DB) error {
 		return withNormalizedEmailLock(tx, email, func(tx *gorm.DB) error {
@@ -1073,7 +1085,7 @@ func (user *User) ValidateAndFill() (err error) {
 		}
 		return fmt.Errorf("%w: %v", ErrDatabase, err)
 	}
-	if user.Password == "" {
+	if user.IsProxy() || user.Password == "" {
 		return ErrInvalidCredentials
 	}
 	okay := common.ValidatePasswordAndHash(password, user.Password)

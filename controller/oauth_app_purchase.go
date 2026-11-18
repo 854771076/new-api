@@ -46,7 +46,7 @@ func oauthAppAccess(c *gin.Context, requiredScope string) (*model.User, *model.O
 		return nil, nil, false
 	}
 	app, err := service.LoadOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() {
+	if err != nil || !app.IsOAuthEnabled() {
 		c.JSON(http.StatusForbidden, gin.H{"error": "invalid_client", "error_description": "oauth app is disabled or unavailable"})
 		return nil, nil, false
 	}
@@ -121,82 +121,12 @@ func OAuthSubscriptionCheckout(c *gin.Context) {
 		return
 	}
 
-	plan, err := model.GetSubscriptionPlanById(body.PlanId)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "error_description": "subscription plan does not exist"})
-		return
-	}
-	if plan.AppId != app.Id {
-		c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "subscription plan does not belong to this app"})
-		return
-	}
-	if !plan.Enabled {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "checkout_failed", "error_description": "subscription plan is not enabled"})
-		return
-	}
+	dispatchScopedCheckout(c, user, scopedCheckoutRequest{AppId: app.Id, Kind: "subscription", PlanId: body.PlanId, PaymentMethod: body.PaymentMethod})
 
-	paymentMethod := strings.TrimSpace(body.PaymentMethod)
-	switch paymentMethod {
-	case model.PaymentMethodBalance:
-		if err := paymentComplianceError(); err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		if err := appBalancePayDisabledError(); err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		if err := model.PurchaseSubscriptionWithBalance(user.Id, plan.Id, app.Id); err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "success", "payment_method": model.PaymentMethodBalance})
-	case model.PaymentProviderEpay:
-		paymentType, err := firstConfiguredEpayMethod()
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		uri, params, err := createEpaySubscriptionOrder(user.Id, plan, paymentType)
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": model.PaymentProviderEpay, "url": uri, "params": params})
-	case model.PaymentMethodStripe:
-		payLink, err := createStripeSubscriptionOrder(c.Request.Context(), user, plan)
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": paymentMethod, "pay_link": payLink})
-	case model.PaymentMethodCreem:
-		checkoutURL, orderID, err := createCreemSubscriptionOrder(c.Request.Context(), user, plan)
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": paymentMethod, "checkout_url": checkoutURL, "order_id": orderID})
-	case model.PaymentMethodWaffoPancake:
-		result, err := createWaffoPancakeSubscriptionOrder(c.Request.Context(), user, plan)
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"status":         "pending",
-			"payment_method": paymentMethod,
-			"checkout_url":   result.CheckoutURL,
-			"session_id":     result.SessionID,
-			"expires_at":     result.ExpiresAt,
-			"order_id":       result.OrderID,
-		})
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app subscription plans"})
-	}
 }
 
 type oauthAppProductDTO struct {
+	Credits            *string `json:"credits"`
 	Id                 int     `json:"id"`
 	Name               string  `json:"name"`
 	Description        string  `json:"description"`
@@ -221,6 +151,7 @@ func OAuthProductList(c *gin.Context) {
 	result := make([]oauthAppProductDTO, 0, len(products))
 	for _, p := range products {
 		result = append(result, oauthAppProductDTO{
+			Credits:            app.Credits(int(p.QuotaAmount)),
 			Id:                 p.Id,
 			Name:               p.Name,
 			Description:        p.Description,
@@ -261,6 +192,106 @@ func OAuthProductCheckout(c *gin.Context) {
 		return
 	}
 
+	dispatchScopedCheckout(c, user, scopedCheckoutRequest{AppId: app.Id, Kind: "product", ProductId: body.ProductId, PaymentMethod: body.PaymentMethod})
+
+}
+
+// creditAppTopUpWithBalance validates the amount before the model atomically
+// transfers platform balance and records the completed app top-up.
+func creditAppTopUpWithBalance(userId, appId int, amount int64, checkout ...*model.AppCheckout) (int, error) {
+	if err := paymentComplianceError(); err != nil {
+		return 0, err
+	}
+	if amount < getMinTopup() {
+		return 0, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getMinTopup()})
+	}
+	quota, err := validateTopUpQuota(amount)
+	if err != nil {
+		return 0, err
+	}
+	if err := model.TransferUserQuotaToApp(userId, appId, amount, quota, checkout...); err != nil {
+		return 0, err
+	}
+	return quota, nil
+}
+
+func dispatchAppSubscription(c *gin.Context, user *model.User, app *model.OAuthApp, body oauthSubscriptionCheckoutRequest) {
+	plan, err := model.GetSubscriptionPlanById(body.PlanId)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "error_description": "subscription plan does not exist"})
+		return
+	}
+	if plan.AppId != app.Id {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access_denied", "error_description": "subscription plan does not belong to this app"})
+		return
+	}
+	if !plan.Enabled {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "checkout_failed", "error_description": "subscription plan is not enabled"})
+		return
+	}
+
+	paymentMethod := strings.TrimSpace(body.PaymentMethod)
+	switch paymentMethod {
+	case model.PaymentMethodBalance:
+		if err := paymentComplianceError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		if err := appBalancePayDisabledError(); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		if err := model.PurchaseSubscriptionWithBalance(user.Id, plan.Id, app.Id, model.AppCheckoutFromContext(c.Request.Context())); err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "success", "payment_method": model.PaymentMethodBalance})
+	case model.PaymentProviderEpay:
+		paymentType, err := firstConfiguredEpayMethod()
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		uri, params, err := createEpaySubscriptionOrder(user.Id, plan, paymentType, model.AppCheckoutFromContext(c.Request.Context()))
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": model.PaymentProviderEpay, "url": uri, "params": params})
+	case model.PaymentMethodStripe:
+		payLink, err := createStripeSubscriptionOrder(c.Request.Context(), user, plan)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": paymentMethod, "pay_link": payLink})
+	case model.PaymentMethodCreem:
+		checkoutURL, orderID, err := createCreemSubscriptionOrder(c.Request.Context(), user, plan)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": paymentMethod, "checkout_url": checkoutURL, "order_id": orderID})
+	case model.PaymentMethodWaffoPancake:
+		result, err := createWaffoPancakeSubscriptionOrder(c.Request.Context(), user, plan)
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status":         "pending",
+			"payment_method": paymentMethod,
+			"checkout_url":   result.CheckoutURL,
+			"session_id":     result.SessionID,
+			"expires_at":     result.ExpiresAt,
+			"order_id":       result.OrderID,
+		})
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app subscription plans"})
+	}
+}
+
+func dispatchAppProduct(c *gin.Context, user *model.User, app *model.OAuthApp, body oauthProductCheckoutRequest) {
 	product, err := model.GetAppProductById(body.ProductId)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "error_description": "product does not exist"})
@@ -286,7 +317,7 @@ func OAuthProductCheckout(c *gin.Context) {
 			oauthCheckoutError(c, err)
 			return
 		}
-		order, err := model.PurchaseAppProductWithBalance(user.Id, app.Id, product.Id)
+		order, err := model.PurchaseAppProductWithBalance(user.Id, app.Id, product.Id, model.AppCheckoutFromContext(c.Request.Context()))
 		if err != nil {
 			oauthCheckoutError(c, err)
 			return
@@ -356,23 +387,4 @@ func OAuthProductCheckout(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app products"})
 	}
-}
-
-// creditAppTopUpWithBalance validates the amount before the model atomically
-// transfers platform balance and records the completed app top-up.
-func creditAppTopUpWithBalance(userId, appId int, amount int64) (int, error) {
-	if err := paymentComplianceError(); err != nil {
-		return 0, err
-	}
-	if amount < getMinTopup() {
-		return 0, common.NewMessage("Top-up amount cannot be less than {{min}}", map[string]any{"min": getMinTopup()})
-	}
-	quota, err := validateTopUpQuota(amount)
-	if err != nil {
-		return 0, err
-	}
-	if err := model.TransferUserQuotaToApp(userId, appId, amount, quota); err != nil {
-		return 0, err
-	}
-	return quota, nil
 }

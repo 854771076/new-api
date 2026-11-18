@@ -1,3 +1,21 @@
+/*
+Copyright (C) 2023-2026 QuantumNous
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please contact support@quantumnous.com
+*/
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -13,7 +31,8 @@ const clients: QueryClient[] = []
 afterEach(() => clients.splice(0).forEach((client) => client.clear()))
 
 async function editPublicApp(
-  rotationResult: 'failure' | 'empty' | 'success' = 'success'
+  rotationResult: 'failure' | 'empty' | 'success' = 'success',
+  configuredSecret?: boolean
 ) {
   let app: OAuthApp = {
     id: 7,
@@ -24,7 +43,10 @@ async function editPublicApp(
     post_logout_redirect_uris: [],
     scopes: ['openid'],
     status: 1,
-    public_client: true,
+    public_client: configuredSecret === undefined,
+    oauth_enabled: configuredSecret === undefined,
+    api_key_enabled: configuredSecret !== undefined,
+    client_secret_configured: configuredSecret,
     waffo_pancake_return_url: '',
     created_by: 1,
     created_at: 0,
@@ -64,7 +86,10 @@ async function editPublicApp(
   })
   await userEvent.click(
     within(edit).getByRole('switch', {
-      name: 'Public Client (PKCE, no client secret)',
+      name:
+        configuredSecret === undefined
+          ? 'Public Client (PKCE, no client secret)'
+          : 'OAuth login',
     })
   )
   await userEvent.click(within(edit).getByRole('button', { name: 'Save' }))
@@ -109,5 +134,21 @@ test.each(['failure', 'empty'] as const)(
     const secret = await screen.findByRole('dialog', { name: 'Client Secret' })
     expect(within(secret).getByRole('textbox')).toHaveValue('one-time-secret')
     expect(post).toHaveBeenCalledWith('/api/oauth-apps/7/rotate-secret')
+  }
+)
+
+test.each([true, false])(
+  're-enabling OAuth preserves an existing secret (configured=%s)',
+  async (configured) => {
+    const { post } = await editPublicApp('success', configured)
+    if (configured) {
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      )
+      expect(post).not.toHaveBeenCalled()
+    } else {
+      await screen.findByRole('dialog', { name: 'Client Secret' })
+      expect(post).toHaveBeenCalledWith('/api/oauth-apps/7/rotate-secret')
+    }
   }
 )

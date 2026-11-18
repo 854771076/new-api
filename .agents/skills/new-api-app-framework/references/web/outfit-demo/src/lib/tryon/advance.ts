@@ -177,7 +177,7 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
         persona_snapshot: result.personaSnapshot,
         wear_snapshot: result.wearSnapshot,
         provider_snapshot: result.providerSnapshot,
-        charged_quota: row.quote?.total_quota ?? 0,
+        charged_quota: null,
         gateway_request_id: result.gatewayRequestId ?? null,
         gateway_usage: result.gatewayUsage ?? null,
       }).eq('id', recordId).eq('client_id', clientId).eq('user_id', userId);
@@ -199,7 +199,7 @@ export async function advanceTryon(recordId: string, userId: string): Promise<Ad
 }
 
 /**
- * 把任务标记为终态 failed：回滚本次新解析服装、记录错误并退还报价额度。
+ * 把任务标记为终态 failed：回滚本次新解析服装并记录错误，财务结果等待网关结算证明。
  * 人物标准化、逐件解析、拼板换装任一阶段失败都走这里（与旧同步管线一致：任一阶段失败即整单失败）。
  */
 async function markFailed(
@@ -217,7 +217,7 @@ async function markFailed(
     status: 'failed',
     stage: 'failed',
     error: safe.message,
-    refunded_quota: row.quote?.total_quota ?? 0,
+    refunded_quota: null,
   }).eq('id', row.id).eq('client_id', clientId).eq('user_id', userId);
   return { status: 'failed', stage: 'failed', result_bucket: null, result_path: null, error: safe.message };
 }

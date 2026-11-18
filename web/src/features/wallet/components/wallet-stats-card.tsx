@@ -21,17 +21,30 @@ import { useTranslation } from 'react-i18next'
 
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { formatQuota } from '@/lib/format'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber, formatQuota } from '@/lib/format'
 
+import type { AppWalletData } from '../app-wallet-api'
 import type { UserWalletData } from '../types'
 
 interface WalletStatsCardProps {
   user: UserWalletData | null
   loading?: boolean
+  wallet?: AppWalletData
 }
 
 export function WalletStatsCard(props: WalletStatsCardProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const wallet = props.wallet
+  const showCredits = (value: string, raw: number) => {
+    if (value === '0' && raw !== 0) {
+      return raw < 0
+        ? t('Debt below 0.000001 credits')
+        : t('Below 0.000001 credits')
+    }
+    return `${value} ${t('Credits')}`
+  }
   if (props.loading) {
     return (
       <div className='grid grid-cols-3 divide-x rounded-lg border'>
@@ -55,22 +68,37 @@ export function WalletStatsCard(props: WalletStatsCardProps) {
   }[] = [
     {
       label: t('Current Balance'),
-      value: formatQuota(props.user?.quota ?? 0),
+      value:
+        wallet?.credits != null
+          ? showCredits(wallet.credits, wallet.quota)
+          : formatQuota(wallet?.quota ?? props.user?.quota ?? 0),
       description: t('Remaining quota'),
       icon: WalletCards,
       tone: 'success',
     },
     {
       label: t('Total Usage'),
-      value: formatQuota(props.user?.used_quota ?? 0),
+      value:
+        wallet?.used_credits != null
+          ? showCredits(wallet.used_credits, wallet.used_quota)
+          : formatQuota(wallet?.used_quota ?? props.user?.used_quota ?? 0),
       description: t('Total consumed quota'),
       icon: BarChart3,
       tone: 'info',
     },
     {
       label: t('API Requests'),
-      value: (props.user?.request_count ?? 0).toLocaleString(),
-      description: t('Total requests made'),
+      value:
+        wallet && wallet.request_count == null
+          ? t('No Data')
+          : formatNumber(
+              wallet?.request_count ?? props.user?.request_count ?? 0,
+              locale
+            ),
+      description:
+        wallet?.statistics_window === 'lifetime'
+          ? t('Lifetime requests')
+          : t('No Data'),
       icon: Activity,
       tone: 'chart-4',
     },

@@ -22,7 +22,7 @@ const paymentFormUrl = z.string().url().refine(value => {
   return (url.protocol === 'https:' || url.protocol === 'http:') && !url.username && !url.password;
 });
 export const gatewayCheckoutResultSchema = z.object({
-  status: z.enum(['success', 'pending']),
+  status: z.enum(['success', 'pending', 'processing', 'reconciliation_required']),
   payment_method: paymentMethodSchema.optional(),
   checkout_url: checkoutUrl.optional(),
   pay_link: checkoutUrl.optional(),
@@ -32,6 +32,13 @@ export const gatewayCheckoutResultSchema = z.object({
   expires_at: z.union([z.string(), z.number().finite()]).optional(),
   quota: quota.optional(),
   quota_amount: quota.optional(),
+  credited_quota: quota.optional(),
+  money: z.string().optional(),
+  currency: z.string().optional(),
+  credits: z.string().nullable().optional(),
+  quota_per_credit: z.number().int().positive().safe().nullable().optional(),
+  app_id: z.number().int().nonnegative().safe().optional(),
+  user_id: z.number().int().positive().safe().optional(),
 }).refine(value => value.status !== 'pending' || !!value.checkout_url || !!value.pay_link || !!value.url, {
   message: 'Pending checkout requires a checkout URL',
 });
@@ -45,6 +52,7 @@ export const gatewayPlanSchema = z.object({
   duration_unit: z.string(),
   duration_value: z.number().int().nonnegative(),
   total_amount: quota,
+  credits: z.string().nullable().optional(),
   allow_balance_pay: z.boolean(),
   allow_wallet_overflow: z.boolean().optional(),
   max_purchase_per_user: z.number().int().nonnegative(),
@@ -58,6 +66,7 @@ export const gatewayProductSchema = z.object({
   price_amount: z.number().nonnegative(),
   currency: z.string(),
   quota_amount: quota,
+  credits: z.string().nullable().optional(),
   max_purchase_per_user: z.number().int().nonnegative(),
 });
 

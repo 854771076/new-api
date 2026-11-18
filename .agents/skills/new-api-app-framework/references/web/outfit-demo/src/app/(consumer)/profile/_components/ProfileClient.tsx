@@ -87,8 +87,8 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
                 <div className="stats stats-vertical w-full min-w-0 bg-base-200 text-base-content tabular-nums">
                   <div className="stat min-w-0 gap-2 p-5">
                     <p className="stat-title text-sm text-base-content/70">剩余余额</p>
-                    <p className="stat-value whitespace-normal break-all text-3xl font-semibold text-primary">{formatCredits(appQuota)}</p>
-                    <p className="stat-desc whitespace-normal text-sm text-base-content/70">已用余额：{formatCredits(appUsedQuota)}</p>
+                    <p className="stat-value whitespace-normal break-all text-3xl font-semibold text-primary">{formatCredits(appQuota, info?.credits)}</p>
+                    <p className="stat-desc whitespace-normal text-sm text-base-content/70">已用余额：{formatCredits(appUsedQuota, info?.used_credits)}</p>
                   </div>
                 </div>
                 {usedPercentage !== null ? (
@@ -106,7 +106,7 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
         </section>
       </div>
 
-      <section className="card card-border min-w-0 bg-base-100 shadow-sm" aria-busy={account.loading}>
+      {info?.capabilities?.subscription_supported && <section className="card card-border min-w-0 bg-base-100 shadow-sm" aria-busy={account.loading}>
         <div className="card-body min-w-0 gap-5 p-4 sm:p-6">
           <h2 className="card-title text-xl"><BadgeCheck size={20} className="text-primary" aria-hidden="true" />当前订阅</h2>
           {account.loading ? (
@@ -136,9 +136,9 @@ export function ProfileClient(props: { user: SupabaseUserLite }) {
             <p className="text-base-content/70">暂未订阅套餐。</p>
           )}
         </div>
-      </section>
+      </section>}
 
-      <Payments appQuota={appQuota} onRefresh={refresh} />
+      <Payments key={props.user.id} userId={props.user.id} appId={info?.app_id} subscriptionSupported={info?.capabilities?.subscription_supported === true} appQuota={appQuota} onRefresh={refresh} />
 
       <section className="card card-border min-w-0 bg-base-100 shadow-sm" aria-busy={history.loading}>
         <div className="card-body min-w-0 gap-5 p-4 sm:p-6">

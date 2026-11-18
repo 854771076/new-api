@@ -75,7 +75,7 @@ func createLoginSession(userID int, expectedAuthVersion int64, loginMethod, ip, 
 	if err != nil {
 		return nil, err
 	}
-	if user.Status != common.UserStatusEnabled || user.AuthVersion <= 0 {
+	if user.IdentitySource == model.UserSourceProxy || user.Status != common.UserStatusEnabled || user.AuthVersion <= 0 {
 		return nil, ErrLoginSessionInvalid
 	}
 	if expectedAuthVersion > 0 && user.AuthVersion != expectedAuthVersion {

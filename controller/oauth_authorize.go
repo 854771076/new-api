@@ -112,7 +112,7 @@ func OAuthAuthorize(c *gin.Context) {
 		c.String(http.StatusBadRequest, "Unknown client_id")
 		return
 	}
-	if !app.IsEnabled() {
+	if !app.IsOAuthEnabled() {
 		c.String(http.StatusBadRequest, "Client is disabled")
 		return
 	}
@@ -163,7 +163,7 @@ func OAuthAuthorizeConsent(c *gin.Context) {
 		c.String(http.StatusBadRequest, "Unknown client_id")
 		return
 	}
-	if !app.IsEnabled() {
+	if !app.IsOAuthEnabled() {
 		c.String(http.StatusBadRequest, "Client is disabled")
 		return
 	}
@@ -214,7 +214,7 @@ func OAuthConsentContext(c *gin.Context) {
 		common.ApiErrorT(c, "Unknown client_id")
 		return
 	}
-	if !app.IsEnabled() {
+	if !app.IsOAuthEnabled() {
 		common.ApiErrorT(c, "Client is disabled")
 		return
 	}

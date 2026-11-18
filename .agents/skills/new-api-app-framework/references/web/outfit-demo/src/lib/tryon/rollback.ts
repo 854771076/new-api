@@ -1,5 +1,5 @@
-// lib/tryon/rollback.ts — 整单失败时释放本次新解析服装，并把应用层固定费用记账为已退还。
-// 网关 relay 的实际用量计费不在本应用内退还（由网关侧按失败任务处理）；这里只回滚
+// lib/tryon/rollback.ts — 整单失败时释放本次新解析服装。
+// 财务退款只能由网关确认；这里只回滚
 // 本应用在解析阶段落库的商品图/状态，使服装恢复「未解析、可再次免费解析」的资格。
 import 'server-only';
 import type { SupabaseClient } from '@supabase/supabase-js';

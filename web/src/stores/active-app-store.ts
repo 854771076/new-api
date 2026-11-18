@@ -19,11 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
+import { useAuthStore } from '@/stores/auth-store'
+
 export const PLATFORM_APP_ID = 0
 
 type ActiveAppState = {
   /** Selected OAuth app id, or PLATFORM_APP_ID for the platform itself. */
   appId: number
+  ownerId: number | null
   setAppId: (appId: number) => void
 }
 
@@ -31,11 +34,13 @@ export const useActiveAppStore = create<ActiveAppState>()(
   persist(
     (set) => ({
       appId: PLATFORM_APP_ID,
-      setAppId: (appId) => set({ appId }),
+      ownerId: null,
+      setAppId: (appId) =>
+        set({ appId, ownerId: useAuthStore.getState().auth.user?.id ?? null }),
     }),
     {
       name: 'new-api-active-app',
-      partialize: (state) => ({ appId: state.appId }),
+      partialize: (state) => ({ appId: state.appId, ownerId: state.ownerId }),
     }
   )
 )

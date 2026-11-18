@@ -107,6 +107,7 @@ func createCreemSubscriptionOrder(ctx context.Context, user *model.User, plan *m
 
 	reference := "sub-creem-ref-" + randstr.String(6)
 	referenceId := "sub_ref_" + common.Sha1([]byte(reference+time.Now().String()+user.Username))
+	referenceId = model.AppCheckoutTradeNo(ctx, referenceId)
 
 	// create pending order first
 	order := &model.SubscriptionOrder{
@@ -133,6 +134,9 @@ func createCreemSubscriptionOrder(ctx context.Context, user *model.User, plan *m
 		currency = "USD"
 	default:
 		currency = "USD"
+	}
+	if model.AppCheckoutFromContext(ctx) != nil {
+		currency = plan.Currency
 	}
 	product := &CreemProduct{
 		ProductId: plan.CreemProductId,

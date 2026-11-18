@@ -119,6 +119,11 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
         title: t('Personal'),
         items: [
           {
+            title: t('App marketplace'),
+            url: '/apps',
+            icon: AppWindow,
+          },
+          {
             title: t('Wallet'),
             url: '/wallet',
             icon: Wallet,

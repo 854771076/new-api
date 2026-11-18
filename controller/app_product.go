@@ -335,7 +335,7 @@ func CreateAppProductWaffoPancakeCheckout(ctx context.Context, user *model.User,
 	}
 
 	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
-		model.PaymentMethodWaffoPancake, model.PaymentProviderWaffoPancake)
+		model.PaymentMethodWaffoPancake, model.PaymentProviderWaffoPancake, model.AppCheckoutFromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +355,9 @@ func CreateAppProductWaffoPancakeCheckout(ctx context.Context, user *model.User,
 			"Waffo Pancake failed to create app product checkout trade_no=%s product_id=%d error=%q",
 			order.TradeNo, product.Id, err.Error(),
 		))
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderWaffoPancake, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderWaffoPancake, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText(
@@ -395,7 +397,7 @@ func CreateAppProductStripeCheckout(ctx context.Context, user *model.User, produ
 	}
 
 	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
-		model.PaymentMethodStripe, model.PaymentProviderStripe)
+		model.PaymentMethodStripe, model.PaymentProviderStripe, model.AppCheckoutFromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +408,9 @@ func CreateAppProductStripeCheckout(ctx context.Context, user *model.User, produ
 			"Stripe failed to create app product checkout trade_no=%s product_id=%d error=%q",
 			order.TradeNo, product.Id, err.Error(),
 		))
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderStripe, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderStripe, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText(
@@ -444,7 +448,7 @@ func CreateAppProductCreemCheckout(ctx context.Context, user *model.User, produc
 	}
 
 	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
-		model.PaymentMethodCreem, model.PaymentProviderCreem)
+		model.PaymentMethodCreem, model.PaymentProviderCreem, model.AppCheckoutFromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +465,9 @@ func CreateAppProductCreemCheckout(ctx context.Context, user *model.User, produc
 			"Creem failed to create app product checkout trade_no=%s product_id=%d error=%q",
 			order.TradeNo, product.Id, err.Error(),
 		))
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderCreem, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderCreem, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText(
@@ -488,6 +494,9 @@ func CreateAppProductEpayCheckout(ctx context.Context, user *model.User, product
 	if product == nil {
 		return nil, model.ErrAppProductNotFound
 	}
+	if model.AppCheckoutFromContext(ctx) != nil && !strings.EqualFold(product.Currency, "CNY") {
+		return nil, common.NewMessage("Payment currency does not match the plan")
+	}
 	if !isEpayTopUpEnabled() {
 		return nil, common.NewMessage("Epay configuration is incomplete")
 	}
@@ -499,7 +508,7 @@ func CreateAppProductEpayCheckout(ctx context.Context, user *model.User, product
 	}
 
 	order, err := model.CreateAppProductOrder(user.Id, product.AppId, product.Id,
-		paymentType, model.PaymentProviderEpay)
+		paymentType, model.PaymentProviderEpay, model.AppCheckoutFromContext(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -507,18 +516,24 @@ func CreateAppProductEpayCheckout(ctx context.Context, user *model.User, product
 	callBackAddress := service.GetCallbackAddress()
 	returnUrl, err := url.Parse(paymentReturnPath("/wallet"))
 	if err != nil {
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Callback URL configuration error")
 	}
 	notifyUrl, err := url.Parse(callBackAddress + "/api/user/epay/notify")
 	if err != nil {
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Callback URL configuration error")
 	}
 
 	client := GetEpayClient()
 	if client == nil {
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Payment information has not been configured by administrator")
 	}
 
@@ -536,7 +551,9 @@ func CreateAppProductEpayCheckout(ctx context.Context, user *model.User, product
 			"Epay failed to create app product checkout trade_no=%s product_id=%d error=%q",
 			order.TradeNo, product.Id, err.Error(),
 		))
-		_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		if model.AppCheckoutFromContext(ctx) == nil {
+			_ = model.UpdateAppProductOrderStatus(order.TradeNo, model.PaymentProviderEpay, model.AppProductOrderStatusFailed)
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText(

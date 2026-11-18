@@ -13,8 +13,9 @@ import (
 
 // App product (purchasable quota package scoped to an external app)
 type AppProduct struct {
-	Id    int `json:"id"`
-	AppId int `json:"app_id" gorm:"not null;default:0;index"`
+	Credits *string `json:"credits" gorm:"-"`
+	Id      int     `json:"id"`
+	AppId   int     `json:"app_id" gorm:"not null;default:0;index"`
 
 	Name        string `json:"name" gorm:"type:varchar(128);not null"`
 	Description string `json:"description" gorm:"type:varchar(512);default:''"`
@@ -193,11 +194,11 @@ func ListAppProductOrders(appId, userId int, pageInfo *common.PageInfo) ([]AppPr
 // successes would let one user open several checkouts and pay past the limit.
 // Abandoned checkouts must be moved to expired (see
 // UpdateAppProductOrderStatus) to release the slot.
-func CreateAppProductOrder(userId, appId, productId int, paymentMethod, paymentProvider string) (*AppProductOrder, error) {
+func CreateAppProductOrder(userId, appId, productId int, paymentMethod, paymentProvider string, checkout ...*AppCheckout) (*AppProductOrder, error) {
 	var order *AppProductOrder
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var err error
-		order, err = createAppProductOrderTx(tx, userId, appId, productId, paymentMethod, paymentProvider)
+		order, err = createAppProductOrderTx(tx, userId, appId, productId, paymentMethod, paymentProvider, checkout...)
 		return err
 	})
 	if err != nil {
@@ -206,7 +207,7 @@ func CreateAppProductOrder(userId, appId, productId int, paymentMethod, paymentP
 	return order, nil
 }
 
-func createAppProductOrderTx(tx *gorm.DB, userId, appId, productId int, paymentMethod, paymentProvider string) (*AppProductOrder, error) {
+func createAppProductOrderTx(tx *gorm.DB, userId, appId, productId int, paymentMethod, paymentProvider string, checkout ...*AppCheckout) (*AppProductOrder, error) {
 	if userId <= 0 || appId <= 0 || productId <= 0 {
 		return nil, ErrAppProductNotFound
 	}
@@ -252,7 +253,7 @@ func createAppProductOrderTx(tx *gorm.DB, userId, appId, productId int, paymentM
 		UserId: userId, AppId: appId, ProductId: productId,
 		Money: product.PriceAmount, PriceAmount: product.PriceAmount,
 		Currency: product.Currency, QuotaAmount: product.QuotaAmount,
-		TradeNo:       fmt.Sprintf("%s%d-%d-%d-%s", AppProductOrderTradeNoPrefix, appId, userId, time.Now().UnixMilli(), common.GetRandomString(6)),
+		TradeNo:       CheckoutOrderTradeNo(checkout, fmt.Sprintf("%s%d-%d-%d-%s", AppProductOrderTradeNoPrefix, appId, userId, time.Now().UnixMilli(), common.GetRandomString(6))),
 		PaymentMethod: paymentMethod, PaymentProvider: paymentProvider,
 		Status: AppProductOrderStatusPending, CreateTime: common.GetTimestamp(),
 	}
@@ -395,11 +396,11 @@ func CompleteAppProductOrder(tradeNo, providerPayload, expectedPaymentProvider s
 
 // PurchaseAppProductWithBalance validates, debits, credits and completes the
 // order in one transaction. A failed purchase leaves no charge or pending order.
-func PurchaseAppProductWithBalance(userId, appId, productId int) (*AppProductOrder, error) {
+func PurchaseAppProductWithBalance(userId, appId, productId int, checkout ...*AppCheckout) (*AppProductOrder, error) {
 	var order *AppProductOrder
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var err error
-		order, err = createAppProductOrderTx(tx, userId, appId, productId, PaymentMethodBalance, PaymentProviderBalance)
+		order, err = createAppProductOrderTx(tx, userId, appId, productId, PaymentMethodBalance, PaymentProviderBalance, checkout...)
 		if err != nil {
 			return err
 		}

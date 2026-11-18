@@ -44,7 +44,7 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
-test('starts on the platform app and persists only the selected app id', () => {
+test('starts on the platform app and persists selection with its account', () => {
   expect(useActiveAppStore.getState().appId).toBe(PLATFORM_APP_ID)
 
   useActiveAppStore.getState().setAppId(7)
@@ -52,7 +52,7 @@ test('starts on the platform app and persists only the selected app id', () => {
   expect(useActiveAppStore.getState().appId).toBe(7)
   expect(
     JSON.parse(window.localStorage.getItem('new-api-active-app') ?? '{}')
-  ).toEqual({ state: { appId: 7 }, version: 0 })
+  ).toEqual({ state: { appId: 7, ownerId: null }, version: 0 })
 })
 
 test.each(['loading', 'failed'] as const)(
@@ -145,7 +145,8 @@ test('the mobile app header keeps scope selection accessible and allows controls
   client.clear()
 })
 
-test('does not render the app switcher for regular users', () => {
+test('renders an authorized wallet switcher for regular users', () => {
+  vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
   useAuthStore
     .getState()
     .auth.setUser({ id: 2, username: 'bob', role: ROLE.USER })
@@ -159,5 +160,64 @@ test('does not render the app switcher for regular users', () => {
     </QueryClientProvider>
   )
 
-  expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+  expect(
+    screen.getByRole('combobox', { name: 'Active App' })
+  ).toHaveTextContent('Platform')
+})
+
+test('hides OAuth-disabled Apps without filtering the shared admin list cache', async () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'admin', role: ROLE.ADMIN })
+  useActiveAppStore.getState().setAppId(7)
+  const apps = [
+    { id: 7, name: 'Proxy App', status: 1, oauth_enabled: false },
+    { id: 8, name: 'OAuth App', status: 1, oauth_enabled: true },
+  ]
+  vi.spyOn(api, 'get').mockResolvedValue({
+    data: { success: true, data: apps },
+  })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <ActiveAppSwitcher />
+    </QueryClientProvider>
+  )
+  await waitFor(() =>
+    expect(useActiveAppStore.getState().appId).toBe(PLATFORM_APP_ID)
+  )
+  expect(client.getQueryData(['oauth-apps'])).toEqual(apps)
+  await userEvent.click(screen.getByRole('combobox', { name: 'Active App' }))
+  expect(
+    await screen.findByRole('option', { name: 'OAuth App' })
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByRole('option', { name: 'Proxy App' })
+  ).not.toBeInTheDocument()
+  client.clear()
+})
+
+test('switching accounts immediately hides the previous financial selection', () => {
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 1, username: 'admin', role: ROLE.ADMIN })
+  useActiveAppStore.getState().setAppId(7)
+  useAuthStore
+    .getState()
+    .auth.setUser({ id: 2, username: 'bob', role: ROLE.USER })
+  vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <ActiveAppSwitcher />
+    </QueryClientProvider>
+  )
+  expect(
+    screen.getByRole('combobox', { name: 'Active App' })
+  ).toHaveTextContent('Platform')
+  client.clear()
 })

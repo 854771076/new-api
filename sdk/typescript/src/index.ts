@@ -339,3 +339,66 @@ function base64UrlEncode(bytes: Uint8Array): string {
   }
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+
+
+/** Exact App display units; quota remains the accounting unit. */
+export interface AppWallet {
+  user_id: number; app_id: number; identity_source: 'proxy' | 'platform';
+  quota: number; used_quota: number; quota_per_credit: number | null;
+  credits: string | null; used_credits: string | null;
+  request_count: number | null; statistics_window: string | null;
+  capabilities: { subscription_supported: boolean };
+}
+export interface AppCheckout {
+  order_id: string; app_id: number; user_id: number; status: string;
+  checkout_url?: string; pay_link?: string; url?: string; params?: Record<string,string>;
+  quota_per_credit?: number | null; credited_quota?: number; credits?: string | null;
+}
+export interface AppProxyKey {
+  id: number; user_id: number; app_id: number; key: string; name: string;
+  status: number; remain_quota: number; unlimited_quota: boolean;
+}
+export interface AppProxyKeyInput {
+  name?: string; expired_time?: number; remain_quota?: number; unlimited_quota?: boolean;
+  model_limits_enabled?: boolean; model_limits?: string; allow_ips?: string; group?: string; old_token_id?: number;
+}
+
+/** Trusted backend only. The PAT must carry admin role and each operation's scope.
+ * Never accept a target user/App directly from unverified browser input.
+ */
+export function createAppProxyClient(config: {baseUrl:string;appId:number;accessToken:string;fetch?:typeof fetch}) {
+  if (typeof window !== 'undefined') throw new Error('App proxy credentials are server-only');
+  const origin = new URL(config.baseUrl);
+  if (origin.protocol !== 'https:' || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/') throw new Error('Gateway must be an HTTPS origin');
+  if (!Number.isSafeInteger(config.appId) || config.appId <= 0 || !config.accessToken) throw new Error('Invalid App proxy configuration');
+  const send = config.fetch ?? fetch;
+  const id = (value:number) => { if (!Number.isSafeInteger(value) || value<=0) throw new Error('Invalid target ID'); return value; };
+  const userPath = (userId:number) => `/api/app-proxy/users/${id(userId)}`;
+  async function request<T>(path:string,method='GET',body?:unknown,operationId?:string,query?:Record<string,string|number>) : Promise<T> {
+    if (operationId !== undefined && (operationId.length<8 || operationId.length>128)) throw new Error('Invalid operation ID');
+    const url=new URL(path,origin);url.searchParams.set('app_id',String(config.appId));
+    for (const [key,value] of Object.entries(query??{})) url.searchParams.set(key,String(value));
+    const response=await send(url,{method,redirect:'error',cache:'no-store',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${config.accessToken}`,'Content-Type':'application/json',...(operationId?{'Idempotency-Key':operationId}:{})},body:body===undefined?undefined:JSON.stringify(body)});
+    const result=await response.json();
+    if (!response.ok || result.success===false || result.error) throw new Error(`App proxy request failed (${response.status})`);
+    return (Object.hasOwn(result,'data') && !path.endsWith('/pricing') ? result.data : result) as T;
+  }
+  return {
+    provision: (issuer:string,subject:string) => request<{user_id:number;app_id:number;identity_source:'proxy';status:number}>('/api/app-proxy/users','POST',{app_id:config.appId,issuer,subject}),
+    wallet: (userId:number) => request<AppWallet>(`${userPath(userId)}/wallet`),
+    catalog: (userId:number) => request<unknown>(`${userPath(userId)}/catalog`),
+    logs: (userId:number,page=1) => request<unknown>(`${userPath(userId)}/logs`,'GET',undefined,undefined,{page,page_size:20}),
+    topupPreview: (userId:number,amount:number) => request<{money:number;currency:string;quota:number;credits:string|null}>(`${userPath(userId)}/topup-preview`,'POST',{app_id:config.appId,amount,payment_method:'waffo_pancake'}),
+    pricing: (userId:number) => request<unknown>(`${userPath(userId)}/pricing`),
+    keys: (userId:number,page=1,status?:number) => request<{items:AppProxyKey[];total:number}>(`${userPath(userId)}/keys`,'GET',undefined,undefined,{p:page,...(status===undefined?{}:{status})}),
+    createKey: (userId:number,input:AppProxyKeyInput,operationId:string) => request<AppProxyKey>(`${userPath(userId)}/keys`,'POST',input,operationId),
+    updateKey: (userId:number,tokenId:number,input:{status:1|2;name?:string;remain_quota?:number}) => request<null>(`${userPath(userId)}/keys/${id(tokenId)}`,'PUT',input),
+    commitRotation: (userId:number,tokenId:number,replacementKey:string) => request<null>(`${userPath(userId)}/keys/${id(tokenId)}/commit-rotation`,'POST',{replacement_key:replacementKey}),
+    checkout: (userId:number,input:{purchase_type:'topup'|'product';payment_method:'waffo_pancake';amount?:number;product_id?:number},requestId:string) => request<AppCheckout>(`${userPath(userId)}/checkout`,'POST',{...input,app_id:config.appId},requestId),
+    order: (userId:number,orderId:string) => {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(orderId)) throw new Error('Invalid order ID');
+      return request<AppCheckout>(`${userPath(userId)}/orders/${encodeURIComponent(orderId)}`);
+    },
+    orders: (userId:number,page=1) => request<{items:unknown[];total:number}>(`${userPath(userId)}/orders`,'GET',undefined,undefined,{p:page}),
+  };
+}

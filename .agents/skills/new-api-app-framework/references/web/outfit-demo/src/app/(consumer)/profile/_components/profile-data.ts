@@ -1,22 +1,27 @@
 import { z } from 'zod';
-import { QUOTA_PER_UNIT } from '@/lib/constants';
 
 const quotaSchema = z.number().int().safe().nonnegative();
+const balanceSchema = z.number().int().safe();
 
 export const userinfoSchema = z.object({
+  app_id: z.number().int().nonnegative().optional(),
+  credits: z.string().nullable().optional(),
+  used_credits: z.string().nullable().optional(),
+  capabilities: z.object({ subscription_supported: z.boolean() }).optional(),
   id: z.string(),
   username: z.string().optional(),
   display_name: z.string().optional(),
   email: z.string().optional(),
   provider: z.string().optional(),
-  quota: quotaSchema.optional(),
-  app_quota: quotaSchema.optional(),
-  app_used_quota: quotaSchema.optional(),
+  quota: balanceSchema.optional(),
+  app_quota: balanceSchema.optional(),
+  app_used_quota: balanceSchema.optional(),
   request_count: quotaSchema.optional(),
   group: z.string().optional(),
   subscription: z.object({
     plan_title: z.string().optional(),
     total_amount: quotaSchema,
+    credits: z.string().nullable().optional(),
     end_time: quotaSchema,
   }).nullable().optional(),
 });
@@ -46,6 +51,7 @@ export const catalogSchema = z.object({
     price_amount: z.number().nonnegative(),
     currency: z.string(),
     total_amount: quotaSchema,
+    credits: z.string().nullable().optional(),
     duration_unit: z.string(),
     duration_value: quotaSchema,
     allow_balance_pay: z.boolean(),
@@ -59,12 +65,13 @@ export const catalogSchema = z.object({
     price_amount: z.number().nonnegative(),
     currency: z.string(),
     quota_amount: quotaSchema,
+    credits: z.string().nullable().optional(),
     max_purchase_per_user: quotaSchema,
   })),
 });
 
 export const checkoutSchema = z.object({
-  status: z.enum(['success', 'pending']),
+  status: z.enum(['success', 'pending', 'processing', 'reconciliation_required']),
   payment_method: z.string().optional(),
   order_id: z.string().optional(),
   checkout_url: z.string().optional(),
@@ -94,9 +101,13 @@ export interface SupabaseUserLite {
 }
 
 // 网关 quota 为基本记账单位；new-api 默认 $1 = 500,000 quota，此处换算为美元价格显示。
-export function formatCredits(value: number | undefined): string {
+export function formatCredits(value: number | undefined, credits?: string | null): string {
   if (value === undefined) return '—';
-  return `$${(value / QUOTA_PER_UNIT).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (credits != null) {
+    if (credits === '0' && value !== 0) return value < 0 ? '欠费低于 0.000001 积分' : '低于 0.000001 积分';
+    return `${credits} 积分`;
+  }
+  return `${value.toLocaleString('zh-CN')} quota`;
 }
 
 export function formatPrice(amount: number, currency: string): string {

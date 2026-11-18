@@ -40,6 +40,9 @@ func AdjustUserQuota(userID, operatorRole int, mode string, value int) (*UserQuo
 		if err := lockForUpdate(tx).First(&user, userID).Error; err != nil {
 			return err
 		}
+		if err := ValidateUserAppScope(&user, 0); err != nil {
+			return err
+		}
 		if operatorRole != common.RoleRootUser && operatorRole <= user.Role {
 			return ErrUserQuotaPermission
 		}
@@ -115,6 +118,9 @@ func AdjustUserAppQuota(userID, appID, operatorRole int, mode string, value int)
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var user User
 		if err := tx.First(&user, userID).Error; err != nil {
+			return err
+		}
+		if err := ValidateUserAppScope(&user, appID); err != nil {
 			return err
 		}
 		if operatorRole != common.RoleRootUser && operatorRole <= user.Role {

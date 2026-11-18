@@ -30,6 +30,7 @@ import { Route as AuthenticatedChat2linkRouteImport } from './routes/_authentica
 import { Route as AuthenticatedQuotaRulesRouteImport } from './routes/_authenticated/quota-rules'
 import { Route as AuthenticatedSystemSettingsRouteRouteImport } from './routes/_authenticated/system-settings/route'
 import { Route as AboutIndexRouteImport } from './routes/about/index'
+import { Route as AppsIndexRouteImport } from './routes/apps/index'
 import { Route as OauthProviderRouteImport } from './routes/oauth/$provider'
 import { Route as OauthConsentRouteImport } from './routes/oauth/consent'
 import { Route as PricingIndexRouteImport } from './routes/pricing/index'
@@ -180,6 +181,11 @@ const AuthenticatedSystemSettingsRouteRoute =
 const AboutIndexRoute = AboutIndexRouteImport.update({
   id: '/about/',
   path: '/about/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppsIndexRoute = AppsIndexRouteImport.update({
+  id: '/apps/',
+  path: '/apps/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const OauthProviderRoute = OauthProviderRouteImport.update({
@@ -477,6 +483,7 @@ export interface FileRoutesByFullPath {
   '/oauth/$provider': typeof OauthProviderRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/about/': typeof AboutIndexRoute
+  '/apps/': typeof AppsIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/setup/': typeof SetupIndexRoute
@@ -544,6 +551,7 @@ export interface FileRoutesByTo {
   '/oauth/$provider': typeof OauthProviderRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/about': typeof AboutIndexRoute
+  '/apps': typeof AppsIndexRoute
   '/pricing': typeof PricingIndexRoute
   '/rankings': typeof RankingsIndexRoute
   '/setup': typeof SetupIndexRoute
@@ -615,6 +623,7 @@ export interface FileRoutesById {
   '/oauth/$provider': typeof OauthProviderRoute
   '/oauth/consent': typeof OauthConsentRoute
   '/about/': typeof AboutIndexRoute
+  '/apps/': typeof AppsIndexRoute
   '/pricing/': typeof PricingIndexRoute
   '/rankings/': typeof RankingsIndexRoute
   '/setup/': typeof SetupIndexRoute
@@ -685,6 +694,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/oauth/consent'
     | '/about/'
+    | '/apps/'
     | '/pricing/'
     | '/rankings/'
     | '/setup/'
@@ -752,6 +762,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/oauth/consent'
     | '/about'
+    | '/apps'
     | '/pricing'
     | '/rankings'
     | '/setup'
@@ -822,6 +833,7 @@ export interface FileRouteTypes {
     | '/oauth/$provider'
     | '/oauth/consent'
     | '/about/'
+    | '/apps/'
     | '/pricing/'
     | '/rankings/'
     | '/setup/'
@@ -883,6 +895,7 @@ export interface RootRouteChildren {
   OauthProviderRoute: typeof OauthProviderRoute
   OauthConsentRoute: typeof OauthConsentRoute
   AboutIndexRoute: typeof AboutIndexRoute
+  AppsIndexRoute: typeof AppsIndexRoute
   PricingIndexRoute: typeof PricingIndexRoute
   RankingsIndexRoute: typeof RankingsIndexRoute
   SetupIndexRoute: typeof SetupIndexRoute
@@ -1036,6 +1049,13 @@ declare module '@tanstack/react-router' {
       path: '/about'
       fullPath: '/about/'
       preLoaderRoute: typeof AboutIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/apps/': {
+      id: '/apps/'
+      path: '/apps'
+      fullPath: '/apps/'
+      preLoaderRoute: typeof AppsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/oauth/$provider': {
@@ -1536,6 +1556,7 @@ const rootRouteChildren: RootRouteChildren = {
   OauthProviderRoute: OauthProviderRoute,
   OauthConsentRoute: OauthConsentRoute,
   AboutIndexRoute: AboutIndexRoute,
+  AppsIndexRoute: AppsIndexRoute,
   PricingIndexRoute: PricingIndexRoute,
   RankingsIndexRoute: RankingsIndexRoute,
   SetupIndexRoute: SetupIndexRoute,

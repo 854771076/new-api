@@ -7,7 +7,7 @@ import { config } from '@/lib/config';
 import { GatewayError } from '@/lib/gateway-errors';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
 import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
-import { buildQuote } from '@/lib/tryon/quote';
+import { buildQuote, quoteConfirmation } from '@/lib/tryon/quote';
 import { resolveTryonModel } from '@/lib/tryon/models';
 import { resolveQuotePrices } from '@/lib/tryon/pricing';
 import type { WearCandidate } from '@/lib/tryon/wear';
@@ -17,6 +17,10 @@ const bodySchema = z.object({
   character_id: z.string().uuid(),
   outfit_ids: z.array(z.string().uuid()).min(1).max(6).refine(ids => new Set(ids).size === ids.length),
   pose_id: z.string().uuid(),
+  model: z.string().min(1).max(200).optional(),
+  size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).optional(),
+  quality: z.string().trim().min(1).max(50).optional(),
+  prompt_extra: z.string().max(500).optional(),
 }).strict();
 
 export async function POST(req: NextRequest) {
@@ -52,13 +56,22 @@ export async function POST(req: NextRequest) {
     }
 
     const [imageModelRes, visionModelRes] = await Promise.all([
-      resolveTryonModel(supabase, 'image'),
+      resolveTryonModel(supabase, 'image', body.model),
       resolveTryonModel(supabase, 'vision'),
     ]);
     const prices = await resolveQuotePrices(imageModelRes.model, visionModelRes.model);
     const quote = buildQuote(activeOutfits as WearCandidate[], prices);
+    if (body.model && body.model !== imageModelRes.model) throw new GatewayError(400, '所选模型不可用', 'MODEL_NOT_AVAILABLE');
+    const quoteId = quoteConfirmation(quote, user.id, { ...body, model: imageModelRes.model,
+      size: body.size ?? imageModelRes.defaultSize ?? '1024x1536',
+      quality: body.quality?.trim() || imageModelRes.defaultQuality?.trim() || undefined });
     return gatewaySuccess({
       quote,
+      quote_id: quoteId,
+      estimated_quota: quote.total_quota,
+      estimated_credits: quote.estimated_credits,
+      quota_per_credit: quote.quota_per_credit,
+      estimate_only: true,
       credits: quote.total_quota,
       item_count: quote.item_count,
       unparsed_count: quote.unparsed_garment_ids.length,

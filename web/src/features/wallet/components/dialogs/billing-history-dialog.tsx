@@ -56,6 +56,8 @@ import {
 } from '../../lib/billing'
 
 interface BillingHistoryDialogProps {
+  appId?: number
+  selfOnly?: boolean
   open: boolean
   onOpenChange: (open: boolean) => void
 }
@@ -63,6 +65,8 @@ interface BillingHistoryDialogProps {
 export function BillingHistoryDialog({
   open,
   onOpenChange,
+  appId,
+  selfOnly,
 }: BillingHistoryDialogProps) {
   const { t } = useTranslation()
   const {
@@ -78,7 +82,7 @@ export function BillingHistoryDialog({
     handlePageSizeChange,
     handleSearch,
     handleCompleteOrder,
-  } = useBillingHistory()
+  } = useBillingHistory({ appId, selfOnly })
 
   const [confirmTradeNo, setConfirmTradeNo] = useState<string | null>(null)
   const { copyToClipboard, copiedText } = useCopyToClipboard({ notify: false })
@@ -188,9 +192,30 @@ export function BillingHistoryDialog({
               <div className='space-y-3'>
                 {records.map((record) => {
                   const statusConfig = getStatusConfig(record.status)
+                  let amount = formatCurrencyFromUSD(record.amount, {
+                    digitsLarge: 2,
+                    digitsSmall: 2,
+                    abbreviate: false,
+                  })
+                  if (record.purchase_type) {
+                    amount = t('No Data')
+                    if (record.quota_snapshot != null) {
+                      amount = `${record.quota_snapshot} ${t('Raw Quota')}`
+                    }
+                    if (record.credits != null) {
+                      amount = `${record.credits} ${t('Credits')}`
+                    }
+                  }
+                  let payment = formatNumber(record.money)
+                  if (record.purchase_type) {
+                    payment = t('No Data')
+                    if (record.currency) {
+                      payment = `${formatNumber(record.money)} ${record.currency}`
+                    }
+                  }
                   return (
                     <div
-                      key={record.id}
+                      key={record.trade_no}
                       className='rounded-lg border p-3 sm:p-4'
                     >
                       {/* Header Row */}
@@ -247,20 +272,14 @@ export function BillingHistoryDialog({
                           <Label className='text-muted-foreground text-xs'>
                             {t('Amount')}
                           </Label>
-                          <div className='text-sm font-semibold'>
-                            {formatCurrencyFromUSD(record.amount, {
-                              digitsLarge: 2,
-                              digitsSmall: 2,
-                              abbreviate: false,
-                            })}
-                          </div>
+                          <div className='text-sm font-semibold'>{amount}</div>
                         </div>
                         <div className='space-y-1'>
                           <Label className='text-muted-foreground text-xs'>
                             {t('Payment')}
                           </Label>
                           <div className='text-sm font-semibold text-red-600'>
-                            {formatNumber(record.money)}
+                            {payment}
                           </div>
                         </div>
                       </div>

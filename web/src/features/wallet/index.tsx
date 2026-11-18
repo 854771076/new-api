@@ -16,16 +16,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { Dialog } from '@/components/dialog'
 import { SectionPageLayout } from '@/components/layout'
+import { Button } from '@/components/ui/button'
+import { useActiveApp } from '@/hooks/use-active-app'
 import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { getSelf } from '@/lib/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
+import { useAuthStore } from '@/stores/auth-store'
 
+import { getSelfApps } from './app-wallet-api'
 import { AffiliateRewardsCard } from './components/affiliate-rewards-card'
-import { AppWalletSubscriptionsCard } from './components/app-wallet-subscriptions-card'
+import { AppWalletView } from './components/app-wallet-view'
 import { BillingHistoryDialog } from './components/dialogs/billing-history-dialog'
 import { CreemConfirmDialog } from './components/dialogs/creem-confirm-dialog'
 import { PaymentConfirmDialog } from './components/dialogs/payment-confirm-dialog'
@@ -61,6 +68,75 @@ interface WalletProps {
 }
 
 export function Wallet(props: WalletProps) {
+  const userId = useAuthStore((s) => s.auth.user?.id)
+  return <ScopedWallet key={userId} {...props} />
+}
+
+function ScopedWallet(props: WalletProps) {
+  const { t } = useTranslation()
+  const { appId } = useActiveApp()
+  const userId = useAuthStore((s) => s.auth.user?.id)
+  const [historicalId, setHistoricalId] = useState<number | null>(null)
+  const apps = useQuery({
+    queryKey: ['self-apps-historical', userId],
+    queryFn: async () => requireServerSuccess(await getSelfApps(true)).data,
+    enabled: !!userId,
+  })
+  const historical = (apps.data ?? []).filter((app) => app.read_only)
+  const selected = apps.data?.find((app) => app.id === appId)
+  return (
+    <>
+      {appId === 0 ? (
+        <PlatformWallet key={`platform:${userId}`} {...props} />
+      ) : (
+        <SectionPageLayout>
+          <SectionPageLayout.Title>
+            {selected?.name ?? `${t('App')} #${appId}`} · {t('Wallet')}
+          </SectionPageLayout.Title>
+          <SectionPageLayout.Content>
+            <AppWalletView
+              key={`${userId}:${appId}`}
+              appId={appId}
+              readOnly={!selected || selected.read_only}
+            />
+          </SectionPageLayout.Content>
+        </SectionPageLayout>
+      )}
+      {historical.length > 0 && (
+        <div className='mx-auto flex max-w-7xl flex-wrap gap-2 p-4'>
+          <span>{t('Historical App assets')}</span>
+          {historical.map((app) => (
+            <Button
+              key={app.id}
+              variant='outline'
+              onClick={() => setHistoricalId(app.id)}
+            >
+              {app.name}
+            </Button>
+          ))}
+        </div>
+      )}
+      <Dialog
+        open={historicalId !== null}
+        onOpenChange={(open) => {
+          if (!open) setHistoricalId(null)
+        }}
+        title={t('Historical App assets')}
+        contentClassName='sm:max-w-5xl'
+      >
+        {historicalId !== null && (
+          <AppWalletView
+            key={`${userId}:${historicalId}`}
+            appId={historicalId}
+            readOnly
+          />
+        )}
+      </Dialog>
+    </>
+  )
+}
+
+function PlatformWallet(props: WalletProps) {
   const { t } = useTranslation()
   const [user, setUser] = useState<UserWalletData | null>(null)
   const [userLoading, setUserLoading] = useState(true)
@@ -339,8 +415,6 @@ export function Wallet(props: WalletProps) {
                 onPurchaseSuccess={fetchUser}
               />
             </div>
-
-            <AppWalletSubscriptionsCard />
 
             <AffiliateRewardsCard
               user={user}

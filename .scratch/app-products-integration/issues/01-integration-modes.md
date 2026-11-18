@@ -4,23 +4,31 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** draft — 待确认拆分及 tracker 后，以 ready-for-agent 发布
+**Status:** local implementation — 已实现；本地验证与剩余验收见下文，未发布tracker
 
-- [ ] 两个独立布尔开关 api_key_enabled、oauth_enabled 表达三种有效接入组合，与整体启用和广场展示状态分开；启用 App 不允许无接入方式。
-- [ ] 双模式仅共享 App 产品配置，用户独立、不关联、不共享 new-api user_id 或资产；持久化可信用户身份来源，不以 App 开关或客户端 mode 代替来源。代理模式不支持订阅，同 App 开启 OAuth 也不改变此限制。
-- [ ] 为后续切片提供来源与归属查询合同：普通平台/旧 OAuth 用户保持现有身份，代理账户带受保护的来源和 App 归属；客户端和普通用户不能改写来源，跨模式用户绑定、代理原生登录/OAuth 发令牌均拒绝。
-- [ ] 受控代理开户/恢复合同由本票交付，具体路由待实施确定：管理员 PAT 的用户创建/读取权限、固定 App 与受信 issuer/项目及已验证原生 subject 都校验；采用无歧义外部身份键，不按邮箱认领。不将现有 CreateUser 当成已满足该合同。
-- [ ] 网关事务原子写入账户、受保护 proxy 来源、不可变 App 归属及唯一外部身份绑定，返回稳定 user_id/source/app_id，不返回密码/Key；普通管理员开户旧合同兼容。原生/OAuth 登录不能使用此代理账户。
-- [ ] 同一外部身份元组的并发/重试只创建一个账户，跨 App 同一自然人获得不同 ID；归属/参数冲突拒绝，恢复查询同样授权，不重新启用已停用账户。首次响应丢失或 Supabase 映射保存失败可凭稳定身份取回原 ID；不能仅依赖首次响应或短期幂等键。Key 初始化由 03/12 单独恢复。
+- [x] 两个独立布尔开关 api_key_enabled、oauth_enabled 表达三种有效接入组合，与整体启用和广场展示状态分开；启用 App 不允许无接入方式。
+- [x] 双模式仅共享 App 产品配置，用户独立、不关联、不共享 new-api user_id 或资产；持久化可信用户身份来源，不以 App 开关或客户端 mode 代替来源。代理模式不支持订阅，同 App 开启 OAuth 也不改变此限制。
+- [x] 为后续切片提供来源与归属查询合同：普通平台/旧 OAuth 用户保持现有身份，代理账户带受保护的来源和 App 归属；客户端和普通用户不能改写来源，跨模式用户绑定、代理原生登录/OAuth 发令牌均拒绝。
+- [x] 受控代理开户/恢复合同由本票交付，具体路由待实施确定：管理员 PAT 的用户创建/读取权限、固定 App 与受信 issuer/项目及已验证原生 subject 都校验；采用无歧义外部身份键，不按邮箱认领。不将现有 CreateUser 当成已满足该合同。
+- [x] 网关事务原子写入账户、受保护 proxy 来源、不可变 App 归属及唯一外部身份绑定，返回稳定 user_id/source/app_id，不返回密码/Key；普通管理员开户旧合同兼容。原生/OAuth 登录不能使用此代理账户。
+- [x] 同一外部身份元组的并发/重试只创建一个账户，跨 App 同一自然人获得不同 ID；归属/参数冲突拒绝，恢复查询同样授权，不重新启用已停用账户。首次响应丢失或 Supabase 映射保存失败可凭稳定身份取回原 ID；不能仅依赖首次响应或短期幂等键。Key 初始化由 03/12 单独恢复。
 - [ ] HTTP 验证同元组并发唯一、跨 App 不同 ID、冲突/越权/停用、事务失败、响应丢失与跨系统写入中断；三数据库验证唯一绑定与迁移保留旧账户。
-- [ ] 新 App 默认仅托管 Key；旧 App 迁移为保留 OAuth、未启用托管 App Key，不改变旧平台 Key 归属和既有 client_id。
-- [ ] 托管模式创建不要求 OAuth 回调、scope、公私客户端或 secret；稳定 app_id 可用于后续创建用户 Key 与支付订单。
-- [ ] 开启 OAuth 显示并校验相应配置，关闭则隐藏且取消必填；已保存配置安全保留供再次开启，通用积分/支付/广场配置始终可编辑。
+- [x] 新 App 默认仅托管 Key；旧 App 迁移为保留 OAuth、未启用托管 App Key，不改变旧平台 Key 归属和既有 client_id。
+- [x] 托管模式创建不要求 OAuth 回调、scope、公私客户端或 secret；稳定 app_id 可用于后续创建用户 Key 与支付订单。
+- [x] 开启 OAuth 显示并校验相应配置，关闭则隐藏且取消必填；已保存配置安全保留供再次开启，通用积分/支付/广场配置始终可编辑。
 - [ ] 后端按模式校验新授权、换码、刷新和 App token 请求，不仅隐藏表单；关闭 OAuth 不影响另一模式和 Supabase 身份，已受理任务结算/退款仍可完成。
-- [ ] 按用户明确选择，oauth_enabled=false 的 App 从顶部/钱包下拉隐藏；当前选中项回到平台并清除未提交操作，服务端响应不被重标为平台数据。
-- [ ] App 管理列表独立显示全部授权可管理 App，支持模式筛选并标注托管/授权/双模式；不把顶部已过滤列表作为后台唯一数据来源。
-- [ ] 关闭授权不删除余额、订阅、Key、映射或订单；说明仅托管 Key App 的用户从子 App 查询资产，后台仍可处理，不新建底部跨 App 汇总卡。
+- [x] 按用户明确选择，oauth_enabled=false 的 App 从顶部/钱包下拉隐藏；当前选中项回到平台并清除未提交操作，服务端响应不被重标为平台数据。
+- [x] App 管理列表独立显示全部授权可管理 App，支持模式筛选并标注托管/授权/双模式；不把顶部已过滤列表作为后台唯一数据来源。
+- [x] 关闭授权不删除余额、订阅、Key、映射或订单；说明仅托管 Key App 的用户从子 App 查询资产，后台仍可处理，不新建底部跨 App 汇总卡。
 - [ ] HTTP 与表单/选择器回归覆盖模式矩阵、配置隐藏/恢复、绕过 UI、旧数据默认值和当前选择失效，七语言与键盘操作可用。
-- [ ] 真实三数据库验证模式字段迁移、旧 App 默认、空库与升级、连续两次启动及约束保留；实施时记录适用 OWASP 控制、实际测试与分支基线审计。
+- [x] 真实三数据库验证模式字段迁移、旧 App 默认、空库与升级、连续两次启动及约束保留；实施时记录适用 OWASP 控制、实际测试与分支基线审计。
 
 验收证据对应 checklist B03、H01—H03、H05—H09。可独立演示配置与已有 OAuth 入口开关；App Key 具体调用由 03 接上模式判断。
+
+## 实现与证据（2026-11-19）
+
+实现位置：controller/app_product_settings_test.go、model/app_proxy_user.go、controller/oauth_app.go、middleware/oauth_token_auth.go、web/src/features/oauth-apps/。
+
+实际结果：TestAppProductSettingsDatabaseMatrix、TestAppProxyDatabaseMatrix、TestAppModesDisableOAuthWithoutDisablingProxy；真实三DB fresh/upgrade通过；前端模式/选择器测试通过。
+
+完整命令、SQLite3.50.4/MySQL8.0.45/PostgreSQL16.15、Supabase PostgreSQL17.11、临时tunnel清理、OWASP/ASVS5.0.0、审计基线与限制统一见 [交付报告](../README.md)。相关实际命令为报告列出的后端focused/matrix/compatibility、根前端24项、参考287项及SDK3项，未运行的外部验收不因实现完成勾选。基线7407f95866b443b7fa040d6ec79f5797c5593219，包含未提交与新增文件；未发布issue/包或部署。

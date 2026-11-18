@@ -97,6 +97,10 @@ export interface Character {
 
 /** 提交前报价：本次未解析个人服装的解析费 + 一次换装制作费，单位均为网关 quota。 */
 export interface GenerationQuote {
+  estimated_quota?: number;
+  estimated_credits?: string | null;
+  quota_per_credit?: number | null;
+  pricing_version?: string | null;
   parse_fee_quota: number;
   tryon_fee_quota: number;
   total_quota: number;
@@ -177,8 +181,8 @@ export interface OutfitGeneration {
   pipeline_version: string | null;
   parse_fee_quota: number;
   tryon_fee_quota: number;
-  charged_quota: number;
-  refunded_quota: number;
+  charged_quota: number | null;
+  refunded_quota: number | null;
   result_bucket: string | null;
   result_path: string | null;
   error: string | null;

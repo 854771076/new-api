@@ -61,9 +61,13 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 
+import { getAppCatalog } from '../app-wallet-api'
 import type { PaymentMethod, TopupInfo } from '../types'
 
 interface SubscriptionPlansCardProps {
+  appId?: number
+  readOnly?: boolean
+  onScopedPay?: (planId: number, method: string) => Promise<void>
   topupInfo: TopupInfo | null
   onAvailabilityChange?: (available: boolean) => void
   userQuota?: number
@@ -99,6 +103,9 @@ export function SubscriptionPlansCard({
   onAvailabilityChange,
   userQuota,
   onPurchaseSuccess,
+  appId = 0,
+  readOnly = false,
+  onScopedPay,
 }: SubscriptionPlansCardProps) {
   const { t } = useTranslation()
 
@@ -128,6 +135,11 @@ export function SubscriptionPlansCard({
 
   const fetchPlans = useCallback(async () => {
     try {
+      if (appId > 0) {
+        const catalog = await getAppCatalog(appId)
+        setPlans(catalog.plans.map((plan) => ({ plan })))
+        return
+      }
       const res = requireServerSuccess(await getPublicPlans())
       if (res.success) {
         setPlans(res.data || [])
@@ -136,10 +148,22 @@ export function SubscriptionPlansCard({
       handleServerError(error)
       setPlans([])
     }
-  }, [])
+  }, [appId])
 
   const fetchSelfSubscription = useCallback(async () => {
     try {
+      if (appId > 0) {
+        const catalog = await getAppCatalog(appId)
+        setAllSubscriptions(catalog.subscriptions)
+        setActiveSubscriptions(
+          catalog.subscriptions.filter(
+            (s) =>
+              s.subscription.status === 'active' &&
+              s.subscription.end_time > Date.now() / 1000
+          )
+        )
+        return
+      }
       const res = requireServerSuccess(await getSelfSubscriptionFull())
       if (res.success && res.data) {
         setBillingPreference(
@@ -151,7 +175,7 @@ export function SubscriptionPlansCard({
     } catch (error) {
       handleServerError(error)
     }
-  }, [])
+  }, [appId])
 
   useEffect(() => {
     const init = async () => {
@@ -336,7 +360,10 @@ export function SubscriptionPlansCard({
                 value={billingPreference}
                 onValueChange={(v) => v !== null && handlePreferenceChange(v)}
               >
-                <SelectTrigger className='h-8 flex-1 text-xs sm:w-[140px] sm:flex-none'>
+                <SelectTrigger
+                  disabled={readOnly}
+                  className='h-8 flex-1 text-xs sm:w-[140px] sm:flex-none'
+                >
                   <SelectValue>
                     {getBillingPreferenceLabel(billingPreference, t)}
                   </SelectValue>
@@ -614,6 +641,7 @@ export function SubscriptionPlansCard({
                       <Button
                         variant='outline'
                         className='w-full'
+                        disabled={readOnly}
                         onClick={() => {
                           setSelectedPlan(p)
                           setPurchaseOpen(true)
@@ -635,6 +663,11 @@ export function SubscriptionPlansCard({
       </TitledCard>
 
       <SubscriptionPurchaseDialog
+        onPay={
+          onScopedPay && selectedPlan
+            ? (method) => onScopedPay(selectedPlan.plan.id, method)
+            : undefined
+        }
         open={purchaseOpen}
         onOpenChange={(open) => {
           setPurchaseOpen(open)

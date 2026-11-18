@@ -248,16 +248,18 @@ Next.js 信封约定，直接对接时按本节处理。
 | `POST /oauth/products/checkout` | `api:write` | `{"product_id":1,"payment_method":"balance"}`；余额支付返回 `order_id` / `quota_amount` |
 | `POST /oauth/topup/checkout` | `api:write` | `{"amount":10,"payment_method":"balance"}`；`balance` 是**从平台余额划转到 App 额度池**，不是免费发放，余额不足返回 `400 checkout_failed` |
 
-支付方式：套餐 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`；商品 `balance` /
-`waffo_pancake`；App 充值 `balance` / `waffo_pancake`（省略 `payment_method` 时默认
-`waffo_pancake`）。`amount` 是配置的展示单位整数，不是 quota。
+支付方式（OAuth）：套餐 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`；商品 `balance` / `epay` / `stripe` / `waffo_pancake`；App 充值 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`。具体方法仍需实例配置且目录返回可用。省略 `payment_method` 时默认 `waffo_pancake`。代理 checkout/preview 仅支持 `waffo_pancake`，不支持订阅。`amount` 是配置的展示单位整数，不是 quota。
 
 App 额度语义：App token 的 relay 预扣、结算、退款只作用于 token 所属 App 的额度池
 （以及该 App 的订阅额度），不扣平台 `quota`。`/oauth/userinfo` 的活跃订阅摘要与
 `app_quota` 都不能证明某笔订单已支付。后端保存订单标识及可信用户/App 归属，通过目标
 实例已支持且有权限的订单查询确认该订单成功后，再刷新余额或订阅；本地订单仅作缓存。
 缺少对应查询能力时保持“待确认”，不以余额变化、本地记录或浏览器回跳替代订单终态，
-也不假定已有新的 OAuth 订单查询接口。
+旧部署必须先核对下述 OAuth 订单查询接口能力；本分支已实现，旧部署缺失时不得伪造确认。
+
+OAuth 订单查询合同（`GET /oauth/orders` 和 `/oauth/orders/:order_id`）：OAuth api:read 查询 token 本人、token 固定 App 的充值/商品/订阅订单列表、详情与状态，不要求 dashboard PAT/会话，拒绝跨用户或跨 App 的参数与订单标识，并同步 OAuth 参考 BFF。关闭 OAuth 后该入口拒绝，历史走控制台独立只读入口；均返回 success 信封；列表使用 p/page_size。
+
+checkout 关联合同：订单查询覆盖的每个现有下单分支统一返回稳定 order_id，保留旧字段及同步 success/在线 pending，包括余额充值、余额订阅及 Stripe/Epay；余额订单、归属和资金/权益变更同事务。副作用前持久化按可信操作者/来源/用户/App/类型绑定的幂等键及规范化输入；同键同参数恢复原 ID/快照，改参数冲突，在途/外部结果不明按键恢复或对账，不重复扣款/授予/建单。过期保留原 ID/状态，明确新购才用新键。新 BFF 必须传键，兼容旧客户端缺键请求但不保证可恢复重试，结果不明不能自动重下单。同步参考 BFF、gateway-contract.ts、schema 与可信订单关联存储，调用前保存请求键，丢响应/本地写失败可恢复；同套餐不同键各查各单，禁止按最新订单、金额、URL 或余额猜 ID。上述为本分支扩展，部署时核对服务器能力；旧实例缺 ID 保持待确认，校验先判断合同能力。
 
 ### 3.2 管理端接口（admin session 或 admin PAT）
 
@@ -272,8 +274,46 @@ App 额度语义：App token 的 relay 预扣、结算、退款只作用于 toke
 | 商品列表 | `GET /api/app-products?app_id=<id>&p=1&page_size=20`；省略或 `0` = 所有 App |
 | 商品创建/更新/启停/删除 | `POST /api/app-products`、`PUT /api/app-products/:id`、`PATCH /api/app-products/:id` `{"enabled":bool}`、`DELETE /api/app-products/:id`；创建必须有正数 `app_id`，已产生订单的商品只能停用不能删除 |
 | 商品订单 | `GET /api/app-products/orders?app_id=&user_id=&p=&page_size=`、`POST /api/app-products/orders/:trade_no/complete`（确认线下收款后补单，给 App 额度池入账） |
-| 用户列表（App 视角） | `GET /api/user/?app_id=<id>`、`GET /api/user/search?...&app_id=<id>`；返回的每个用户带该 App 的 `app_quota` / `app_used_quota`（无钱包为 0） |
+| 用户列表（App 视角） | `GET /api/user/?app_id=<id>`、`GET /api/user/search?...&app_id=<id>`；原生用户保留资金视角；代理用户只含不可变归属该 App 的账户（无钱包为 0），支持 identity_source=proxy/platform |
 | 调整额度 | `POST /api/user/manage` `{"id":<user>,"action":"add_quota","mode":"add" / "subtract" / "override","value":<quota>,"app_id":<id>}`；`app_id` 省略或 `0` 调整平台 `quota`，正数只调整该 App 额度池 |
+
+App 用户查询增加代理账户归属过滤：选 A 时只含归属 A 的代理行，包括未建钱包用户，不能混入 B；来源筛选有无都生效，列表/搜索/计数/分页/排序一致。保留旧 OAuth/平台账户资金视角及全局管理员目录，不把钱包记录存在性当账户归属。
 
 管理端仍使用 §2 的 `{"success", "message", "data"}` 信封和 `ApiError` 错误结构；`app_id`
 只影响数据范围，不改变鉴权要求。
+
+
+### Development-branch App settings and marketplace
+
+The current development branch extends the existing admin `/api/oauth-apps/` create/read/update API with `api_key_enabled`, `oauth_enabled`, nullable `quota_per_credit`, `marketplace_visible`, `marketplace_description`, `marketplace_url` and `marketplace_sort`. New calls without OAuth configuration default to proxy-only; legacy callers supplying redirects/scopes without either mode flag keep OAuth-only behavior. Existing rows retain OAuth through the nullable migration default. The management DTO adds `client_secret_configured` (boolean), never the stored secret hash, so toggling OAuth preserves an existing confidential-client credential. Explicit secret rotation keeps its existing endpoint.
+
+`GET /api/app-marketplace` is public and returns the standard success envelope with an array of exactly `id`, `name`, `logo_url`, `description`, `url`. Only enabled, opted-in Apps appear, ordered by display priority then ID. Visit URLs require HTTPS without embedded credentials. Visibility does not grant wallet or authentication permissions. These branch changes are not evidence that proxy provisioning, App-bound keys, delegated checkout or normalized wallet/quote endpoints are available on a target deployment.
+
+
+### Proxy-first branch API
+
+All `/api/app-proxy/*` routes require admin role plus the PAT scope below. A PAT remains administrative authority, not an App-restricted AI credential. The BFF must fix App/user from verified mappings; never expose this PAT to a browser.
+
+| Method and path | PAT scope | Contract |
+|---|---|---|
+| POST `/api/app-proxy/users` | `user:write` | `{app_id,issuer,subject}`; atomic recoverable external identity → stable user_id, app_id, identity_source, status |
+| GET `/api/app-proxy/users/:user_id/wallet` | `user:read` | `?app_id=`; success envelope, remaining quota, nullable exact credits, subscription_supported=false |
+| GET `/api/app-proxy/users/:user_id/keys` | `api_key:read` | `?app_id=&p=&page_size=&status=`; masked keys only |
+| POST `/api/app-proxy/users/:user_id/keys` | `api_key:write` | `?app_id=`, Idempotency-Key; issue secret once per recoverable operation; old_token_id stages rotation |
+| PUT `/api/app-proxy/users/:user_id/keys/:token_id` | `api_key:write` | status=1/2, optional name/remain_quota; immutable ownership |
+| POST `/api/app-proxy/users/:user_id/keys/:token_id/commit-rotation` | `api_key:write` | replacement_key possession; revoke old only after saving/verifying new. Limited rotation returns409 |
+| GET `/api/app-proxy/users/:user_id/catalog` | `billing:read` | App products/payment_methods; empty plans, subscription_supported=false; raw object |
+| GET `/api/app-proxy/users/:user_id/pricing` | `user:read` | App whitelist and quota_per_credit; raw pricing contract |
+| GET `/api/app-proxy/users/:user_id/logs` | `log:read` | Fixed user/App redacted logs; legacy log-list shape |
+| POST `/api/app-proxy/users/:user_id/topup-preview` | `billing:read` | `{app_id,amount,payment_method:"waffo_pancake"}`; success envelope with money/currency/quota/credits |
+| POST `/api/app-proxy/users/:user_id/checkout` | `billing:write` | Same explicit app_id, purchase_type=topup/product, amount/product_id; Idempotency-Key required; stable order_id and frozen snapshot |
+| GET `/api/app-proxy/users/:user_id/orders` | `billing:read` | `?app_id=&p=&page_size=&keyword=`; success envelope with items/total |
+| GET `/api/app-proxy/users/:user_id/orders/:order_id` | `billing:read` | Exact authorized order; success envelope; pending/processing/reconciliation_required never prove payment |
+
+OAuth equivalents: `GET /oauth/wallet`, `/oauth/orders`, `/oauth/orders/:order_id` need api:read and fix both principals from the token. `POST /oauth/topup/preview` needs api:read and supports Pancake preview. Console equivalents are under `/api/user/self/` (`wallet`, `app-catalog`, `app-checkout`, `app-topup-preview`, `orders`). Legacy userinfo meanings remain unchanged.
+
+The reference `/api/generate/quote` adds estimated_quota, estimated_credits (string|null), quota_per_credit and a server-bound confirmation digest. Legacy credits remains raw quota. Estimates support the documented fixed/linear expression subset only; unsupported expressions fail explicitly. Settlement fields remain null until actual correlated gateway charges/refunds are known.
+
+Payment callbacks verify signature, paid status, frozen amount/currency and expiry before credit. Amount/currency mismatches or late unpaid orders enter reconciliation_required with the durable order ID. Valid duplicate paid notifications remain idempotent after expiry. Operators investigate provider records and the frozen intent before any existing authorized manual correction; never blindly replay provider creation or treat a return URL as success. Epay scoped products/subscriptions require CNY before checkout; Creem scoped requests use plan currency. Stripe/Pancake product currencies must match configured plan/product currency.
+
+Scoped Stripe top-up validates the configured active USD one-time per-unit Price and whole purchased quantities before creating a provider session; its frozen money is price × quantity, with promotions disabled. Scoped product Stripe checkouts also disable promotions. Legacy orders without snapshots never acquire today's credit ratio; unknown original currencies remain empty and the UI displays No Data rather than inventing USD or labeling unit counts as paid money.

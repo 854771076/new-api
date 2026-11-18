@@ -529,7 +529,9 @@ func TestListEnabledSubscriptionPlansAppScope(t *testing.T) {
 }
 
 func TestPreConsumeUserSubscriptionAppIsolation(t *testing.T) {
-	setupAppModelTestDB(t)
+	db := setupAppModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&User{}))
+	require.NoError(t, db.Create(&User{Id: 77, Username: "subscription-app-user"}).Error)
 
 	plan := &SubscriptionPlan{
 		AppId:         5,

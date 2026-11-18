@@ -21,6 +21,7 @@ interface ModelRow {
 export async function resolveTryonModel(
   supabase: SupabaseClient,
   usage: TryonModelUsage,
+  requestedModel?: string,
 ): Promise<{ model: string; defaultSize: string | null; defaultQuality: string | null }> {
   const { data, error } = await supabase
     .from('ai_models')
@@ -37,7 +38,7 @@ export async function resolveTryonModel(
   const rows = (data ?? []) as ModelRow[];
   const clientRows = rows.filter((r) => r.client_id === config.gatewayClientId);
   const pool = clientRows.length > 0 ? clientRows : rows;
-  const row = pool.find((r) => r.is_default) ?? pool[0];
+  const row = requestedModel ? pool.find(r => r.model_id === requestedModel) : pool.find((r) => r.is_default) ?? pool[0];
   if (!row) {
     const label = usage === 'vision' ? '视觉理解模型' : '生图模型';
     throw new GatewayError(400, `未配置可用的${label}，请联系管理员`, 'AI_TRYON_MODEL_UNAVAILABLE');

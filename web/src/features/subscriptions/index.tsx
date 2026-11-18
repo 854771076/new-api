@@ -20,6 +20,8 @@ import { Info } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
+import { ActiveAppSwitcher } from '@/components/layout/components/active-app-switcher'
+import { AdminAppScope } from '@/components/layout/components/admin-app-scope'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 
 import { SubscriptionsDialogs } from './components/subscriptions-dialogs'
@@ -41,6 +43,7 @@ function SubscriptionsContent() {
           {t('Subscription Management')}
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
+          <ActiveAppSwitcher includeProxy />
           <div className='flex items-center gap-2'>
             <Alert variant='default' className='hidden px-3 py-2 sm:flex'>
               <Info className='h-4 w-4' />
@@ -76,10 +79,18 @@ function SubscriptionsContent() {
   )
 }
 
-export function Subscriptions() {
+function SubscriptionsInner() {
   return (
     <SubscriptionsProvider>
       <SubscriptionsContent />
     </SubscriptionsProvider>
+  )
+}
+
+export function Subscriptions() {
+  return (
+    <AdminAppScope>
+      <SubscriptionsInner />
+    </AdminAppScope>
   )
 }

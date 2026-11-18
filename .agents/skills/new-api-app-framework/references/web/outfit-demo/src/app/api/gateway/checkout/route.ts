@@ -9,6 +9,6 @@ export async function POST(request: NextRequest) {
     requireGatewayOrigin(request);
     const parsed = gatewayCheckoutSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) throw new GatewayError(400, 'Invalid checkout request.', 'BAD_REQUEST_INVALID_BODY');
-    return gatewaySuccess(await fetchGatewayCheckout(parsed.data));
+    return gatewaySuccess(await fetchGatewayCheckout(parsed.data, { requestId: request.headers.get('Idempotency-Key') ?? undefined }));
   } catch (error) { return gatewayFailure(error); }
 }

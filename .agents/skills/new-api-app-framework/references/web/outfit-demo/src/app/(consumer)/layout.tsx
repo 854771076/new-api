@@ -10,6 +10,7 @@ import {
   UserCog,
   Menu,
 } from 'lucide-react';
+import { getProxyAccount, usesProxyMode } from '@/lib/gateway-proxy';
 import { LogoutButton } from '@/components/logout-button';
 import { requireAdmin } from '@/lib/admin/requireAdmin';
 import { createServerSupabase } from '@/lib/supabase/server';
@@ -26,6 +27,7 @@ export default async function ConsumerLayout({ children }: { children: ReactNode
   const supabase = await createServerSupabase();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect('/login');
+  if (await usesProxyMode()) await getProxyAccount();
   const admin = await requireAdmin();
 
   return (

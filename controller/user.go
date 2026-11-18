@@ -338,7 +338,16 @@ func Register(c *gin.Context) {
 func GetAllUsers(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	appId, _ := strconv.Atoi(c.Query("app_id"))
+	sortOptions.IdentitySource = c.Query("identity_source")
+	if source := sortOptions.IdentitySource; source != "" && source != "platform" && source != model.UserSourceProxy {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	appId, parseErr := strconv.Atoi(c.DefaultQuery("app_id", "0"))
+	if parseErr != nil || appId < 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 	if appId > 0 {
 		users, total, err := model.GetAllUsersForApp(appId, pageInfo, sortOptions)
 		if err != nil {
@@ -380,7 +389,16 @@ func SearchUsers(c *gin.Context) {
 	}
 	pageInfo := common.GetPageQuery(c)
 	sortOptions := model.NewUserSortOptions(c.Query("sort_by"), c.Query("sort_order"))
-	appId, _ := strconv.Atoi(c.Query("app_id"))
+	sortOptions.IdentitySource = c.Query("identity_source")
+	if source := sortOptions.IdentitySource; source != "" && source != "platform" && source != model.UserSourceProxy {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	appId, parseErr := strconv.Atoi(c.DefaultQuery("app_id", "0"))
+	if parseErr != nil || appId < 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
 	if appId > 0 {
 		users, total, err := model.SearchUsersForApp(appId, keyword, group, role, status, pageInfo.GetStartIdx(), pageInfo.GetPageSize(), sortOptions)
 		if err != nil {
@@ -425,6 +443,22 @@ func GetUser(c *gin.Context) {
 		return
 	}
 	user.AdminPermissions = authz.Capabilities(user.Id, user.Role)
+	if requested := c.Query("app_id"); requested != "" {
+		appID, err := strconv.Atoi(requested)
+		if err != nil || appID < 0 {
+			common.ApiErrorT(c, "Invalid parameters")
+			return
+		}
+		wallet, err := model.ReadAppWallet(user.Id, appID)
+		if err != nil {
+			appProxyError(c, err)
+			return
+		}
+		if appID > 0 {
+			common.ApiSuccess(c, model.UserWithAppQuota{User: *user, AppQuota: wallet.Quota, AppUsedQuota: wallet.UsedQuota, AppCredits: wallet.Credits, AppUsedCredits: wallet.UsedCredits, QuotaPerCredit: wallet.QuotaPerCredit})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

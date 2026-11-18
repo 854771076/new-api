@@ -34,6 +34,12 @@ interface StatusConfig {
  * Status badge configuration
  */
 export const STATUS_CONFIG: Record<TopupStatus, StatusConfig> = {
+  failed: { variant: 'danger', label: 'Failed' },
+  processing: { variant: 'warning', label: 'Processing' },
+  reconciliation_required: {
+    variant: 'warning',
+    label: 'Order confirmation is pending',
+  },
   success: {
     variant: 'success',
     label: 'Success',

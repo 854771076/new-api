@@ -298,8 +298,300 @@ paths:
                   code_challenge_methods_supported: { type: array, items: { type: string } }
                   claims_supported: { type: array, items: { type: string } }
 
+  /api/app-proxy/users:
+    post:
+      summary: Provision an independent proxy user (admin user:write)
+      description: Trusted backend verifies the native identity first. The App issuer must match exactly. Retries return the same immutable App user; disabled accounts are never reactivated.
+      security: [{ adminPAT: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id, issuer, subject]
+              properties:
+                app_id: {type: integer, minimum: 1}
+                issuer: {type: string, format: uri}
+                subject: {type: string}
+      responses:
+        "200": {description: Success envelope with data.user_id, app_id, identity_source=proxy and status; no credentials}
+        "403": {description: Insufficient role/scope or invalid App ownership}
+        "409": {description: Conflicting immutable identity}
+  /api/app-proxy/users/{user_id}/wallet:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: Read specified-user wallet (admin user:read)
+      security: [{adminPAT: []}]
+      responses:
+        "200":
+          description: Normalized wallet in data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean}
+                  data: {$ref: '#/components/schemas/AppWallet'}
+        "403": {description: Wrong user/App/source or insufficient authority}
+  /api/app-proxy/users/{user_id}/keys:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: List masked App keys (admin api_key:read)
+      security: [{adminPAT: []}]
+      parameters:
+        - {name: status, in: query, schema: {type: integer}}
+        - {name: p, in: query, schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+      responses:
+        "200": {description: Success envelope data.items and data.total; key is always masked}
+    post:
+      summary: Create or stage a recoverable key (admin api_key:write)
+      description: Key ownership is immutable. old_token_id stages rotation, preserving the old key. Limited-key rotation is rejected until shared budget continuity is available. The returned secret is server-only; save and verify before committing rotation.
+      security: [{adminPAT: []}]
+      parameters:
+        - {$ref: '#/components/parameters/OperationId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string, maxLength: 100}
+                expired_time: {type: integer, description: '-1 means no expiry'}
+                remain_quota: {type: integer, minimum: 0}
+                unlimited_quota: {type: boolean}
+                model_limits_enabled: {type: boolean}
+                model_limits: {type: string}
+                allow_ips: {type: string}
+                group: {type: string}
+                old_token_id: {type: integer, minimum: 1}
+      responses:
+        "200": {description: Success envelope with issued key; Cache-Control no-store}
+        "409": {description: Operation conflict or limited rotation unsupported}
+  /api/app-proxy/users/{user_id}/keys/{token_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: token_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    put:
+      summary: Update name, remaining quota or enabled status (admin api_key:write)
+      security: [{adminPAT: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: {type: integer, enum: [1,2]}
+                name: {type: string, maxLength: 100}
+                remain_quota: {type: integer, minimum: 0}
+      responses:
+        "200": {description: Success envelope}
+  /api/app-proxy/users/{user_id}/keys/{token_id}/commit-rotation:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: token_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    post:
+      summary: Commit a saved and verified replacement (admin api_key:write)
+      security: [{adminPAT: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [replacement_key]
+              properties:
+                replacement_key: {type: string, writeOnly: true}
+      responses:
+        "200": {description: Old key revoked; repeat commit is idempotent}
+  /api/app-proxy/users/{user_id}/checkout:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    post:
+      summary: Open a specified-user cashier (admin billing:write)
+      description: Proxy users support Waffo Pancake top-up and one-time products only; subscriptions are rejected even on a dual-mode App. The server freezes the financial snapshot before any provider effect. An uncertain result must reuse the same request ID or be reconciled; browser redirects never prove payment.
+      security: [{adminPAT: []}]
+      parameters:
+        - {$ref: '#/components/parameters/OperationId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [app_id, purchase_type, payment_method]
+              properties:
+                app_id: {type: integer, minimum: 1}
+                purchase_type: {type: string, enum: [topup, product]}
+                payment_method: {type: string, const: waffo_pancake}
+                amount: {type: integer, minimum: 1}
+                product_id: {type: integer, minimum: 1}
+      responses:
+        "200": {description: Stable order_id, status, frozen quota/credits and provider checkout link when available}
+        "409": {description: Request ID reused with changed parameters}
+  /api/app-proxy/users/{user_id}/orders/{order_id}:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: order_id, in: path, required: true, schema: {type: string}}
+    get:
+      summary: Read the exact durable order (admin billing:read)
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: Success envelope data with actual order state; historical reads remain available when the App is disabled}
+        "404": {description: No order belonging to this user and App}
+  /oauth/wallet:
+    get:
+      summary: Normalized token-owner App wallet (api:read)
+      security: [{bearerAuth: []}]
+      responses:
+        "200":
+          description: Success envelope with the normalized wallet in data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: {type: boolean}
+                  data: {$ref: '#/components/schemas/AppWallet'}
+  /oauth/orders:
+    get:
+      summary: Token-owner orders for the fixed App (api:read)
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: p, in: query, schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+      responses:
+        "200": {description: Success envelope data.items and total; historical orders without ratio snapshots return null credits}
+  /oauth/orders/{order_id}:
+    get:
+      summary: Exact token-owner order status (api:read)
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: order_id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: Success envelope data with order_id, user_id, app_id and actual order status}
+        "403": {description: Wrong scope, App disabled or OAuth disabled}
+        "404": {description: No matching order in this user's App}
+
+  /api/app-proxy/users/{user_id}/catalog:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: 'catalog (admin billing:read)'
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: 'Raw App products, nullable credits, empty plans, subscription_supported false and configured payment_methods'}
+  /api/app-proxy/users/{user_id}/pricing:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: 'pricing (admin user:read)'
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: 'Raw App pricing catalog filtered to its whitelist; includes quota_per_credit'}
+  /api/app-proxy/users/{user_id}/logs:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: 'logs (admin log:read)'
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: 'Legacy redacted log-list shape scoped to the fixed user and App'}
+  /api/app-proxy/users/{user_id}/orders:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: 'orders (admin billing:read)'
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: 'Success envelope data.items, total, page, page_size; optional keyword and p filters'}
+  /api/app-proxy/users/{user_id}/topup-preview:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    post:
+      summary: Server-priced App top-up preview
+      security: [{adminPAT: []}]
+      description: Admin billing:read. Explicit app_id is required in the body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, payment_method, app_id]
+              properties:
+                app_id: {type: integer, minimum: 1}
+                amount: {type: integer, minimum: 1}
+                payment_method: {type: string, const: waffo_pancake}
+      responses:
+        "200": {description: Success envelope data with money, currency, quota, credits and quota_per_credit}
+  /oauth/topup/preview:
+    post:
+      summary: Server-priced App top-up preview
+      security: [{bearerAuth: []}]
+      description: OAuth api:read. User and App derive from the token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, payment_method]
+              properties:
+                app_id: {type: integer, minimum: 1}
+                amount: {type: integer, minimum: 1}
+                payment_method: {type: string, const: waffo_pancake}
+      responses:
+        "200": {description: Success envelope data with money, currency, quota, credits and quota_per_credit}
+
 components:
+  parameters:
+    ProxyUserId: {name: user_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    AppId: {name: app_id, in: query, required: true, schema: {type: integer, minimum: 1}}
+    OperationId: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 128}}
+  schemas:
+    AppWallet:
+      type: object
+      required: [user_id, app_id, identity_source, quota, used_quota, quota_per_credit, credits, used_credits, capabilities]
+      properties:
+        user_id: {type: integer}
+        app_id: {type: integer}
+        identity_source: {type: string, enum: [proxy, platform]}
+        quota: {type: integer, description: 'Remaining quota; may be negative debt. Never subtract used_quota again.'}
+        used_quota: {type: integer}
+        quota_per_credit: {type: [integer, 'null'], minimum: 1, maximum: 9007199254740991}
+        credits: {type: [string, 'null'], description: 'Exact decimal, truncated toward zero to at most six fraction digits. Check negative raw quota for tiny debt.'}
+        used_credits: {type: [string, 'null']}
+        request_count: {type: [integer, 'null']}
+        statistics_window: {type: [string, 'null']}
+        capabilities:
+          type: object
+          required: [subscription_supported]
+          properties:
+            subscription_supported: {type: boolean, description: 'Always false for a proxy user'}
   securitySchemes:
+    adminPAT:
+      type: http
+      scheme: bearer
+      bearerFormat: Personal access token
+      description: 'Server-only admin nap_ token with the operation scope. app_id does not restrict its administrative authority.'
     basicAuth:
       type: http
       scheme: basic

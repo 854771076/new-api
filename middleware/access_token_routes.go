@@ -41,6 +41,26 @@ func accessTokenScopeRule(scope string) accessTokenRouteRule {
 // Casbin-guarded routes declare themselves through
 // DeclareAccessTokenPermissionRoute when they are registered.
 var accessTokenRouteRules = map[string]accessTokenRouteRule{
+	"POST /api/app-proxy/users/:user_id/checkout":                       accessTokenScopeRule("billing:write"),
+	"GET /api/app-proxy/users/:user_id/orders/:order_id":                accessTokenScopeRule("billing:read"),
+	"POST /api/user/self/app-checkout":                                  accessTokenScopeRule("wallet:write"),
+	"GET /api/user/self/orders/:order_id":                               accessTokenScopeRule("wallet:read"),
+	"POST /api/app-proxy/users":                                         accessTokenScopeRule("user:write"),
+	"GET /api/app-proxy/users/:user_id/wallet":                          accessTokenScopeRule("user:read"),
+	"POST /api/app-proxy/users/:user_id/keys":                           accessTokenScopeRule("api_key:write"),
+	"GET /api/app-proxy/users/:user_id/keys":                            accessTokenScopeRule("api_key:read"),
+	"PUT /api/app-proxy/users/:user_id/keys/:token_id":                  accessTokenScopeRule("api_key:write"),
+	"POST /api/app-proxy/users/:user_id/keys/:token_id/commit-rotation": accessTokenScopeRule("api_key:write"),
+	"POST /api/user/self/app-topup-preview":                             accessTokenScopeRule("wallet:read"),
+	"POST /api/app-proxy/users/:user_id/topup-preview":                  accessTokenScopeRule("billing:read"),
+	"GET /api/app-proxy/users/:user_id/pricing":                         accessTokenScopeRule("user:read"),
+	"GET /api/app-proxy/users/:user_id/catalog":                         accessTokenScopeRule("billing:read"),
+	"GET /api/app-proxy/users/:user_id/logs":                            accessTokenScopeRule("log:read"),
+	"GET /api/user/self/apps":                                           accessTokenScopeRule("wallet:read"),
+	"GET /api/user/self/app-catalog":                                    accessTokenScopeRule("wallet:read"),
+	"GET /api/user/self/orders":                                         accessTokenScopeRule("wallet:read"),
+	"GET /api/app-proxy/users/:user_id/orders":                          accessTokenScopeRule("billing:read"),
+	"GET /api/user/self/wallet":                                         accessTokenScopeRule("wallet:read"),
 	// router/api-router.go: top level
 	"GET /api/models":                     accessTokenScopeRule("profile:read"),
 	"GET /api/status/test":                accessTokenScopeRule("log:read"),

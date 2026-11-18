@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test';
 // Reuse the workspace's installed DOM harness; production stays Ant Design-only.
-import { JSDOM } from '../../../../../../web/node_modules/jsdom/lib/api.js';
+import { JSDOM } from '../../../../../../../../../../web/node_modules/jsdom/lib/api.js';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost' });
 const savedGlobals = new Map();

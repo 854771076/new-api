@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import type { User } from '@supabase/supabase-js';
 import { persistGatewaySession, discardGatewayCallbackSession } from '@/lib/gateway-session';
+import { getProxyAccount, usesProxyMode } from '@/lib/gateway-proxy';
 
 export const runtime = 'nodejs';
 
@@ -58,7 +59,8 @@ export async function GET(request: NextRequest) {
     if (sanitized.error || !sanitized.data.session || sanitized.data.session.provider_token || sanitized.data.session.provider_refresh_token) {
       throw new Error('Cookie session could not be sanitized');
     }
-    await persistGatewaySession(data.session, verifiedUser);
+    if (await usesProxyMode()) await getProxyAccount();
+    else await persistGatewaySession(data.session, verifiedUser);
   } catch {
     if (data.session && verifiedUser) {
       await discardGatewayCallbackSession(data.session, verifiedUser).catch(() => undefined);

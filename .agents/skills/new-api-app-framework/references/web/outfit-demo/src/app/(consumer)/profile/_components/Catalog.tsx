@@ -47,7 +47,8 @@ function CatalogSection(props: {
 }
 
 export function Catalog(props: {
-  paymentMethod: PaymentMethod;
+  subscriptionSupported?: boolean;
+  paymentMethod: PaymentMethod | null;
   disabled: boolean;
   onPurchase: (purchase: Purchase) => void;
 }) {
@@ -58,16 +59,16 @@ export function Catalog(props: {
   return (
     <div className="space-y-4">
       <p className="text-sm text-base-content/70">
-        每次购买 1 份，限购与支付结果以结算为准。当前付款方式：{paymentMethodLabels[props.paymentMethod] ?? props.paymentMethod}。
+        每次购买 1 份，限购与支付结果以结算为准。当前付款方式：{props.paymentMethod ? paymentMethodLabels[props.paymentMethod] ?? props.paymentMethod : '暂无可用付款方式'}。
       </p>
-      <CatalogSection title="套餐" loading={catalog.loading} error={catalog.error}
+      {props.subscriptionSupported !== false && <><CatalogSection title="套餐" loading={catalog.loading} error={catalog.error}
         empty={!catalog.data?.plans.length} onRetry={retry}>
         {catalog.data?.plans.map((plan) => (
           <article key={plan.id} className="card card-sm min-w-0 bg-base-200">
             <div className="card-body gap-3">
               <h3 className="card-title wrap-anywhere">{plan.title}</h3>
               <p className="tabular-nums">价格：{formatPrice(plan.price_amount, plan.currency)}</p>
-              <p>套餐到账：{plan.total_amount === 0 ? '不限' : formatCredits(plan.total_amount)}</p>
+              <p>套餐到账：{plan.total_amount === 0 ? '不限' : formatCredits(plan.total_amount, plan.credits)}</p>
               <p>有效期：{plan.duration_value} {durationLabels[plan.duration_unit] ?? plan.duration_unit}</p>
               <p>重置周期：{plan.quota_reset_period ? (resetLabels[plan.quota_reset_period] ?? plan.quota_reset_period) : '未提供'}</p>
               <p className="text-sm text-base-content/70">
@@ -77,7 +78,7 @@ export function Catalog(props: {
               <div className="card-actions mt-auto">
                 <button type="button" className="btn btn-outline w-full"
                   disabled={props.disabled || (props.paymentMethod === 'balance' && !plan.allow_balance_pay)}
-                  onClick={() => props.onPurchase({ kind: 'plan', item: plan, payment_method: props.paymentMethod })}>
+                  onClick={() => { if (props.paymentMethod) props.onPurchase({ kind: 'plan', item: plan, payment_method: props.paymentMethod }); }}>
                   购买套餐
                 </button>
               </div>
@@ -85,7 +86,7 @@ export function Catalog(props: {
           </article>
         ))}
       </CatalogSection>
-      <p className="text-sm text-base-content/70">套餐生效情况可在「我的余额」中查看余额变化。</p>
+      <p className="text-sm text-base-content/70">套餐生效情况可在「我的余额」中查看余额变化。</p></>}
       <CatalogSection title="商品" loading={catalog.loading} error={catalog.error}
         empty={!catalog.data?.products.length} onRetry={retry}>
         {catalog.data?.products.map((product) => (
@@ -94,13 +95,13 @@ export function Catalog(props: {
               <h3 className="card-title wrap-anywhere">{product.name}</h3>
               {product.description ? <p className="whitespace-pre-wrap wrap-anywhere text-base-content/70">{product.description}</p> : null}
               <p className="tabular-nums">价格：{formatPrice(product.price_amount, product.currency)}</p>
-              <p>到账金额：{formatCredits(product.quota_amount)}</p>
+              <p>到账金额：{formatCredits(product.quota_amount, product.credits)}</p>
               <p className="text-sm text-base-content/70">
                 每人限购：{product.max_purchase_per_user === 0 ? '不限' : `${product.max_purchase_per_user} 份`}
               </p>
               <div className="card-actions mt-auto">
                 <button type="button" className="btn btn-outline w-full" disabled={props.disabled}
-                  onClick={() => props.onPurchase({ kind: 'product', item: product, payment_method: props.paymentMethod })}>
+                  onClick={() => { if (props.paymentMethod) props.onPurchase({ kind: 'product', item: product, payment_method: props.paymentMethod }); }}>
                   购买商品
                 </button>
               </div>

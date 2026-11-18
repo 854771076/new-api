@@ -95,6 +95,22 @@ export function useUsersColumns(): ColumnDef<User>[] {
         meta: { mobileOrder: 10 },
       },
       {
+        accessorKey: 'identity_source',
+        header: t('User source'),
+        cell: ({ row }) => (
+          <span>
+            {t(
+              row.original.identity_source === 'proxy'
+                ? 'Proxy users'
+                : 'Platform users'
+            )}
+            {row.original.owner_app_id
+              ? ` · App #${row.original.owner_app_id}`
+              : ''}
+          </span>
+        ),
+      },
+      {
         accessorKey: 'username',
         header: t('Username'),
         cell: ({ row }) => {
@@ -204,7 +220,9 @@ export function useUsersColumns(): ColumnDef<User>[] {
               header: t('App Quota'),
               cell: ({ row }) => (
                 <span className='text-muted-foreground tabular-nums'>
-                  {formatQuota(row.original.app_quota ?? 0)}
+                  {row.original.app_credits != null
+                    ? `${row.original.app_credits} ${t('Credits')}`
+                    : formatQuota(row.original.app_quota ?? 0)}
                 </span>
               ),
               enableSorting: false,
@@ -216,7 +234,9 @@ export function useUsersColumns(): ColumnDef<User>[] {
               header: t('App Used'),
               cell: ({ row }) => (
                 <span className='text-muted-foreground tabular-nums'>
-                  {formatQuota(row.original.app_used_quota ?? 0)}
+                  {row.original.app_used_credits != null
+                    ? `${row.original.app_used_credits} ${t('Credits')}`
+                    : formatQuota(row.original.app_used_quota ?? 0)}
                 </span>
               ),
               enableSorting: false,

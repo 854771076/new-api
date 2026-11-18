@@ -6,7 +6,6 @@ import { useState, useMemo, useEffect, useRef } from 'react';
 import { MediaCard } from '@/components/MediaCard';
 import { CharacterUploader } from '@/components/CharacterUploader';
 import { GarmentUploader } from '@/components/GarmentUploader';
-import { QUOTA_PER_UNIT } from '@/lib/constants';
 import { Sparkles, Upload, Search, X, ChevronLeft, ChevronRight } from 'lucide-react';
 
 type Item = { id: string; name: string; subtitle?: string; signedUrl?: string | null };
@@ -27,6 +26,9 @@ type ModelOption = {
 
 type QuoteData = {
   credits: number;
+  quote_id: string;
+  estimated_quota: number;
+  estimated_credits: string | null;
   item_count: number;
   unparsed_count: number;
 };
@@ -101,10 +103,6 @@ function Chip({
   );
 }
 
-function formatCredits(value: number): string {
-  return `$${(value / QUOTA_PER_UNIT).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 // 平台超时/网关异常可能返回非 JSON（HTML/空响应），直接 res.json() 会抛 SyntaxError 并吞掉提示。
 type Envelope = { success?: boolean; message?: string; data?: unknown };
 async function readEnvelope(res: Response): Promise<Envelope> {
@@ -168,7 +166,11 @@ export function StudioClient({
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
 
   // 同一向导会话内保持稳定，重试也复用同一幂等键，避免重复下单
-  const [idempotencyKey] = useState(() => crypto.randomUUID());
+  const generationRequest = useRef({ input: '', key: '' });
+  const quoteRequest = useRef(0);
+  const [quotedInput, setQuotedInput] = useState('');
+  const quoteInput = JSON.stringify({ character_id: charId, outfit_ids: outfitIds, pose_id: poseId, model: modelId, size, quality, prompt_extra: promptExtra.trim() || undefined });
+  const quoteValid = quote !== null && quotedInput === quoteInput && !quoteErr;
 
   useEffect(() => {
     if (charUploadOpen) charDialog.current?.showModal();
@@ -241,13 +243,15 @@ export function StudioClient({
 
   async function loadQuote() {
     if (!charId || outfitIds.length === 0 || !poseId) return;
+    const request = ++quoteRequest.current;
+    const input = quoteInput;
     setQuoteLoading(true);
     setQuoteErr(null);
     try {
       const res = await fetch('/api/generate/quote', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ character_id: charId, outfit_ids: outfitIds, pose_id: poseId }),
+        body: input,
       });
       const data: Envelope = await readEnvelope(res);
       if (res.status === 401) {
@@ -259,17 +263,20 @@ export function StudioClient({
           ? data.message
           : failureMessage(res, '报价获取失败，请稍后重试'));
       }
+      if (request !== quoteRequest.current) return;
       setQuote(data.data as QuoteData);
+      setQuotedInput(input);
     } catch (e) {
-      setQuoteErr(e instanceof Error ? e.message : String(e));
+      if (request === quoteRequest.current) setQuoteErr(e instanceof Error ? e.message : String(e));
     } finally {
-      setQuoteLoading(false);
+      if (request === quoteRequest.current) setQuoteLoading(false);
     }
   }
 
   async function handleGenerate() {
-    if (loading || !charId || outfitIds.length === 0 || !poseId) return;
+    if (loading || quoteLoading || !quoteValid || !charId || outfitIds.length === 0 || !poseId) return;
     if (!models.some((m) => m.model_id === modelId)) return;
+    if (generationRequest.current.input !== quoteInput) generationRequest.current = { input: quoteInput, key: crypto.randomUUID() };
     setLoading(true);
     setErr(null);
     try {
@@ -284,10 +291,17 @@ export function StudioClient({
           size,
           quality,
           prompt_extra: promptExtra.trim() || undefined,
-          idempotency_key: idempotencyKey,
+          idempotency_key: generationRequest.current.key,
+          quote_id: quote?.quote_id,
         }),
       });
       const data: Envelope = await readEnvelope(res);
+      if (res.status === 409 && data.data) {
+        setQuote(data.data as QuoteData);
+        setQuotedInput(quoteInput);
+        setErr('报价或输入已变化，请确认最新报价后再次生成。');
+        return;
+      }
       if (res.status === 401) {
         router.replace('/login?error=session_expired');
         return;
@@ -620,14 +634,14 @@ export function StudioClient({
                     <span className="min-w-0 wrap-anywhere">{quoteErr}</span>
                     <button type="button" className="btn btn-ghost min-h-11" onClick={loadQuote}>重试</button>
                   </div>
-                ) : quote ? (
+                ) : quoteValid && quote ? (
                   <div className="space-y-1 text-sm">
-                    <p>预计消耗：<strong className="text-lg tabular-nums">{formatCredits(quote.credits)}</strong></p>
+                    <p>预计消耗：<strong className="text-lg tabular-nums">{quote.estimated_credits == null ? `${quote.estimated_quota} quota` : `${quote.estimated_credits} 积分`}</strong>，实际扣费以网关结算为准。</p>
                     <p className="text-base-content/70">共 {quote.item_count} 套服装，其中 {quote.unparsed_count} 套个人服装将在生成时自动解析。</p>
                     <p className="text-xs text-base-content/60">最终以网关按模型实际用量计费为准；报价仅用于提交前确认，重复提交同一选择不会重复生成。</p>
                   </div>
                 ) : (
-                  <p className="text-sm text-base-content/70">暂无报价</p>
+                  <button type="button" className="btn btn-outline" onClick={loadQuote}>获取当前报价</button>
                 )}
               </div>
             </div>
@@ -678,7 +692,7 @@ export function StudioClient({
             {err ? (
               <div role="alert" className="alert alert-error alert-soft text-sm">
                 <span className="min-w-0 wrap-anywhere">{err} <Link href="/profile" className="link">查看余额</Link></span>
-                <button type="button" className="btn btn-ghost min-h-11" disabled={loading || !modelReady} onClick={handleGenerate}>重试</button>
+                <button type="button" className="btn btn-ghost min-h-11" disabled={loading || !modelReady || !quoteValid || quoteLoading} onClick={handleGenerate}>重试</button>
               </div>
             ) : null}
 
@@ -686,7 +700,7 @@ export function StudioClient({
               <button type="button" className="btn btn-ghost min-h-11 gap-2" onClick={() => goToStep(3)}>
                 <ChevronLeft size={16} aria-hidden="true" />上一步
               </button>
-              <button type="button" className="btn btn-primary min-h-12 gap-2" disabled={loading || !modelReady || quoteLoading} onClick={handleGenerate}>
+              <button type="button" className="btn btn-primary min-h-12 gap-2" disabled={loading || !modelReady || !quoteValid || quoteLoading} onClick={handleGenerate}>
                 {loading ? <span className="loading loading-spinner loading-sm" aria-hidden="true" /> : <Sparkles size={18} aria-hidden="true" />}
                 {loading ? '生成中…' : '确认生成'}
               </button>

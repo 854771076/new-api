@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation';
 import { LoginCard } from '@/components/login-card';
 import { createServerSupabase } from '@/lib/supabase/server';
+import { config } from '@/lib/config';
 
 export default async function LoginPage({
   searchParams,
@@ -16,7 +17,7 @@ export default async function LoginPage({
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
       <div className="w-full max-w-md">
-        <LoginCard errorCode={error} />
+        <LoginCard errorCode={error} mode={config.integrationMode} />
       </div>
     </div>
   );

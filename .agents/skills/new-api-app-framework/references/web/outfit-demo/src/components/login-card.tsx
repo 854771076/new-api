@@ -11,9 +11,22 @@ const ERROR_MESSAGES: Record<string, string> = {
   missing_code: '登录回调缺少授权码，请重新登录。',
 };
 
-export function LoginCard({ errorCode }: { errorCode?: string }) {
+export function LoginCard({ errorCode, mode = 'proxy' }: { errorCode?: string; mode?: string }) {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  async function nativeLogin(event: React.SubmitEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true); setErr(null);
+    try {
+      const response = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+      if (!response.ok) { setErr('登录未完成'); return; }
+      window.location.assign('/studio');
+    } catch { setErr('登录未完成'); }
+    finally { setLoading(false); setPassword(''); }
+  }
 
   const errorMessage = errorCode
     ? (Object.hasOwn(ERROR_MESSAGES, errorCode) ? ERROR_MESSAGES[errorCode] : '登录未完成，请重试。')
@@ -46,19 +59,24 @@ export function LoginCard({ errorCode }: { errorCode?: string }) {
           <p className="text-base leading-relaxed text-base-content/70">让灵感成为下一套造型。<br />选择人物、服装与姿势，开启你的创作。</p>
         </div>
         <div className="divider my-0" />
-        <div className="flex w-full items-start gap-3">
+        {(mode === 'proxy' || mode === 'dual') && <form className="w-full space-y-3" onSubmit={nativeLogin}>
+          <label className="form-control block">邮箱<input className="input input-bordered w-full" type="email" autoComplete="username" value={email} onChange={event => setEmail(event.target.value)} required maxLength={320} /></label>
+          <label className="form-control block">密码<input className="input input-bordered w-full" type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} required maxLength={1024} /></label>
+          <button className="btn btn-primary w-full" disabled={loading} type="submit">登录</button>
+        </form>}
+        {(mode === 'oauth' || mode === 'dual') && <div className="flex w-full items-start gap-3">
           <ShieldCheck size={24} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
           <div className="space-y-1">
             <p className="font-medium">使用 new-api 账户安全登录</p>
             <p className="text-sm leading-relaxed text-base-content/70">前往 new-api 完成授权，本应用不收集你的账户密码。</p>
           </div>
-        </div>
+        </div>}
         {errorMessage ? (
           <div role="alert" className="alert alert-error alert-soft w-full text-sm">
             <span>{errorMessage}</span>
           </div>
         ) : null}
-        <button
+        {(mode === 'oauth' || mode === 'dual') && <button
           type="button"
           className="btn btn-primary btn-block min-h-12 gap-3"
           disabled={loading}
@@ -67,13 +85,13 @@ export function LoginCard({ errorCode }: { errorCode?: string }) {
           {loading ? <span className="loading loading-spinner loading-sm" aria-hidden="true" /> : null}
           {errorCode ? '重新登录' : '使用 new-api 登录'}
           {!loading ? <ArrowRight size={18} aria-hidden="true" /> : null}
-        </button>
+        </button>}
         {err ? (
           <div role="alert" className="alert alert-error alert-soft w-full text-sm">
             <span>登录暂时无法完成，请稍后重试。</span>
           </div>
         ) : null}
-        <p className="text-center text-xs text-base-content/70">由 new-api 提供账户授权</p>
+        {(mode === 'oauth' || mode === 'dual') && <p className="text-center text-xs text-base-content/70">由 new-api 提供账户授权</p>}
       </div>
     </section>
   );

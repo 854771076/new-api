@@ -100,12 +100,7 @@ func createStripeSubscriptionOrder(ctx context.Context, user *model.User, plan *
 
 	reference := fmt.Sprintf("sub-stripe-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
 	referenceId := "sub_ref_" + common.Sha1([]byte(reference))
-
-	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId)
-	if err != nil {
-		logger.LogError(ctx, common.LogText("Stripe failed to create subscription payment link trade_no=%s plan_id=%d error=%q", referenceId, plan.Id, err.Error()))
-		return "", common.NewMessage("Failed to start payment")
-	}
+	referenceId = model.AppCheckoutTradeNo(ctx, referenceId)
 
 	order := &model.SubscriptionOrder{
 		AppId:           plan.AppId,
@@ -121,6 +116,12 @@ func createStripeSubscriptionOrder(ctx context.Context, user *model.User, plan *
 	if err := order.Insert(); err != nil {
 		return "", common.NewMessage("Failed to create order")
 	}
+	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId)
+	if err != nil {
+		logger.LogError(ctx, common.LogText("Stripe failed to create subscription payment link trade_no=%s plan_id=%d error=%q", referenceId, plan.Id, err.Error()))
+		return "", common.NewMessage("Failed to start payment")
+	}
+
 	return payLink, nil
 }
 

@@ -29,6 +29,7 @@ func setupOAuthPurchaseTestEnv(t *testing.T, scope string) *oauthExtTestEnv {
 	common.RedisEnabled = false
 	payment := operation_setting.GetPaymentSetting()
 	previousPayment := *payment
+	payment.DisableAppBalancePay = false
 	payment.ComplianceConfirmed = true
 	payment.ComplianceTermsVersion = operation_setting.CurrentComplianceTermsVersion
 	t.Cleanup(func() { *payment = previousPayment })
@@ -60,6 +61,7 @@ func setupOAuthPurchaseTestEnv(t *testing.T, scope string) *oauthExtTestEnv {
 		&model.AppProduct{},
 		&model.AppProductOrder{},
 		&model.TopUp{},
+		&model.AppCheckout{},
 		&model.Log{},
 	))
 

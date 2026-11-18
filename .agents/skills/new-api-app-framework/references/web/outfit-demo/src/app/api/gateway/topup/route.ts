@@ -9,6 +9,6 @@ export async function POST(request: NextRequest) {
     requireGatewayOrigin(request);
     const parsed = gatewayTopupSchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) throw new GatewayError(400, 'Amount must be an integer from 1 to 10000 and payment_method must be a supported payment method.', 'BAD_REQUEST_INVALID_BODY');
-    return gatewaySuccess(await fetchGatewayTopup(parsed.data));
+    return gatewaySuccess(await fetchGatewayTopup(parsed.data, { requestId: request.headers.get('Idempotency-Key') ?? undefined }));
   } catch (error) { return gatewayFailure(error); }
 }

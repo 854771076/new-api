@@ -13,11 +13,11 @@ This skill is the standard for building an external **Web** application that use
 
 Choose new-api OAuth/OIDC when the user explicitly wants new-api sign-in or delegated authorization. Both modes may coexist; retain working OAuth integrations during migration. Read **Integration choice and current capability gate** in `references/standards/identity.md` before choosing endpoints or running bootstrap.
 
-**Product boundary:** dual mode provides independent user populations, not account linking. Proxy users have dedicated gateway user IDs and assets; never reuse an OAuth user's mapping or merge by email/Supabase UUID. Proxy mode supports App wallet balance, top-ups and one-time quota products only, **not subscriptions**. Enforce this at reads, checkout, admin grants and relay funding; OAuth subscriptions remain available to OAuth users. A key's quota/window limit caps spending and does not create a subscription or wallet funds. These are target contracts, subject to the capability gate below.
+**Product boundary:** dual mode provides independent user populations, not account linking. Proxy users have dedicated gateway user IDs and assets; never reuse an OAuth user's mapping or merge by email/Supabase UUID. Proxy mode supports App wallet balance, top-ups and one-time quota products only, **not subscriptions**. Enforce this at reads, checkout, admin grants and relay funding; OAuth subscriptions remain available to OAuth users. A key's quota/window limit caps spending and does not create a subscription or wallet funds. Verify the deployed capability gate below.
 
-A natural person using multiple Apps has a separate proxy gateway user ID per App. The proxy account has immutable App ownership: never create another App's key for that account or reuse it across Apps. Existing OAuth/platform account behavior is unchanged. Provisioning must implement the atomic, recoverable identity contract in `references/standards/identity.md`; existing ordinary user creation is insufficient. Rotation must preserve the shared spending budget described in `references/standards/relay.md`. Use the separate normalized wallet contract in `references/standards/billing.md`; legacy OAuth platform/App fields keep their meanings.
+A natural person using multiple Apps has a separate proxy gateway user ID per App. The proxy account has immutable App ownership: never create another App's key for that account or reuse it across Apps. Existing OAuth/platform account behavior is unchanged. Provisioning must implement the atomic, recoverable identity contract in `references/standards/identity.md`; existing ordinary user creation is insufficient. Rotation must preserve the shared spending budget described in `references/standards/relay.md`. Use the separate normalized wallet contract in `references/standards/billing.md`; legacy OAuth platform/App fields keep their meanings. That reference also defines signed debt display, the OAuth order-read surface, stable checkout IDs with recoverable idempotency across supported payment branches, and proxy-account ownership filtering; verify these capabilities before treating them as available.
 
-**Current capability gate:** the shipped reference app and bootstrap still implement OAuth. App-bound API keys, specified-user PAT checkout, mode switches, and the unified credit APIs are planned work, not shipped contracts. Verify the target server's actual capabilities before using them. Describe missing capabilities explicitly; do not invent routes, bill an ordinary key against an App pool, or silently switch the user back to OAuth. A documented preference does not make a planned endpoint available.
+**Current capability gate:** this branch implements proxy provisioning, immutable App-bound personal keys, admin-PAT checkout, normalized wallets, exact credit display and a proxy-first Supabase reference. This does not mean an older deployed gateway has these contracts. Probe the configured App and use the routes in `references/standards/api-contract.md`; fail explicitly if unavailable. Never silently fall back to OAuth or a platform AI key. Proxy payments currently support Waffo Pancake top-ups and one-time products. Limited-key rotation is rejected until shared budget continuity is available. Real hosted-payment acceptance still requires sandbox credentials; local tests are not a release guarantee.
 
 ## Default Stack
 
@@ -102,7 +102,7 @@ The `newapi-cli` npm package bundles **both** `newapi-cli` and `new-api-app-fram
 
 ## Step 0: Environment Bootstrap
 
-Install the applicable toolchain. The bootstrap and provider checks below are the existing **OAuth path**; they create/reconcile `custom:newapi` and must not run as prerequisites for Supabase-native proxy mode. For proxy mode, verify the existing Supabase login, backend secret storage, trusted user mapping, and actual key/checkout capabilities instead.
+Install the applicable toolchain. Bootstrap defaults to proxy prerequisite validation and migrations, with process environment variables configured as in the reference README. Use `-Mode oauth` / `--mode oauth` explicitly for the provider setup below. The provider checks are the **OAuth path**; they create/reconcile `custom:newapi` and must not run as prerequisites for Supabase-native proxy mode. For proxy mode, verify the existing Supabase login, backend secret storage, trusted user mapping, and actual key/checkout capabilities instead.
 
 ### 0.1 One command with optional auto-install
 
@@ -187,7 +187,7 @@ The remaining login instructions and local-acceptance commands in this step appl
 
 ### Local acceptance
 
-Tunnel the **gateway**, not the frontend; full flow, symptoms, and Supabase URL configuration: `references/standards/local-acceptance.md`. Re-run the append below whenever the tunnel hostname changes.
+For OAuth with hosted Supabase, tunnel the **gateway**. Native proxy acceptance also needs a public HTTPS App origin (`APP_ORIGIN`) and, for a local Supabase stack, an exact public Auth issuer; full flow, symptoms, and Supabase URL configuration: `references/standards/local-acceptance.md`. Re-run the append below whenever the tunnel hostname changes.
 
 ```powershell
 # Windows / PowerShell — append the tunnel callback to the OAuth app
@@ -218,7 +218,7 @@ All AI traffic goes to `/v1/*`. Proxy mode attaches the authenticated user's bac
 
 ## Step 4: Users, Quota, and Payments
 
-Proxy mode uses verified specified-user management and payment contracts with a backend-only admin PAT. Existing self-payment and `/api/token/*` routes act on the PAT owner; adding `user_id` does not make them delegated APIs. App-bound keys, specified-user checkout and returned credit fields remain capability-gated planned work. Full current contract and limits: `references/standards/billing.md`.
+Proxy mode uses verified specified-user management and payment contracts with a backend-only admin PAT. Existing self-payment and `/api/token/*` routes act on the PAT owner; adding `user_id` does not make them delegated APIs. App-bound keys, specified-user checkout and returned credit fields are implemented on this branch; verify deployed support. Full current contract and limits: `references/standards/billing.md`.
 
 Proxy mode is balance-only even on dual-mode Apps. Its subscription capability is false; hide subscription UI and reject subscription reads, purchases, admin grants and subscription funding on the server. A balance shortfall must fail, never consume a residual App/platform subscription. Keep proxy and OAuth user IDs, orders and assets independent.
 
@@ -380,4 +380,4 @@ Each OAuth App in new-api can restrict which AI models are available:
 ai_model_whitelist = '["gpt-4o-mini","gpt-4o"]'
 ```
 
-For OAuth calls, the relay enforces this through `service.CheckOAuthAppModelWhitelist()`. Ordinary API keys currently bypass this App policy; App-bound-key enforcement is planned and must be verified before claiming proxy-mode App isolation.
+For OAuth calls, the relay enforces this through `service.CheckOAuthAppModelWhitelist()`. App-bound proxy keys also enforce App status, key mode and model whitelist. Ordinary platform keys keep their existing platform behavior. Verify the target server supports App-bound keys.

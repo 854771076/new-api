@@ -28,6 +28,7 @@ import {
   DataTablePage,
   useDataTable,
 } from '@/components/data-table'
+import { Button } from '@/components/ui/button'
 import { useMediaQuery } from '@/hooks'
 import { useActiveApp } from '@/hooks/use-active-app'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
@@ -69,6 +70,7 @@ export function UsersTable() {
   const columns = useUsersColumns()
   const { refreshTrigger } = useUsers()
   const isMobile = useMediaQuery('(max-width: 640px)')
+  const [identitySource, setIdentitySource] = useState('')
   const [sorting, setSorting] = useState<SortingState>([])
 
   const {
@@ -144,6 +146,7 @@ export function UsersTable() {
       groupFilter,
       sortParams,
       refreshTrigger,
+      identitySource,
     ],
     queryFn: async () => {
       const hasFilter = globalFilter?.trim()
@@ -155,6 +158,7 @@ export function UsersTable() {
         p: pagination.pageIndex + 1,
         page_size: pagination.pageSize,
         app_id: appId > 0 ? appId : undefined,
+        identity_source: identitySource || undefined,
         ...sortParams,
       }
 
@@ -182,7 +186,10 @@ export function UsersTable() {
       }
     },
     placeholderData: (previousData, previousQuery) =>
-      previousQuery?.queryKey[1] === appId ? previousData : undefined,
+      previousQuery?.queryKey[1] === appId &&
+      previousQuery.queryKey.at(-1) === identitySource
+        ? previousData
+        : undefined,
   })
 
   const users = data?.items || []
@@ -220,49 +227,69 @@ export function UsersTable() {
   })
 
   return (
-    <DataTablePage
-      table={table}
-      columns={columns}
-      isLoading={isLoading}
-      isFetching={isFetching}
-      emptyTitle={t('No Users Found')}
-      emptyDescription={t(
-        'No users available. Try adjusting your search or filters.'
-      )}
-      skeletonKeyPrefix='users-skeleton'
-      applyHeaderSize
-      toolbarProps={{
-        searchPlaceholder: t('Filter by username, name or email...'),
-        searchDebounceMs: 500,
-        filters: [
-          {
-            columnId: 'status',
-            title: t('Status'),
-            options: getUserStatusOptions(t),
-            singleSelect: true,
-          },
-          {
-            columnId: 'role',
-            title: t('Role'),
-            options: getUserRoleOptions(t),
-            singleSelect: true,
-          },
-          {
-            columnId: 'group',
-            title: t('User Group'),
-            options: (groupsData?.data ?? []).map((group) => ({
-              label: group,
-              value: group,
-            })),
-            singleSelect: true,
-          },
-        ],
-      }}
-      getRowClassName={(row, { isMobile }) => {
-        if (!isDisabledUserRow(row.original)) return undefined
-        return isMobile ? DISABLED_ROW_MOBILE : DISABLED_ROW_DESKTOP
-      }}
-      bulkActions={<DataTableBulkActions table={table} />}
-    />
+    <>
+      <div className='mb-2 flex gap-2'>
+        {[
+          ['', 'All'],
+          ['proxy', 'Proxy users'],
+          ['platform', 'Platform users'],
+        ].map(([source, label]) => (
+          <Button
+            key={source}
+            variant={identitySource === source ? 'default' : 'outline'}
+            onClick={() => {
+              setIdentitySource(source)
+              onPaginationChange({ ...pagination, pageIndex: 0 })
+            }}
+          >
+            {t(label)}
+          </Button>
+        ))}
+      </div>
+      <DataTablePage
+        table={table}
+        columns={columns}
+        isLoading={isLoading}
+        isFetching={isFetching}
+        emptyTitle={t('No Users Found')}
+        emptyDescription={t(
+          'No users available. Try adjusting your search or filters.'
+        )}
+        skeletonKeyPrefix='users-skeleton'
+        applyHeaderSize
+        toolbarProps={{
+          searchPlaceholder: t('Filter by username, name or email...'),
+          searchDebounceMs: 500,
+          filters: [
+            {
+              columnId: 'status',
+              title: t('Status'),
+              options: getUserStatusOptions(t),
+              singleSelect: true,
+            },
+            {
+              columnId: 'role',
+              title: t('Role'),
+              options: getUserRoleOptions(t),
+              singleSelect: true,
+            },
+            {
+              columnId: 'group',
+              title: t('User Group'),
+              options: (groupsData?.data ?? []).map((group) => ({
+                label: group,
+                value: group,
+              })),
+              singleSelect: true,
+            },
+          ],
+        }}
+        getRowClassName={(row, { isMobile }) => {
+          if (!isDisabledUserRow(row.original)) return undefined
+          return isMobile ? DISABLED_ROW_MOBILE : DISABLED_ROW_DESKTOP
+        }}
+        bulkActions={<DataTableBulkActions table={table} />}
+      />
+    </>
   )
 }

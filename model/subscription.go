@@ -144,8 +144,9 @@ func InvalidateSubscriptionPlanCache(planId int) {
 
 // Subscription plan
 type SubscriptionPlan struct {
-	Id    int `json:"id"`
-	AppId int `json:"app_id" gorm:"not null;default:0;index"`
+	Credits *string `json:"credits" gorm:"-"`
+	Id      int     `json:"id"`
+	AppId   int     `json:"app_id" gorm:"not null;default:0;index"`
 
 	Title    string `json:"title" gorm:"type:varchar(128);not null"`
 	Subtitle string `json:"subtitle" gorm:"type:varchar(255);default:''"`
@@ -494,6 +495,12 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 	if userId <= 0 {
 		return nil, errors.New("invalid user id")
 	}
+	if err := RequireNativeUserTx(tx, userId); err != nil {
+		if errors.Is(err, ErrProxyIdentity) {
+			return nil, ErrProxySubscriptionUnsupported
+		}
+		return nil, err
+	}
 	if plan.MaxPurchasePerUser > 0 {
 		var count int64
 		if err := tx.Model(&UserSubscription{}).
@@ -597,9 +604,25 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		if order.Status != common.TopUpStatusPending {
 			return ErrSubscriptionOrderStatusInvalid
 		}
-		plan, err := GetSubscriptionPlanById(order.PlanId)
-		if err != nil {
-			return err
+		var plan *SubscriptionPlan
+		if strings.Contains(order.TradeNo, "-REQUEST-") {
+			var checkout AppCheckout
+			if err := tx.Where("order_id = ?", order.TradeNo).First(&checkout).Error; err != nil {
+				return err
+			}
+			plan = &SubscriptionPlan{}
+			if checkout.PlanSnapshot == "" {
+				return ErrAppOperationConflict
+			}
+			if err := common.UnmarshalJsonStr(checkout.PlanSnapshot, plan); err != nil {
+				return err
+			}
+		} else {
+			var err error
+			plan, err = GetSubscriptionPlanById(order.PlanId)
+			if err != nil {
+				return err
+			}
 		}
 		// The order is the source of truth for the app scope: never derive it
 		// from a mutable plan or the payment request body.
@@ -769,7 +792,7 @@ func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
 
 // PurchaseSubscriptionWithBalance creates a subscription by deducting the wallet
 // quota of the given app scope (appId 0 = platform user quota).
-func PurchaseSubscriptionWithBalance(userId int, planId int, appId int) error {
+func PurchaseSubscriptionWithBalance(userId int, planId int, appId int, checkout ...*AppCheckout) error {
 	if userId <= 0 || planId <= 0 {
 		return errors.New("invalid userId or planId")
 	}
@@ -863,7 +886,7 @@ func PurchaseSubscriptionWithBalance(userId int, planId int, appId int) error {
 			UserId:          userId,
 			PlanId:          plan.Id,
 			Money:           plan.PriceAmount,
-			TradeNo:         tradeNo,
+			TradeNo:         CheckoutOrderTradeNo(checkout, tradeNo),
 			PaymentMethod:   PaymentMethodBalance,
 			PaymentProvider: PaymentProviderBalance,
 			Status:          common.TopUpStatusSuccess,
@@ -985,6 +1008,9 @@ func UserActiveSubscriptionsAllowWalletOverflow(userId int, appId int) (bool, er
 // GetAllUserSubscriptions returns all subscriptions (active and expired) for a
 // user in one app scope (appId 0 = platform console).
 func GetAllUserSubscriptions(userId int, appId int) ([]SubscriptionSummary, error) {
+	if err := RequireNativeUserTx(DB, userId); err != nil {
+		return nil, err
+	}
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
 	}
@@ -1005,6 +1031,9 @@ func GetAllUserSubscriptions(userId int, appId int) ([]SubscriptionSummary, erro
 // user holds across app scopes (app_id > 0), excluding the platform console.
 // It is the self-service per-app view and never crosses user boundaries.
 func GetUserAppSubscriptions(userId int) ([]SubscriptionSummary, error) {
+	if err := RequireNativeUserTx(DB, userId); err != nil {
+		return nil, err
+	}
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
 	}
@@ -1406,6 +1435,12 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 // PreConsumeUserSubscription pre-consumes from any active subscription total quota
 // inside the given app scope (appId 0 = platform).
 func PreConsumeUserSubscription(requestId string, userId int, appId int, modelName string, quotaType int, amount int64) (*SubscriptionPreConsumeResult, error) {
+	if err := RequireNativeUserTx(DB, userId); err != nil {
+		if errors.Is(err, ErrProxyIdentity) {
+			return nil, ErrProxySubscriptionUnsupported
+		}
+		return nil, err
+	}
 	if userId <= 0 {
 		return nil, errors.New("invalid userId")
 	}

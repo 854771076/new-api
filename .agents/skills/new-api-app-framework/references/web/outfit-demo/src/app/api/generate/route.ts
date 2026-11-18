@@ -3,14 +3,14 @@
 // 由前端轮询 /api/generate/[id]/advance 单步推进。网关 relay 负责实际 App 钱包计费。
 import 'server-only';
 import { createHash } from 'node:crypto';
-import { type NextRequest } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { config } from '@/lib/config';
 import { GatewayError } from '@/lib/gateway-errors';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
 import { gatewaySuccess, gatewayFailure, requireGatewayOrigin } from '@/lib/gateway-bff';
-import { buildQuote } from '@/lib/tryon/quote';
+import { buildQuote, quoteConfirmation } from '@/lib/tryon/quote';
 import { PIPELINE_VERSION } from '@/lib/tryon/prompts';
 import { resolveTryonModel } from '@/lib/tryon/models';
 import { resolveQuotePrices } from '@/lib/tryon/pricing';
@@ -28,6 +28,7 @@ const bodySchema = z.object({
   size: z.enum(['auto', '1024x1024', '1024x1536', '1536x1024']).optional(),
   quality: z.string().trim().min(1).max(50).optional(),
   prompt_extra: z.string().max(500).optional(),
+  quote_id: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   // 客户端为同一组选择生成的稳定键；缺省时由服务端按入参派生，仍可去重完全相同的重复提交。
   idempotency_key: z.string().min(8).max(200).optional(),
 }).strict();
@@ -82,7 +83,7 @@ export async function POST(req: NextRequest) {
 
   // 2. 模型与报价：模型必须可用；报价按当前素材实时计算并冻结进任务。
   const [imageModelRes, visionModelRes] = await Promise.all([
-    resolveTryonModel(supabase, 'image'),
+    resolveTryonModel(supabase, 'image', body.model),
     resolveTryonModel(supabase, 'vision'),
   ]);
   if (body.model !== imageModelRes.model) {
@@ -94,6 +95,14 @@ export async function POST(req: NextRequest) {
   }
   const quality = body.quality?.trim() || imageModelRes.defaultQuality?.trim() || undefined;
   const quote = buildQuote(candidates, await resolveQuotePrices(imageModelRes.model, visionModelRes.model));
+  const quoteId = quoteConfirmation(quote, user.id, { ...body, size, quality });
+  if (body.quote_id !== quoteId) {
+    return NextResponse.json({ success: false, message: '报价或输入已变化，请确认最新报价后重新提交', error_code: 'QUOTE_CHANGED', data: {
+      quote, quote_id: quoteId, estimated_quota: quote.total_quota, estimated_credits: quote.estimated_credits,
+      quota_per_credit: quote.quota_per_credit, estimate_only: true, credits: quote.total_quota,
+      item_count: quote.item_count, unparsed_count: quote.unparsed_garment_ids.length,
+    } }, { status: 409, headers: { 'Cache-Control': 'no-store' } });
+  }
 
   // 3. 一次性创建任务（部分唯一索引兜底并发重复提交）。
   const { data: pendingRow, error: insertErr } = await admin
@@ -144,6 +153,7 @@ function deriveIdempotencyKey(body: z.infer<typeof bodySchema>): string {
     m: body.model,
     s: body.size ?? null,
     q: body.quality ?? null,
+    prompt: body.prompt_extra?.trim() || null,
   });
   // SHA-256 而不是短整型哈希：同一用户累积大量任务时避免生日碰撞把不同选择误判为重复提交。
   const digest = createHash('sha256').update(basis).digest('hex');

@@ -7,6 +7,7 @@ import { config } from '@/lib/config';
 import { createServerSupabase } from '@/lib/supabase/server';
 import { createAdminSupabase } from '@/lib/supabase/admin';
 import { GatewayError } from '@/lib/gateway-errors';
+import { getProxyAIKey, usesProxyMode } from '@/lib/gateway-proxy';
 
 const sessionClaimsSchema = z.object({ sub: z.string().uuid(), session_id: z.string().uuid() });
 const gatewayClaimsSchema = z.object({
@@ -37,7 +38,7 @@ function jwtPayload(token: string): unknown {
 function sessionKey(session: Session, user: User): SessionKey {
   const claims = sessionClaimsSchema.safeParse(jwtPayload(session.access_token));
   const identities = user.identities?.filter(value => value.provider === 'custom:newapi') ?? [];
-  if (identities.length !== 1) throw expired();
+  if (identities.length !== 1 || user.identities?.some(value => value.provider !== 'custom:newapi')) throw expired();
   const identity = identities[0];
   const audience: unknown = identity.identity_data?.aud;
   const clientId = Array.isArray(audience) ? audience[0] : undefined;
@@ -147,6 +148,7 @@ async function acquireVault(key: SessionKey, vault: Vault, owner: string): Promi
 }
 
 export async function getGatewayAccessToken(options: { force?: boolean; expectedToken?: string } = {}): Promise<string> {
+  if (await usesProxyMode()) return getProxyAIKey();
   const context = await authorizedSession();
   const deadline = Date.now() + 12_000;
   const owner = randomUUID();
@@ -231,6 +233,12 @@ export async function discardGatewayCallbackSession(session: Session, user: User
 }
 
 export async function logoutGatewaySession(): Promise<void> {
+  if (await usesProxyMode()) {
+    const supabase = await createServerSupabase();
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
+    if (error) throw unavailable();
+    return;
+  }
   const context = await authorizedSession();
   const owner = randomUUID();
   const deadline = Date.now() + 12_000;

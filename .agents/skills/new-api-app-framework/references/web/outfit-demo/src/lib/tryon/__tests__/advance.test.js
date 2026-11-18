@@ -176,7 +176,7 @@ test('runs board + tryon and marks the task succeeded', async () => {
   expect(res).toMatchObject({ status: 'succeeded', stage: 'done', result_bucket: 'media-user', result_path: 'p/result.png' });
   expect(boardCalls).toHaveLength(1);
   const update = updates.find((u) => u.table === 'outfit_generations');
-  expect(update.input).toMatchObject({ status: 'succeeded', stage: 'done', result_path: 'p/result.png', charged_quota: 15000 });
+  expect(update.input).toMatchObject({ status: 'succeeded', stage: 'done', result_path: 'p/result.png', charged_quota: null });
 });
 
 test('rolls back parsed garments and marks failed on generation error', async () => {
@@ -188,7 +188,7 @@ test('rolls back parsed garments and marks failed on generation error', async ()
   expect(rollbackCalls).toHaveLength(1);
   expect(rollbackCalls[0]).toEqual([outfitId]);
   const update = updates.find((u) => u.table === 'outfit_generations');
-  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'generate fail', refunded_quota: 15000 });
+  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'generate fail', refunded_quota: null });
 });
 
 test('marks the task failed when persona generation fails', async () => {
@@ -199,7 +199,7 @@ test('marks the task failed when persona generation fails', async () => {
   expect(parseCalls).toHaveLength(0);
   expect(boardCalls).toHaveLength(0);
   const update = updates.find((u) => u.table === 'outfit_generations');
-  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'persona fail', refunded_quota: 15000 });
+  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'persona fail', refunded_quota: null });
 });
 
 test('marks the task failed and rolls back when a garment parse fails', async () => {
@@ -213,5 +213,5 @@ test('marks the task failed and rolls back when a garment parse fails', async ()
   expect(rollbackCalls[0]).toEqual([outfitId]);
   expect(boardCalls).toHaveLength(0);
   const update = updates.find((u) => u.table === 'outfit_generations');
-  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'parse fail', refunded_quota: 15000 });
+  expect(update.input).toMatchObject({ status: 'failed', stage: 'failed', error: 'parse fail', refunded_quota: null });
 });

@@ -46,6 +46,22 @@ func OAuthTopupCheckout(c *gin.Context) {
 		return
 	}
 
+	dispatchScopedCheckout(c, user, scopedCheckoutRequest{AppId: app.Id, Kind: "topup", Amount: body.Amount, PaymentMethod: body.PaymentMethod})
+
+}
+
+// oauthTopupCheckoutError maps top-up checkout failures to OAuth responses.
+// Business validation messages become 400; upstream failures become 502.
+func oauthTopupCheckoutError(c *gin.Context, err error) {
+	var msg *common.Message
+	if errors.As(err, &msg) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "checkout_failed", "error_description": msg.Error()})
+		return
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": "checkout_failed", "error_description": "checkout service temporarily unavailable"})
+}
+
+func dispatchAppTopup(c *gin.Context, user *model.User, app *model.OAuthApp, body scopedCheckoutRequest) {
 	paymentMethod := strings.TrimSpace(body.PaymentMethod)
 	if paymentMethod == "" {
 		paymentMethod = model.PaymentMethodWaffoPancake
@@ -57,7 +73,7 @@ func OAuthTopupCheckout(c *gin.Context) {
 			oauthCheckoutError(c, err)
 			return
 		}
-		quota, err := creditAppTopUpWithBalance(user.Id, app.Id, body.Amount)
+		quota, err := creditAppTopUpWithBalance(user.Id, app.Id, body.Amount, model.AppCheckoutFromContext(c.Request.Context()))
 		if err != nil {
 			oauthCheckoutError(c, err)
 			return
@@ -128,15 +144,4 @@ func OAuthTopupCheckout(c *gin.Context) {
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app top-up"})
 	}
-}
-
-// oauthTopupCheckoutError maps top-up checkout failures to OAuth responses.
-// Business validation messages become 400; upstream failures become 502.
-func oauthTopupCheckoutError(c *gin.Context, err error) {
-	var msg *common.Message
-	if errors.As(err, &msg) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "checkout_failed", "error_description": msg.Error()})
-		return
-	}
-	c.JSON(http.StatusBadGateway, gin.H{"error": "checkout_failed", "error_description": "checkout service temporarily unavailable"})
 }

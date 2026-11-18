@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,10 +20,20 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// OAuthAppResponse is the public view of an OAuth app. It never includes the
+// OAuthAppResponse is the management view of an App. It never includes the
 // client secret or the AI model whitelist (the latter is an internal policy
 // field that is not meaningful to admin users without context).
 type OAuthAppResponse struct {
+	ProxyIssuer            string `json:"proxy_issuer"`
+	ClientSecretConfigured bool   `json:"client_secret_configured"`
+	APIKeyEnabled          bool   `json:"api_key_enabled"`
+	OAuthEnabled           bool   `json:"oauth_enabled"`
+	QuotaPerCredit         *int64 `json:"quota_per_credit"`
+	MarketplaceVisible     bool   `json:"marketplace_visible"`
+	MarketplaceDescription string `json:"marketplace_description"`
+	MarketplaceURL         string `json:"marketplace_url"`
+	MarketplaceSort        int    `json:"marketplace_sort"`
+
 	Id                     int      `json:"id"`
 	Name                   string   `json:"name"`
 	LogoURL                string   `json:"logo_url"`
@@ -41,6 +52,15 @@ type OAuthAppResponse struct {
 
 func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
 	return &OAuthAppResponse{
+		ClientSecretConfigured: app.ClientSecretHash != "",
+		APIKeyEnabled:          app.APIKeyEnabled,
+		ProxyIssuer:            app.ProxyIssuer,
+		OAuthEnabled:           app.OAuthAllowed(),
+		QuotaPerCredit:         app.QuotaPerCredit,
+		MarketplaceVisible:     app.MarketplaceVisible,
+		MarketplaceDescription: app.MarketplaceDescription,
+		MarketplaceURL:         app.MarketplaceURL,
+		MarketplaceSort:        app.MarketplaceSort,
 		Id:                     app.Id,
 		Name:                   app.Name,
 		LogoURL:                app.LogoURL,
@@ -60,11 +80,20 @@ func toOAuthAppResponse(app *model.OAuthApp) *OAuthAppResponse {
 
 // CreateOAuthAppRequest is the request body for creating an OAuth app.
 type CreateOAuthAppRequest struct {
+	ProxyIssuer            string `json:"proxy_issuer"`
+	APIKeyEnabled          *bool  `json:"api_key_enabled"`
+	OAuthEnabled           *bool  `json:"oauth_enabled"`
+	QuotaPerCredit         *int64 `json:"quota_per_credit"`
+	MarketplaceVisible     bool   `json:"marketplace_visible"`
+	MarketplaceDescription string `json:"marketplace_description"`
+	MarketplaceURL         string `json:"marketplace_url"`
+	MarketplaceSort        int    `json:"marketplace_sort"`
+
 	Name                   string   `json:"name" binding:"required"`
 	LogoURL                string   `json:"logo_url"`
-	RedirectURIs           []string `json:"redirect_uris" binding:"required"`
+	RedirectURIs           []string `json:"redirect_uris"`
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
-	Scopes                 []string `json:"scopes" binding:"required"`
+	Scopes                 []string `json:"scopes"`
 	SupabaseProjectRef     string   `json:"supabase_project_ref"`
 	AIModelWhitelist       []string `json:"ai_model_whitelist"`
 	PublicClient           bool     `json:"public_client"`
@@ -83,6 +112,10 @@ func CreateOAuthApp(c *gin.Context) {
 	req.Name = strings.TrimSpace(req.Name)
 	req.LogoURL = strings.TrimSpace(req.LogoURL)
 	req.SupabaseProjectRef = strings.TrimSpace(req.SupabaseProjectRef)
+	if err := validateProxyIssuer(strings.TrimSpace(req.ProxyIssuer)); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	req.WaffoPancakeReturnURL = strings.TrimSpace(req.WaffoPancakeReturnURL)
 	if req.Name == "" {
 		common.ApiErrorT(c, "App name is required")
@@ -97,6 +130,30 @@ func CreateOAuthApp(c *gin.Context) {
 		return
 	}
 
+	oauthEnabled := false
+	apiKeyEnabled := true
+	// Preserve legacy callers that explicitly submit OAuth configuration.
+	if req.OAuthEnabled == nil && req.APIKeyEnabled == nil && (len(req.RedirectURIs) > 0 || len(req.Scopes) > 0) {
+		oauthEnabled, apiKeyEnabled = true, false
+	}
+	if req.OAuthEnabled != nil {
+		oauthEnabled = *req.OAuthEnabled
+	}
+	if req.APIKeyEnabled != nil {
+		apiKeyEnabled = *req.APIKeyEnabled
+	}
+	if !oauthEnabled && !apiKeyEnabled {
+		common.ApiErrorT(c, "Enable at least one App integration mode")
+		return
+	}
+	if oauthEnabled && len(req.RedirectURIs) == 0 {
+		common.ApiErrorT(c, "At least one redirect URI is required")
+		return
+	}
+	if err := validateAppProductSettings(req.QuotaPerCredit, req.MarketplaceVisible, req.MarketplaceDescription, req.MarketplaceURL); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if err := validateOAuthRedirectURIs(req.RedirectURIs); err != nil {
 		common.ApiError(c, err)
 		return
@@ -105,7 +162,7 @@ func CreateOAuthApp(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := validateOAuthScopes(req.Scopes); err != nil {
+	if err := validateOAuthScopes(req.Scopes); oauthEnabled && err != nil {
 		common.ApiError(c, err)
 		return
 	}
@@ -118,21 +175,29 @@ func CreateOAuthApp(c *gin.Context) {
 	// Public clients authenticate with PKCE only and must not hold a secret.
 	clientSecret := ""
 	secretHash := ""
-	if !req.PublicClient {
+	if oauthEnabled && !req.PublicClient {
 		clientSecret = model.GenerateOAuthClientSecret()
 		secretHash = model.OAuthAppSecretHash(clientSecret)
 	}
 
 	app := &model.OAuthApp{
-		Name:                  req.Name,
-		LogoURL:               req.LogoURL,
-		ClientID:              clientID,
-		ClientSecretHash:      secretHash,
-		Status:                model.OAuthAppStatusEnabled,
-		CreatedBy:             c.GetInt("id"),
-		SupabaseProjectRef:    req.SupabaseProjectRef,
-		PublicClient:          req.PublicClient,
-		WaffoPancakeReturnURL: req.WaffoPancakeReturnURL,
+		APIKeyEnabled:          apiKeyEnabled,
+		ProxyIssuer:            strings.TrimSpace(req.ProxyIssuer),
+		OAuthEnabled:           &oauthEnabled,
+		QuotaPerCredit:         req.QuotaPerCredit,
+		MarketplaceVisible:     req.MarketplaceVisible,
+		MarketplaceDescription: strings.TrimSpace(req.MarketplaceDescription),
+		MarketplaceURL:         strings.TrimSpace(req.MarketplaceURL),
+		MarketplaceSort:        req.MarketplaceSort,
+		Name:                   req.Name,
+		LogoURL:                req.LogoURL,
+		ClientID:               clientID,
+		ClientSecretHash:       secretHash,
+		Status:                 model.OAuthAppStatusEnabled,
+		CreatedBy:              c.GetInt("id"),
+		SupabaseProjectRef:     req.SupabaseProjectRef,
+		PublicClient:           req.PublicClient,
+		WaffoPancakeReturnURL:  req.WaffoPancakeReturnURL,
 	}
 	if err := app.SetRedirectURIs(req.RedirectURIs); err != nil {
 		common.ApiError(c, err)
@@ -199,6 +264,16 @@ func GetOAuthApp(c *gin.Context) {
 
 // UpdateOAuthAppRequest is the request body for updating an OAuth app.
 type UpdateOAuthAppRequest struct {
+	ProxyIssuer   *string `json:"proxy_issuer"`
+	APIKeyEnabled *bool   `json:"api_key_enabled"`
+	OAuthEnabled  *bool   `json:"oauth_enabled"`
+	// RawMessage distinguishes omitted (keep) from null (clear).
+	QuotaPerCredit         json.RawMessage `json:"quota_per_credit"`
+	MarketplaceVisible     *bool           `json:"marketplace_visible"`
+	MarketplaceDescription *string         `json:"marketplace_description"`
+	MarketplaceURL         *string         `json:"marketplace_url"`
+	MarketplaceSort        *int            `json:"marketplace_sort"`
+
 	Name                   *string  `json:"name"`
 	LogoURL                *string  `json:"logo_url"`
 	RedirectURIs           []string `json:"redirect_uris"`
@@ -225,93 +300,141 @@ func UpdateOAuthApp(c *gin.Context) {
 		return
 	}
 
-	var name string
-	if req.Name != nil {
-		name = strings.TrimSpace(*req.Name)
-	}
-	var status int
-	if req.Status != nil {
-		status = *req.Status
-	}
-	if req.LogoURL != nil {
-		logo := strings.TrimSpace(*req.LogoURL)
-		req.LogoURL = &logo
-		if err := validateOAuthAppLogo(logo); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-	}
-
-	if err := validateOAuthRedirectURIs(req.RedirectURIs); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if err := validateOAuthRedirectURIs(req.PostLogoutRedirectURIs); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if err := validateOAuthScopes(req.Scopes); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if err := model.ValidateAIModelWhitelist(req.AIModelWhitelist); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-
-	app, err := model.UpdateOAuthApp(id, name, req.RedirectURIs, req.PostLogoutRedirectURIs, req.Scopes, status, req.PublicClient)
+	app, err := model.GetOAuthAppByID(id)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-
-	changed := false
-	if req.LogoURL != nil && app.LogoURL != *req.LogoURL {
-		app.LogoURL = *req.LogoURL
-		changed = true
-	}
-	if req.SupabaseProjectRef != nil {
-		ref := strings.TrimSpace(*req.SupabaseProjectRef)
-		if len(ref) > 64 {
-			common.ApiErrorT(c, "supabase_project_ref exceeds 64 characters")
+	if req.Name != nil {
+		app.Name = strings.TrimSpace(*req.Name)
+		if app.Name == "" {
+			common.ApiErrorT(c, "App name is required")
 			return
 		}
-		if app.SupabaseProjectRef != ref {
-			app.SupabaseProjectRef = ref
-			changed = true
+	}
+	if req.Status != nil {
+		if *req.Status != model.OAuthAppStatusEnabled && *req.Status != model.OAuthAppStatusDisabled {
+			common.ApiErrorT(c, "Invalid request parameters")
+			return
+		}
+		app.Status = *req.Status
+	}
+	if req.ProxyIssuer != nil {
+		app.ProxyIssuer = strings.TrimSpace(*req.ProxyIssuer)
+	}
+	if err := validateProxyIssuer(app.ProxyIssuer); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if req.APIKeyEnabled != nil {
+		app.APIKeyEnabled = *req.APIKeyEnabled
+	}
+	if req.OAuthEnabled != nil {
+		app.OAuthEnabled = req.OAuthEnabled
+	}
+	if app.IsEnabled() && !app.APIKeyEnabled && !app.OAuthAllowed() {
+		common.ApiErrorT(c, "Enable at least one App integration mode")
+		return
+	}
+	if req.QuotaPerCredit != nil {
+		if err := common.Unmarshal(req.QuotaPerCredit, &app.QuotaPerCredit); err != nil {
+			common.ApiErrorT(c, "Invalid App credit ratio")
+			return
 		}
 	}
-	if req.WaffoPancakeReturnURL != nil {
-		ref := strings.TrimSpace(*req.WaffoPancakeReturnURL)
-		if app.WaffoPancakeReturnURL != ref {
-			app.WaffoPancakeReturnURL = ref
-			changed = true
-		}
+	if req.MarketplaceVisible != nil {
+		app.MarketplaceVisible = *req.MarketplaceVisible
 	}
-	if req.AIModelWhitelist != nil {
-		if app.SetAIModelWhitelist(req.AIModelWhitelist) == nil {
-			changed = true
-		}
+	if req.MarketplaceDescription != nil {
+		app.MarketplaceDescription = strings.TrimSpace(*req.MarketplaceDescription)
 	}
-
-	if changed {
-		app.UpdatedAt = common.GetTimestamp()
-		if err := model.DB.Save(app).Error; err != nil {
+	if req.MarketplaceURL != nil {
+		app.MarketplaceURL = strings.TrimSpace(*req.MarketplaceURL)
+	}
+	if req.MarketplaceSort != nil {
+		app.MarketplaceSort = *req.MarketplaceSort
+	}
+	if err := validateAppProductSettings(app.QuotaPerCredit, app.MarketplaceVisible, app.MarketplaceDescription, app.MarketplaceURL); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if req.LogoURL != nil {
+		app.LogoURL = strings.TrimSpace(*req.LogoURL)
+		if err := validateOAuthAppLogo(app.LogoURL); err != nil {
 			common.ApiError(c, err)
 			return
 		}
 	}
-
-	// The database has committed the new state. Evict the cache so the whitelist
-	// and enablement checks observe it immediately; a disabled app also loses
-	// all refresh tokens, while its unexpired access tokens are rejected by
-	// service.ValidateOAuthAccessToken's enabled-app check.
-	service.InvalidateOAuthAppCache(app.ClientID)
-	if !app.IsEnabled() {
-		if err := model.RevokeOAuthRefreshTokensByApp(app.Id); err != nil {
-			common.SysError(common.LogText("failed to revoke oauth refresh tokens for app %d: %s", app.Id, err.Error()))
+	if req.SupabaseProjectRef != nil {
+		app.SupabaseProjectRef = strings.TrimSpace(*req.SupabaseProjectRef)
+		if len(app.SupabaseProjectRef) > 64 {
+			common.ApiErrorT(c, "supabase_project_ref exceeds 64 characters")
+			return
 		}
 	}
+	if req.WaffoPancakeReturnURL != nil {
+		app.WaffoPancakeReturnURL = strings.TrimSpace(*req.WaffoPancakeReturnURL)
+	}
+	if req.RedirectURIs != nil {
+		if err := validateOAuthRedirectURIs(req.RedirectURIs); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if err := app.SetRedirectURIs(req.RedirectURIs); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if req.PostLogoutRedirectURIs != nil {
+		if err := validateOAuthRedirectURIs(req.PostLogoutRedirectURIs); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if err := app.SetPostLogoutRedirectURIs(req.PostLogoutRedirectURIs); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if req.Scopes != nil {
+		if app.OAuthAllowed() {
+			if err := validateOAuthScopes(req.Scopes); err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
+		if err := app.SetScopes(req.Scopes); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	if app.OAuthAllowed() && (len(app.GetRedirectURIs()) == 0 || len(app.GetScopes()) == 0) {
+		common.ApiErrorT(c, "OAuth configuration is required")
+		return
+	}
+	if req.PublicClient != nil {
+		app.PublicClient = *req.PublicClient
+		if app.PublicClient {
+			app.ClientSecretHash = ""
+		}
+	}
+	if req.AIModelWhitelist != nil {
+		if err := model.ValidateAIModelWhitelist(req.AIModelWhitelist); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		if err := app.SetAIModelWhitelist(req.AIModelWhitelist); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	app.UpdatedAt = common.GetTimestamp()
+	if err := model.SaveOAuthAppSettings(app); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	// Unexpired access tokens also check the persisted OAuth mode on every request.
+	service.InvalidateOAuthAppCache(app.ClientID)
 
 	common.ApiSuccess(c, toOAuthAppResponse(app))
 }
@@ -540,4 +663,54 @@ func validateOAuthScopes(scopes []string) error {
 		seen[s] = struct{}{}
 	}
 	return nil
+}
+
+// validateAppProductSettings validates display metadata; it never changes accounting.
+func validateProxyIssuer(issuer string) error {
+	if issuer == "" {
+		return nil
+	}
+	u, err := url.Parse(issuer)
+	if err != nil || len(issuer) > 2048 || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return common.NewMessage("Invalid parameters")
+	}
+	return nil
+}
+
+func validateAppProductSettings(ratio *int64, visible bool, description, visitURL string) error {
+	if ratio != nil && (*ratio <= 0 || *ratio > common.MaxWalletQuota) {
+		return common.NewMessage("Invalid App credit ratio")
+	}
+	if len(description) > 2000 {
+		return common.NewMessage("App description is too long")
+	}
+	visitURL = strings.TrimSpace(visitURL)
+	if visitURL == "" && !visible {
+		return nil
+	}
+	parsed, err := url.Parse(visitURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || len(visitURL) > 2048 {
+		return common.NewMessage("App visit URL must use HTTPS without credentials")
+	}
+	return nil
+}
+
+// GetAppMarketplace exposes only opted-in public display metadata.
+func GetAppMarketplace(c *gin.Context) {
+	type publicApp struct {
+		ID          int    `json:"id"`
+		Name        string `json:"name"`
+		LogoURL     string `json:"logo_url"`
+		Description string `json:"description" gorm:"column:marketplace_description"`
+		URL         string `json:"url" gorm:"column:marketplace_url"`
+	}
+	apps := make([]publicApp, 0)
+	if err := model.DB.Model(&model.OAuthApp{}).
+		Select("id", "name", "logo_url", "marketplace_description", "marketplace_url").
+		Where("marketplace_visible = ? AND status = ?", true, model.OAuthAppStatusEnabled).
+		Order("marketplace_sort ASC").Order("id ASC").Find(&apps).Error; err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, apps)
 }

@@ -2,6 +2,7 @@ import 'server-only';
 import { z } from 'zod';
 import { config } from '@/lib/config';
 import { getGatewayAccessToken } from '@/lib/gateway-session';
+import { proxyManagementRequest, usesProxyMode } from '@/lib/gateway-proxy';
 import { prepareReferenceImage } from '@/lib/generated-image';
 import { GatewayError, readGatewayError } from '@/lib/gateway-errors';
 import { gatewayCheckoutSchema, gatewayCheckoutResultSchema, gatewayTopupSchema,
@@ -20,8 +21,10 @@ function normalizeError(err: unknown): GatewayError {
 async function requestWithAuth(
   method: string,
   path: string,
-  opts: { body?: string | FormData; query?: Record<string, string | number | undefined>; accessToken?: string; signal?: AbortSignal } = {},
+  opts: { body?: string | FormData; query?: Record<string, string | number | undefined>; accessToken?: string; signal?: AbortSignal; requestId?: string } = {},
 ): Promise<Response> {
+  const proxy = await usesProxyMode();
+  if (proxy && path.startsWith('/oauth/')) return proxyManagementRequest(path, method, typeof opts.body === 'string' ? opts.body : undefined, opts.query, opts.requestId);
   const url = new URL(`${config.gatewayBaseUrl}${path}`);
   for (const [key, value] of Object.entries(opts.query ?? {})) {
     if (value !== undefined) url.searchParams.set(key, String(value));
@@ -33,7 +36,7 @@ async function requestWithAuth(
   // single 401 retry. Let fetch supply the multipart boundary on each send.
   const send = (token: string) => fetch(url, {
     method,
-    headers: { Authorization: `Bearer ${token}`, ...(typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}) },
+    headers: { Authorization: `Bearer ${token}`, ...(opts.requestId ? { 'Idempotency-Key': opts.requestId } : {}), ...(typeof opts.body === 'string' ? { 'Content-Type': 'application/json' } : {}) },
     body: opts.body, cache: 'no-store', redirect: 'error',
     signal: opts.signal
       ? AbortSignal.any([opts.signal, AbortSignal.timeout(path.startsWith('/v1/') ? 120_000 : 15_000)])
@@ -41,6 +44,7 @@ async function requestWithAuth(
   });
   try {
     const response = await send(firstToken);
+    if (proxy) return response;
     if (response.status !== 401) return response;
     await response.body?.cancel().catch(() => undefined);
     const refreshed = await getGatewayAccessToken({ force: true, expectedToken: firstToken });
@@ -69,6 +73,10 @@ const UNSUPPORTED_MESSAGE = '当前网关版本未启用该接口';
 // ===== OAuth 管理 API（access_token 可调用 /oauth/*） =====
 
 export interface GatewayUserinfo {
+  app_id?: number;
+  credits?: string | null;
+  used_credits?: string | null;
+  capabilities?: { subscription_supported: boolean };
   id: string;
   username?: string;
   display_name?: string;
@@ -110,6 +118,7 @@ export interface GatewayLogsResult {
 }
 
 export interface FetchGatewayOptions {
+  requestId?: string;
   /** Server-only hint; the current vault is authoritative. */
   accessToken?: string;
 }
@@ -123,8 +132,18 @@ export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<
   const json = await readJson(res);
   if (!json || typeof json !== 'object') throw new GatewayError(502, UNSUPPORTED_MESSAGE, 'UNSUPPORTED');
   const raw = json as Record<string, unknown>;
+  const walletResponse = await requestWithAuth('GET', '/oauth/wallet', { accessToken: opts?.accessToken });
+  if (!walletResponse.ok) throw await readGatewayError(walletResponse);
+  const walletJson = await readJson(walletResponse);
+  const envelope = walletJson as { data?: Record<string, unknown> } | null;
+  const wallet = envelope?.data ?? walletJson as Record<string, unknown> | null;
+  if (!wallet || typeof wallet.quota !== 'number') throw new GatewayError(502, 'Invalid wallet response.', 'UPSTREAM_INVALID_RESPONSE');
   // new-api 的 userinfo 遵循 OIDC 命名（sub / name），前端统一收敛成 id / display_name。
   return {
+    app_id: typeof wallet.app_id === 'number' ? wallet.app_id : undefined,
+    credits: typeof wallet.credits === 'string' ? wallet.credits : null,
+    used_credits: typeof wallet.used_credits === 'string' ? wallet.used_credits : null,
+    capabilities: wallet.capabilities as GatewayUserinfo['capabilities'],
     id: typeof raw.id === 'string' || typeof raw.id === 'number'
       ? String(raw.id)
       : typeof raw.sub === 'string' ? raw.sub : '',
@@ -132,8 +151,8 @@ export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<
     email: typeof raw.email === 'string' ? raw.email : undefined,
     quota: typeof raw.quota === 'number' ? raw.quota : undefined,
     used_quota: typeof raw.used_quota === 'number' ? raw.used_quota : undefined,
-    app_quota: typeof raw.app_quota === 'number' ? raw.app_quota : undefined,
-    app_used_quota: typeof raw.app_used_quota === 'number' ? raw.app_used_quota : undefined,
+    app_quota: wallet.quota,
+    app_used_quota: typeof wallet.used_quota === 'number' ? wallet.used_quota : undefined,
     request_count: typeof raw.request_count === 'number' ? raw.request_count : undefined,
     group: typeof raw.group === 'string' ? raw.group : undefined,
     subscription:
@@ -151,13 +170,22 @@ export async function fetchGatewayUserinfo(opts?: FetchGatewayOptions): Promise<
   };
 }
 
+export async function fetchGatewayOrder(orderId: string): Promise<unknown> {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(orderId)) throw new GatewayError(400, 'Invalid order ID.', 'INVALID_ORDER');
+  const response = await requestWithAuth('GET', `/oauth/orders/${orderId}`);
+  if (!response.ok) throw await readGatewayError(response);
+  const result = z.object({ success: z.literal(true), data: z.object({ order_id: z.literal(orderId), status: z.string(), app_id: z.number().int().nonnegative() }).passthrough() }).safeParse(await readJson(response));
+  if (!result.success) throw new GatewayError(502, 'Invalid order response.', 'UPSTREAM_INVALID_RESPONSE');
+  return result.data.data;
+}
+
 async function checkout(path: string, body: Record<string, unknown>, opts?: FetchGatewayOptions): Promise<GatewayCheckoutResult> {
-  const res = await requestWithAuth('POST', path, { body: JSON.stringify(body), accessToken: opts?.accessToken });
+  const res = await requestWithAuth('POST', path, { body: JSON.stringify(body), accessToken: opts?.accessToken, requestId: opts?.requestId });
   if (!res.ok) throw await readGatewayError(res);
   const parsed = gatewayCheckoutResultSchema.safeParse(await readJson(res));
   if (!parsed.success || (parsed.data.payment_method && parsed.data.payment_method !== body.payment_method) ||
       (body.payment_method === 'balance' && parsed.data.status !== 'success') ||
-      (body.payment_method !== 'balance' && parsed.data.status !== 'pending')) {
+      (body.payment_method !== 'balance' && !['pending', 'processing', 'reconciliation_required'].includes(parsed.data.status))) {
     throw new GatewayError(502, 'Invalid gateway checkout response.', 'UPSTREAM_INVALID_RESPONSE');
   }
   return { ...parsed.data, payment_method: body.payment_method as GatewayPaymentMethod };
@@ -169,6 +197,16 @@ export async function fetchGatewayTopup(
   const parsed = gatewayTopupSchema.safeParse(input);
   if (!parsed.success) throw new GatewayError(400, 'Invalid top-up request.', 'BAD_REQUEST_INVALID_BODY');
   return checkout('/oauth/topup/checkout', parsed.data, opts);
+}
+
+export async function fetchGatewayTopupPreview(input: {amount: number; payment_method: GatewayPaymentMethod}) {
+  const parsed = gatewayTopupSchema.safeParse(input);
+  if (!parsed.success) throw new GatewayError(400, 'Invalid top-up request.', 'BAD_REQUEST_INVALID_BODY');
+  const response = await requestWithAuth('POST', '/oauth/topup/preview', {body: JSON.stringify(parsed.data)});
+  if (!response.ok) throw await readGatewayError(response);
+  const result = z.object({success: z.literal(true), data: z.object({money: z.number().positive(), currency: z.string(), quota: z.number().int().nonnegative().safe(), credits: z.string().nullable()})}).safeParse(await readJson(response));
+  if (!result.success) throw new GatewayError(502, 'Invalid top-up preview.', 'UPSTREAM_INVALID_RESPONSE');
+  return result.data.data;
 }
 
 export async function fetchGatewayCatalog(opts?: FetchGatewayOptions): Promise<{ plans: GatewayPlan[]; products: GatewayProduct[] }> {
@@ -283,6 +321,9 @@ export interface GatewayPricingEntry {
 }
 
 export interface GatewayPricing {
+  quota_per_credit?: number | null;
+  app_id?: number;
+  identity_source?: string;
   data: GatewayPricingEntry[];
   group_ratio: Record<string, number>;
   usable_group: Record<string, string>;
@@ -313,6 +354,9 @@ export async function fetchGatewayPricing(opts?: FetchGatewayOptions): Promise<G
     group_ratio: z.record(z.string(), z.number()).optional().default({}),
     usable_group: z.record(z.string(), z.string()).optional().default({}),
     quota_per_unit: z.number().positive(),
+    quota_per_credit: z.number().int().positive().safe().nullable().optional(),
+    app_id: z.number().int().nonnegative().safe().optional(),
+    identity_source: z.string().optional(),
   }).safeParse(await readJson(res));
   if (!parsed.success) throw new GatewayError(502, 'Invalid gateway pricing response.', 'UPSTREAM_INVALID_RESPONSE');
   return {
@@ -320,6 +364,9 @@ export async function fetchGatewayPricing(opts?: FetchGatewayOptions): Promise<G
     group_ratio: parsed.data.group_ratio,
     usable_group: parsed.data.usable_group,
     quota_per_unit: parsed.data.quota_per_unit,
+    quota_per_credit: parsed.data.quota_per_credit,
+    app_id: parsed.data.app_id,
+    identity_source: parsed.data.identity_source,
   };
 }
 

@@ -53,6 +53,10 @@ func OAuthLogsList(c *gin.Context) {
 		return
 	}
 
+	renderAppLogs(c, user.Id, app.Id)
+}
+
+func renderAppLogs(c *gin.Context, userID, appID int) {
 	const maxPage = 10000
 	page := 1
 	if p, err := strconv.Atoi(c.Query("page")); err == nil && p > 0 {
@@ -68,7 +72,7 @@ func OAuthLogsList(c *gin.Context) {
 	}
 
 	startIdx := (page - 1) * pageSize
-	logs, total, err := model.GetUserLogs(user.Id, model.LogFilter{AppId: app.Id}, startIdx, pageSize)
+	logs, total, err := model.GetUserLogs(userID, model.LogFilter{AppId: appID}, startIdx, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query_failed", "error_description": "failed to query logs"})
 		return

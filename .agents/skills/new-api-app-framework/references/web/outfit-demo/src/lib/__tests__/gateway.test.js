@@ -11,6 +11,7 @@ mock.module('next/headers', () => ({ cookies: async () => ({ getAll: () => [], s
 mock.module('node:timers/promises', () => ({ setTimeout: async () => {} }));
 
 const testEnv = {
+  NEXT_PUBLIC_GATEWAY_INTEGRATION_MODE: 'oauth',
   NEXT_PUBLIC_SUPABASE_URL: 'https://supabase.example',
   NEXT_PUBLIC_SUPABASE_ANON_KEY: 'test-anon',
   SUPABASE_SECRET_KEY: 'test-service-role',
@@ -253,7 +254,7 @@ test.each([0, -1, 10_001, 1.5, '10', null])('topup rejects invalid amount %s bef
 });
 
 test.each([
-  { amount: 10, payment_method: 'stripe' },
+  { amount: 10, payment_method: 'unsupported' },
   { amount: 10, channel: 'balance' },
   { amount: 10, payment_method: 'balance', app_id: 99 },
 ])('topup rejects unsupported method and untrusted app selection', async body => {
@@ -419,6 +420,7 @@ test('catalog unwraps plan wrappers and account responses explicitly include app
     const path = new URL(url).pathname;
     if (path === '/oauth/subscription/plans') return Response.json({ plans: [{ plan }] });
     if (path === '/oauth/products') return Response.json({ products: [product] });
+    if (path === '/oauth/wallet') return Response.json({ success: true, data: { quota: 4, used_quota: 2, app_id: 3, capabilities: { subscription_supported: true } } });
     return Response.json({ sub: '42', quota: 100, used_quota: 20, app_quota: 4, app_used_quota: 2 });
   });
   expect(await fetchGatewayCatalog()).toEqual({ plans: [plan], products: [product] });
@@ -814,7 +816,9 @@ test('JSON gateway requests retain JSON Content-Type while bodyless calls omit i
   const upstream = jsonFetch({ status: 'success' });
   await fetchGatewayCheckout({ kind: 'product', id: 1, payment_method: 'balance' });
   expect(new Headers(upstream.mock.calls[0][1].headers).get('content-type')).toBe('application/json');
-  jsonFetch({ sub: '42' });
+  globalThis.fetch = mock(async url => new URL(url).pathname === '/oauth/wallet'
+    ? Response.json({ success: true, data: { quota: 4, used_quota: 2 } })
+    : Response.json({ sub: '42' }));
   await fetchGatewayUserinfo();
   expect(new Headers(globalThis.fetch.mock.calls[0][1].headers).get('content-type')).toBeNull();
 });
@@ -828,4 +832,11 @@ test('logout revokes the current stored refresh token, deletes its vault, and si
   expect(new URLSearchParams(upstream.mock.calls[0][1].body).get('token')).toBe('provider-refresh-original');
   expect(row).toBeNull();
   expect(signouts).toBe(1);
+});
+
+test('OAuth checkout forwards the original durable request ID', async () => {
+ await persistGatewaySession(session,user);
+ jsonFetch({status:'pending',order_id:'stable-order',checkout_url:'https://pay.example/order'});
+ await fetchGatewayCheckout({kind:'product',id:1,payment_method:'waffo_pancake'},{requestId:'durable-request-123'});
+ expect(globalThis.fetch.mock.calls[0][1].headers['Idempotency-Key']).toBe('durable-request-123');
 });

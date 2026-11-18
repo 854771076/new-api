@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	oauthAppCacheKeyPrefix = "oauth_app:"
+	oauthAppCacheKeyPrefix = "oauth_app:v2:"
 	oauthAppCacheTTL       = 5 * time.Minute
 )
 
@@ -25,6 +25,7 @@ var (
 type cachedOAuthApp struct {
 	id                 int
 	clientID           string
+	oauthEnabled       bool
 	status             int
 	aiModelWhitelist   string // JSON array string; "" means no restriction
 	supabaseProjectRef string
@@ -74,6 +75,7 @@ func LoadOAuthAppByClientID(clientID string) (*model.OAuthApp, error) {
 	cache := cachedOAuthApp{
 		id:                 app.Id,
 		clientID:           app.ClientID,
+		oauthEnabled:       app.OAuthAllowed(),
 		status:             app.Status,
 		aiModelWhitelist:   app.AIModelWhitelist,
 		supabaseProjectRef: app.SupabaseProjectRef,
@@ -139,6 +141,7 @@ func cachedOAuthAppToModel(c cachedOAuthApp) *model.OAuthApp {
 	return &model.OAuthApp{
 		Id:                 c.id,
 		ClientID:           c.clientID,
+		OAuthEnabled:       &c.oauthEnabled,
 		Status:             c.status,
 		AIModelWhitelist:   c.aiModelWhitelist,
 		SupabaseProjectRef: c.supabaseProjectRef,
@@ -154,6 +157,7 @@ func serializeCachedOAuthApp(c cachedOAuthApp) string {
 	data, err := common.Marshal(map[string]any{
 		"id":  c.id,
 		"cid": c.clientID,
+		"oe":  c.oauthEnabled,
 		"st":  c.status,
 		"wl":  c.aiModelWhitelist,
 		"pr":  c.supabaseProjectRef,
@@ -169,6 +173,7 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 	var payload struct {
 		ID  int    `json:"id"`
 		CID string `json:"cid"`
+		OE  *bool  `json:"oe"`
 		St  int    `json:"st"`
 		WL  string `json:"wl"`
 		PR  string `json:"pr"`
@@ -177,7 +182,7 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 	if err := common.UnmarshalJsonStr(raw, &payload); err != nil {
 		return nil
 	}
-	if payload.CID == "" || payload.ID <= 0 {
+	if payload.CID == "" || payload.ID <= 0 || payload.OE == nil {
 		// Entries written before the app id was cached cannot be used for
 		// app-scoped billing, so treat them as a cache miss and reload.
 		return nil
@@ -190,6 +195,7 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 	return &model.OAuthApp{
 		Id:                 payload.ID,
 		ClientID:           payload.CID,
+		OAuthEnabled:       payload.OE,
 		Status:             payload.St,
 		AIModelWhitelist:   payload.WL,
 		SupabaseProjectRef: payload.PR,

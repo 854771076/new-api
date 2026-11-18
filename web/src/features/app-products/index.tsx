@@ -25,6 +25,8 @@ import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { SectionPageLayout } from '@/components/layout'
+import { ActiveAppSwitcher } from '@/components/layout/components/active-app-switcher'
+import { AdminAppScope } from '@/components/layout/components/admin-app-scope'
 import { Button } from '@/components/ui/button'
 import { useActiveApp } from '@/hooks/use-active-app'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -37,7 +39,7 @@ import type { AppProduct } from './types'
 
 const PRODUCTS_PAGE_SIZE = 20
 
-export function AppProducts() {
+function AppProductsInner() {
   const { t } = useTranslation()
   const { appId, isPlatform } = useActiveApp()
   const queryClient = useQueryClient()
@@ -129,6 +131,7 @@ export function AppProducts() {
           {t('Product Management')}
         </SectionPageLayout.Title>
         <SectionPageLayout.Actions>
+          <ActiveAppSwitcher includeProxy />
           <div className='flex items-center gap-2'>
             <Button
               variant='outline'
@@ -206,5 +209,13 @@ export function AppProducts() {
         handleConfirm={handleDelete}
       />
     </>
+  )
+}
+
+export function AppProducts() {
+  return (
+    <AdminAppScope>
+      <AppProductsInner />
+    </AdminAppScope>
   )
 }

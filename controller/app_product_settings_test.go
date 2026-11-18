@@ -1,0 +1,792 @@
+package controller
+
+import (
+	"context"
+	"fmt"
+	"github.com/Calcium-Ion/go-epay/epay"
+	"github.com/QuantumNous/new-api/constant"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/stripe/stripe-go/v81"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+// Schema from v2026.11.12.4, used to exercise real upgrade migrations.
+type releasedProductApp struct {
+	Id                     int    `json:"id" gorm:"primaryKey"`
+	Name                   string `json:"name" gorm:"type:varchar(100);not null;index"`
+	LogoURL                string `json:"logo_url" gorm:"type:text;column:logo_url"`
+	ClientID               string `json:"client_id" gorm:"type:varchar(64);uniqueIndex;not null;column:client_id"`
+	ClientSecretHash       string `json:"-" gorm:"type:varchar(64);not null;column:client_secret_hash"`
+	RedirectURIs           string `json:"-" gorm:"type:text"` // JSON array of allowed redirect URIs
+	PostLogoutRedirectURIs string `json:"-" gorm:"type:text"` // JSON array of allowed post-logout redirect URIs
+	Scopes                 string `json:"-" gorm:"type:text"` // JSON array of allowed scopes
+	Status                 int    `json:"status" gorm:"type:int;default:1"`
+	CreatedBy              int    `json:"created_by" gorm:"type:int;not null;default:0;column:created_by"`
+	CreatedAt              int64  `json:"created_at" gorm:"type:bigint;autoCreateTime"`
+	UpdatedAt              int64  `json:"updated_at" gorm:"type:bigint;autoUpdateTime"`
+
+	SupabaseProjectRef string `json:"-" gorm:"type:varchar(64);column:supabase_project_ref"`
+
+	AIModelWhitelist string `json:"-" gorm:"type:text;column:ai_model_whitelist"`
+
+	PublicClient bool `json:"public_client" gorm:"column:public_client"`
+
+	WaffoPancakeReturnURL string `json:"-" gorm:"type:text;column:waffo_pancake_return_url"`
+}
+
+func (releasedProductApp) TableName() string { return "oauth_apps" }
+
+func TestAppProductSettingsDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		dsn := os.Getenv("TEST_MYSQL_DSN")
+		if kind == "postgres" {
+			dsn = os.Getenv("TEST_POSTGRES_DSN")
+		}
+		if kind != "sqlite" && dsn == "" {
+			t.Run(kind, func(t *testing.T) { t.Skip("external database DSN not configured") })
+			continue
+		}
+		for _, upgrade := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/upgrade=%t", kind, upgrade), func(t *testing.T) {
+				db, _ := newAuditTestDatabase(t, kind, dsn)
+				conn, err := db.DB()
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, conn.Close()) })
+				previous := model.DB
+				model.DB = db
+				t.Cleanup(func() { model.DB = previous })
+				var version string
+				query := "SELECT version()"
+				if kind == "sqlite" {
+					query = "SELECT sqlite_version()"
+				}
+				require.NoError(t, db.Raw(query).Scan(&version).Error)
+				t.Logf("database: %s", version)
+				if upgrade {
+					require.NoError(t, db.AutoMigrate(&releasedProductApp{}))
+					legacy := releasedProductApp{Name: "Legacy App", ClientID: "legacy-client", ClientSecretHash: "secret-hash", RedirectURIs: `["https://legacy.example/callback"]`, Scopes: `["openid"]`, Status: 1}
+					require.NoError(t, db.Create(&legacy).Error)
+				}
+				for range 2 {
+					require.NoError(t, db.AutoMigrate(&model.OAuthApp{}, &model.OAuthRefreshToken{}, &model.UserAppWallet{}))
+				}
+				if upgrade {
+					var legacy model.OAuthApp
+					require.NoError(t, db.Where("client_id = ?", "legacy-client").First(&legacy).Error)
+					assert.True(t, legacy.IsOAuthEnabled())
+					assert.False(t, legacy.APIKeyEnabled)
+					assert.Nil(t, legacy.QuotaPerCredit)
+					assert.False(t, legacy.MarketplaceVisible)
+					assert.Equal(t, "secret-hash", legacy.ClientSecretHash)
+					assert.Equal(t, []string{"https://legacy.example/callback"}, legacy.GetRedirectURIs())
+					duplicate := legacy
+					duplicate.Id = 0
+					require.Error(t, db.Create(&duplicate).Error, "client_id uniqueness survives migration")
+				}
+				router := gin.New()
+				router.POST("/api/oauth-apps/", CreateOAuthApp)
+				router.PUT("/api/oauth-apps/:id", UpdateOAuthApp)
+				router.GET("/api/app-marketplace", GetAppMarketplace)
+				create := accessTokenRequest(router, "POST", "/api/oauth-apps/", "", "", `{"name":"Proxy App","quota_per_credit":100,"marketplace_visible":true,"marketplace_description":"Public text","marketplace_url":"https://app.example"}`)
+				var result struct {
+					Success      bool
+					Data         OAuthAppResponse
+					ClientSecret string `json:"client_secret"`
+				}
+				require.NoError(t, common.Unmarshal(create.Body.Bytes(), &result))
+				require.True(t, result.Success, create.Body.String())
+				assert.False(t, result.Data.ClientSecretConfigured)
+				assert.False(t, result.Data.OAuthEnabled)
+				assert.True(t, result.Data.APIKeyEnabled)
+				assert.Empty(t, result.ClientSecret)
+				assert.EqualValues(t, 100, *result.Data.QuotaPerCredit)
+				appID := result.Data.Id
+				stored, err := model.GetOAuthAppByID(appID)
+				require.NoError(t, err)
+				assert.Empty(t, stored.ClientSecretHash)
+				cases := []struct {
+					body    string
+					success bool
+				}{
+					{`{"quota_per_credit":0,"name":"Must not persist"}`, false},
+					{`{"quota_per_credit":-1}`, false}, {`{"quota_per_credit":1.5}`, false}, {`{"quota_per_credit":9007199254740992}`, false},
+					{`{"marketplace_url":"javascript:alert(1)"}`, false}, {`{"marketplace_url":"http://app.example"}`, false}, {`{"marketplace_url":"https://user:pass@app.example"}`, false},
+					{`{"api_key_enabled":false}`, false}, {`{"oauth_enabled":true}`, false},
+					{`{"quota_per_credit":null}`, true},
+				}
+				for _, tc := range cases {
+					response := accessTokenRequest(router, "PUT", fmt.Sprintf("/api/oauth-apps/%d", appID), "", "", tc.body)
+					var envelope struct{ Success bool }
+					require.NoError(t, common.Unmarshal(response.Body.Bytes(), &envelope))
+					assert.Equal(t, tc.success, envelope.Success, tc.body+response.Body.String())
+				}
+				stored, err = model.GetOAuthAppByID(appID)
+				require.NoError(t, err)
+				assert.Equal(t, "Proxy App", stored.Name)
+				assert.Nil(t, stored.QuotaPerCredit)
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest("GET", "/api/app-marketplace", nil))
+				var public struct {
+					Success bool
+					Data    []map[string]any
+				}
+				require.NoError(t, common.Unmarshal(response.Body.Bytes(), &public))
+				require.True(t, public.Success)
+				require.Len(t, public.Data, 1)
+				assert.Equal(t, map[string]any{"id": float64(appID), "name": "Proxy App", "logo_url": "", "description": "Public text", "url": "https://app.example"}, public.Data[0])
+				// Stable priority + ID ordering, and hidden/disabled rows never appear.
+				off := false
+				for _, app := range []model.OAuthApp{
+					{Name: "Earlier", ClientID: "earlier", Status: 1, OAuthEnabled: &off, APIKeyEnabled: true, MarketplaceVisible: true, MarketplaceSort: -1, MarketplaceURL: "https://earlier.example"},
+					{Name: "Later", ClientID: "later", Status: 1, OAuthEnabled: &off, APIKeyEnabled: true, MarketplaceVisible: true, MarketplaceURL: "https://later.example"},
+					{Name: "Hidden", ClientID: "hidden", Status: 1},
+					{Name: "Disabled", ClientID: "disabled", Status: 2, MarketplaceVisible: true},
+				} {
+					require.NoError(t, db.Create(&app).Error)
+				}
+				response = httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest("GET", "/api/app-marketplace", nil))
+				require.NoError(t, common.Unmarshal(response.Body.Bytes(), &public))
+				require.Len(t, public.Data, 3)
+				assert.Equal(t, "Earlier", public.Data[0]["name"])
+				assert.Equal(t, "Proxy App", public.Data[1]["name"])
+				assert.Equal(t, "Later", public.Data[2]["name"])
+				for range 2 {
+					require.NoError(t, db.AutoMigrate(&model.OAuthApp{}, &model.OAuthRefreshToken{}, &model.UserAppWallet{}))
+				}
+				stored, err = model.GetOAuthAppByID(appID)
+				require.NoError(t, err)
+				assert.Nil(t, stored.QuotaPerCredit)
+				assert.True(t, stored.MarketplaceVisible)
+				wallet := model.UserAppWallet{UserId: 42, AppId: appID, Quota: -100, UsedQuota: 200}
+				require.NoError(t, db.Create(&wallet).Error)
+				for _, body := range []string{`{"marketplace_visible":false,"quota_per_credit":1000}`, `{"marketplace_visible":true}`} {
+					response := accessTokenRequest(router, "PUT", fmt.Sprintf("/api/oauth-apps/%d", appID), "", "", body)
+					require.Contains(t, response.Body.String(), `"success":true`)
+					var balance model.UserAppWallet
+					require.NoError(t, db.First(&balance, wallet.Id).Error)
+					assert.Equal(t, -100, balance.Quota, "display settings preserve debt")
+					assert.Equal(t, 200, balance.UsedQuota)
+				}
+			})
+		}
+	}
+}
+
+func TestAppCreditConversion(t *testing.T) {
+	for _, tc := range []struct {
+		quota int
+		ratio int64
+		want  string
+	}{
+		{100000, 1000, "100"}, {100000, 100, "1000"}, {1, 3, "0.333333"}, {-1, 3, "-0.333333"}, {-100, 100, "-1"}, {0, 100, "0"}, {-1, common.MaxWalletQuota, "0"}, {common.MaxWalletQuota, 1, "9007199254740991"},
+	} {
+		app := model.OAuthApp{QuotaPerCredit: &tc.ratio}
+		require.NotNil(t, app.Credits(tc.quota))
+		assert.Equal(t, tc.want, *app.Credits(tc.quota))
+	}
+	app := model.OAuthApp{}
+	assert.Nil(t, app.Credits(100))
+}
+
+func TestAppModesDisableOAuthWithoutDisablingProxy(t *testing.T) {
+	env := setupOAuthAuthorizeTestEnv(t)
+	token, _, err := service.IssueOAuthAccessToken(env.user.Id, env.app.ClientID, "api:read")
+	require.NoError(t, err)
+	require.NoError(t, model.CreateOAuthRefreshToken(&model.OAuthRefreshToken{TokenHash: model.OAuthRefreshTokenHash("refresh-before-disable"), AppID: env.app.Id, UserID: env.user.Id, SessionID: env.sessionID, AuthVersion: 1, AuthTime: 1700000000, ExpiresAt: time.Now().Add(time.Hour).Unix(), Scope: "openid"}))
+	_, err = service.LoadOAuthAppByClientID(env.app.ClientID)
+	require.NoError(t, err)
+	router := gin.New()
+	router.PUT("/api/oauth-apps/:id", UpdateOAuthApp)
+	t.Run("revocation failure rolls back the mode change", func(t *testing.T) {
+		const callback = "test:fail-app-refresh-revocation"
+		require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+			if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "oauth_refresh_tokens" {
+				tx.AddError(fmt.Errorf("refresh token storage unavailable"))
+			}
+		}))
+		t.Cleanup(func() { require.NoError(t, model.DB.Callback().Update().Remove(callback)) })
+		res := accessTokenRequest(router, "PUT", fmt.Sprintf("/api/oauth-apps/%d", env.app.Id), "", "", `{"api_key_enabled":true,"oauth_enabled":false}`)
+		require.Contains(t, res.Body.String(), `"success":false`)
+		stored, err := model.GetOAuthAppByID(env.app.Id)
+		require.NoError(t, err)
+		assert.True(t, stored.IsOAuthEnabled())
+		assert.False(t, stored.APIKeyEnabled)
+	})
+	res := accessTokenRequest(router, "PUT", fmt.Sprintf("/api/oauth-apps/%d", env.app.Id), "", "", `{"api_key_enabled":true,"oauth_enabled":false}`)
+	require.Contains(t, res.Body.String(), `"success":true`)
+	app, err := service.LoadOAuthAppByClientID(env.app.ClientID)
+	require.NoError(t, err)
+	assert.True(t, app.IsEnabled())
+	assert.False(t, app.IsOAuthEnabled())
+	stored, err := model.GetOAuthAppByID(env.app.Id)
+	require.NoError(t, err)
+	assert.True(t, stored.APIKeyEnabled)
+	assert.Equal(t, env.app.GetRedirectURIs(), stored.GetRedirectURIs())
+	assert.Equal(t, env.app.ClientSecretHash, stored.ClientSecretHash)
+	_, _, err = service.ValidateOAuthAccessToken(token)
+	assert.ErrorIs(t, err, service.ErrOAuthTokenInvalid)
+	refresh, err := model.GetOAuthRefreshTokenByHash(model.OAuthRefreshTokenHash("refresh-before-disable"))
+	require.NoError(t, err)
+	assert.NotZero(t, refresh.RevokedAt)
+	for _, grant := range []string{"authorization_code", "refresh_token"} {
+		c, rec := newOAuthFormContext(t, "/oauth/token", url.Values{"grant_type": {grant}, "client_id": {app.ClientID}, "client_secret": {"test-secret"}, "refresh_token": {"refresh-before-disable"}, "code": {"unused"}})
+		OAuthToken(c)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+	c, rec := env.newConsentContext(env.consentRequest(t, "openid", "unused"))
+	OAuthAuthorizeConsent(c)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	// Both memory hits and database reloads must retain the OAuth mode.
+	app, err = service.LoadOAuthAppByClientID(env.app.ClientID)
+	require.NoError(t, err)
+	assert.False(t, app.IsOAuthEnabled())
+}
+
+func TestAppSettingsRequireAdminScope(t *testing.T) {
+	user, _ := setupAccessTokenAudit(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.OAuthApp{}))
+	write, _ := createScopedAccessToken(t, user.Id, 0, "option:write")
+	read, _ := createScopedAccessToken(t, user.Id, 0, "option:read")
+	router := gin.New()
+	router.POST("/api/oauth-apps/", middleware.AdminAuth(), CreateOAuthApp)
+	for _, tc := range []struct {
+		token string
+		code  int
+	}{{"", 401}, {read, 403}, {write, 200}} {
+		res := accessTokenRequest(router, "POST", "/api/oauth-apps/", tc.token, "", `{"name":"Scoped App"}`)
+		assert.Equal(t, tc.code, res.Code, res.Body.String())
+	}
+	require.NoError(t, model.DB.Model(&model.User{}).Where("id = ?", user.Id).Update("role", common.RoleCommonUser).Error)
+	res := accessTokenRequest(router, "POST", "/api/oauth-apps/", write, "", `{"name":"Forbidden App"}`)
+	assert.Equal(t, 403, res.Code)
+}
+
+type releasedProductUser struct {
+	Id                   int                        `json:"id"`
+	Username             string                     `json:"username" gorm:"unique;index" validate:"max=20"`
+	Password             string                     `json:"password" gorm:"not null;" validate:"min=8,max=128"`
+	HasPassword          bool                       `json:"-" gorm:"-:all"`
+	OriginalPassword     string                     `json:"original_password" gorm:"-:all"` // this field is only for Password change verification, don't save it to database!
+	DisplayName          string                     `json:"display_name" gorm:"index" validate:"max=20"`
+	Role                 int                        `json:"role" gorm:"type:int;default:1"`   // admin, common
+	Status               int                        `json:"status" gorm:"type:int;default:1"` // enabled, disabled
+	Email                string                     `json:"email" gorm:"index" validate:"max=50"`
+	GitHubId             string                     `json:"github_id" gorm:"column:github_id;index"`
+	DiscordId            string                     `json:"discord_id" gorm:"column:discord_id;index"`
+	OidcId               string                     `json:"oidc_id" gorm:"column:oidc_id;index"`
+	WeChatId             string                     `json:"wechat_id" gorm:"column:wechat_id;index"`
+	TelegramId           string                     `json:"telegram_id" gorm:"column:telegram_id;index"`
+	VerificationCode     string                     `json:"verification_code" gorm:"-:all"`                         // this field is only for Email verification, don't save it to database!
+	AccessToken          *string                    `json:"-" gorm:"type:char(32);column:access_token;uniqueIndex"` // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
+	AccessTokenCreatedAt *int64                     `json:"-" gorm:"type:bigint;column:access_token_created_at"`    // Deprecated: 旧版面板访问令牌，仅在升级后的过渡期内使用；删除 users.access_token 列时一并移除。
+	Quota                int                        `json:"quota" gorm:"type:int;default:0"`
+	UsedQuota            int                        `json:"used_quota" gorm:"type:int;default:0;column:used_quota"` // used quota
+	RequestCount         int                        `json:"request_count" gorm:"type:int;default:0;"`               // request number
+	Group                string                     `json:"group" gorm:"type:varchar(64);default:'default'"`
+	AffCode              string                     `json:"aff_code" gorm:"type:varchar(32);column:aff_code;uniqueIndex"`
+	AffCount             int                        `json:"aff_count" gorm:"type:int;default:0;column:aff_count"`
+	AffQuota             int                        `json:"aff_quota" gorm:"type:int;default:0;column:aff_quota"`           // 邀请剩余额度
+	AffHistoryQuota      int                        `json:"aff_history_quota" gorm:"type:int;default:0;column:aff_history"` // 邀请历史额度
+	InviterId            int                        `json:"inviter_id" gorm:"type:int;column:inviter_id;index"`
+	DeletedAt            gorm.DeletedAt             `gorm:"index"`
+	LinuxDOId            string                     `json:"linux_do_id" gorm:"column:linux_do_id;index"`
+	Setting              string                     `json:"setting" gorm:"type:text;column:setting"`
+	Remark               string                     `json:"remark,omitempty" gorm:"type:varchar(255)" validate:"max=255"`
+	StripeCustomer       string                     `json:"stripe_customer" gorm:"type:varchar(64);column:stripe_customer;index"`
+	CreatedAt            int64                      `json:"created_at" gorm:"autoCreateTime;column:created_at"`
+	LastLoginAt          int64                      `json:"last_login_at" gorm:"default:0;column:last_login_at"`
+	AuthVersion          int64                      `json:"-" gorm:"type:bigint;not null;default:1;column:auth_version"`
+	AdminPermissions     map[string]map[string]bool `json:"admin_permissions,omitempty" gorm:"-:all"`
+}
+
+func (releasedProductUser) TableName() string { return "users" }
+
+type releasedProductToken struct {
+	Id                 int            `json:"id"`
+	UserId             int            `json:"user_id" gorm:"index"`
+	Key                string         `json:"key" gorm:"type:varchar(128);uniqueIndex"`
+	Status             int            `json:"status" gorm:"default:1"`
+	Name               string         `json:"name" gorm:"index" `
+	CreatedTime        int64          `json:"created_time" gorm:"bigint"`
+	AccessedTime       int64          `json:"accessed_time" gorm:"bigint"`
+	ExpiredTime        int64          `json:"expired_time" gorm:"bigint;default:-1"` // -1 means never expired
+	RemainQuota        int            `json:"remain_quota" gorm:"default:0"`
+	UnlimitedQuota     bool           `json:"unlimited_quota"`
+	ModelLimitsEnabled bool           `json:"model_limits_enabled"`
+	ModelLimits        string         `json:"model_limits" gorm:"type:text"`
+	AllowIps           *string        `json:"allow_ips" gorm:"default:''"`
+	UsedQuota          int            `json:"used_quota" gorm:"default:0"` // used quota
+	Group              string         `json:"group" gorm:"default:''"`
+	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
+	AutoGroups         string         `json:"-" gorm:"type:text"`
+	DeletedAt          gorm.DeletedAt `gorm:"index"`
+	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
+	AllowUserQuotaQuery bool   `json:"allow_user_quota_query"`
+	CacheExpiresAt      int64  `json:"-" gorm:"-"`
+	CacheMAC            string `json:"-" gorm:"-"`
+}
+
+func (releasedProductToken) TableName() string { return "tokens" }
+
+func TestAppProxyDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		dsn := os.Getenv("TEST_MYSQL_DSN")
+		if kind == "postgres" {
+			dsn = os.Getenv("TEST_POSTGRES_DSN")
+		}
+		if kind != "sqlite" && dsn == "" {
+			t.Run(kind, func(t *testing.T) { t.Skip("external database DSN not configured") })
+			continue
+		}
+		for _, upgrade := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/upgrade=%t", kind, upgrade), func(t *testing.T) {
+				db, _ := newAuditTestDatabase(t, kind, dsn)
+				conn, err := db.DB()
+				require.NoError(t, err)
+				conn.SetMaxOpenConns(1)
+				t.Cleanup(func() { require.NoError(t, conn.Close()) })
+				previous, previousLog, redis := model.DB, model.LOG_DB, common.RedisEnabled
+				main, log := common.MainDatabaseType(), common.LogDatabaseType()
+				model.DB, model.LOG_DB, common.RedisEnabled = db, db, false
+				switch kind {
+				case "mysql":
+					common.SetDatabaseTypes(common.DatabaseTypeMySQL, common.DatabaseTypeMySQL)
+				case "postgres":
+					common.SetDatabaseTypes(common.DatabaseTypePostgreSQL, common.DatabaseTypePostgreSQL)
+				default:
+					common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+				}
+				t.Cleanup(func() {
+					model.DB, model.LOG_DB, common.RedisEnabled = previous, previousLog, redis
+					common.SetDatabaseTypes(main, log)
+				})
+				if upgrade {
+					require.NoError(t, db.AutoMigrate(&releasedProductUser{}, &releasedProductToken{}, &releasedProductApp{}))
+					require.NoError(t, db.Create(&releasedProductUser{Username: "legacy", Password: "hash", AffCode: "legacy", Quota: 9000, UsedQuota: 300}).Error)
+					require.NoError(t, db.Create(&releasedProductToken{UserId: 1, Key: "legacy-key", RemainQuota: 500, UsedQuota: 40}).Error)
+				}
+				for range 2 {
+					require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.AppCheckout{}, &model.TopUp{}, &model.AppProductOrder{}, &model.SubscriptionOrder{}, &model.Log{}))
+				}
+				if upgrade {
+					legacy, err := model.GetUserById(1, true)
+					require.NoError(t, err)
+					assert.Equal(t, "platform", legacy.Source())
+					assert.Zero(t, legacy.OwnerAppId)
+					assert.Equal(t, 9000, legacy.Quota)
+					legacyKey, err := model.GetTokenById(1)
+					require.NoError(t, err)
+					assert.Zero(t, legacyKey.AppId)
+					assert.Equal(t, 500, legacyKey.RemainQuota)
+					assert.Equal(t, 40, legacyKey.UsedQuota)
+				}
+				app := model.OAuthApp{Name: "Proxy", ClientID: "matrix-proxy", APIKeyEnabled: true, ProxyIssuer: "https://native.example/auth/v1", Status: 1, QuotaPerCredit: new(int64(100))}
+				require.NoError(t, db.Create(&app).Error)
+				var ids [2]int
+				var errs [2]error
+				var wg sync.WaitGroup
+				for i := range 2 {
+					wg.Go(func() {
+						user, err := model.ProvisionAppProxyUser(app.Id, app.ProxyIssuer, "native-subject")
+						errs[i] = err
+						if user != nil {
+							ids[i] = user.Id
+						}
+					})
+				}
+				wg.Wait()
+				for _, err := range errs {
+					require.NoError(t, err)
+				}
+				assert.Equal(t, ids[0], ids[1])
+				assert.Positive(t, ids[0])
+				user, err := model.GetUserById(ids[0], true)
+				require.NoError(t, err)
+				assert.True(t, user.IsProxy())
+				assert.Empty(t, user.Email)
+				assert.Empty(t, user.Password)
+				assert.Zero(t, user.Quota)
+				other := app
+				other.Id = 0
+				other.ClientID = "second-app"
+				require.NoError(t, db.Create(&other).Error)
+				otherUser, err := model.ProvisionAppProxyUser(other.Id, other.ProxyIssuer, "native-subject")
+				require.NoError(t, err)
+				assert.NotEqual(t, user.Id, otherUser.Id)
+				_, err = model.ProvisionAppProxyUser(app.Id, "https://attacker.example", "native-subject")
+				assert.ErrorIs(t, err, model.ErrProxyIdentity)
+				require.NoError(t, db.Model(user).Updates(map[string]any{"identity_source": "platform", "owner_app_id": other.Id}).Error)
+				user, err = model.GetUserById(user.Id, true)
+				require.NoError(t, err)
+				assert.True(t, user.IsProxy())
+				assert.Equal(t, app.Id, user.OwnerAppId)
+				_, err = model.ReadAppWallet(user.Id, 0)
+				assert.ErrorIs(t, err, model.ErrProxyIdentity)
+				_, err = model.ReadAppWallet(user.Id, other.Id)
+				assert.ErrorIs(t, err, model.ErrProxyIdentity)
+				require.NoError(t, model.IncreaseUserAppQuota(user.Id, app.Id, 1000))
+				require.NoError(t, db.Model(&model.UserAppWallet{}).Where("user_id = ? AND app_id = ?", user.Id, app.Id).Update("used_quota", 200).Error)
+				wallet, err := model.ReadAppWallet(user.Id, app.Id)
+				require.NoError(t, err)
+				assert.Equal(t, "10", *wallet.Credits)
+				assert.Equal(t, "2", *wallet.UsedCredits)
+				assert.Equal(t, 1000, wallet.Quota)
+				assert.False(t, wallet.Capabilities.SubscriptionSupported)
+				assert.Nil(t, wallet.RequestCount)
+				keyInput := &model.Token{Name: "Hosted", UnlimitedQuota: true, ExpiredTime: -1, ModelLimitsEnabled: true, ModelLimits: "allowed"}
+				key, err := model.CreateAppProxyKey(user.Id, app.Id, "initial-issue", keyInput, 0)
+				require.NoError(t, err)
+				recovered, err := model.CreateAppProxyKey(user.Id, app.Id, "initial-issue", &model.Token{Name: "Hosted", UnlimitedQuota: true, ExpiredTime: -1, ModelLimitsEnabled: true, ModelLimits: "allowed"}, 0)
+				require.NoError(t, err)
+				assert.Equal(t, key.Id, recovered.Id)
+				assert.Equal(t, key.Key, recovered.Key)
+				_, err = model.CreateAppProxyKey(user.Id, app.Id, "initial-issue", &model.Token{Name: "Changed"}, 0)
+				assert.ErrorIs(t, err, model.ErrAppOperationConflict)
+				replacement, err := model.CreateAppProxyKey(user.Id, app.Id, "rotate-secret", &model.Token{}, key.Id)
+				require.NoError(t, err)
+				assert.Equal(t, key.ModelLimits, replacement.ModelLimits)
+				active, err := model.GetTokenById(key.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.TokenStatusEnabled, active.Status)
+				require.NoError(t, model.CommitAppProxyKeyRotation(user.Id, app.Id, replacement.Id, replacement.Key))
+				require.NoError(t, model.CommitAppProxyKeyRotation(user.Id, app.Id, replacement.Id, replacement.Key))
+				active, err = model.GetTokenById(key.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.TokenStatusDisabled, active.Status)
+				limited, err := model.CreateAppProxyKey(user.Id, app.Id, "limited-issue", &model.Token{RemainQuota: 10, ExpiredTime: -1}, 0)
+				require.NoError(t, err)
+				_, err = model.CreateAppProxyKey(user.Id, app.Id, "limited-rotate", &model.Token{}, limited.Id)
+				assert.ErrorIs(t, err, model.ErrLimitedKeyRotation)
+
+				// A persisted request and its exact order survive lost responses and
+				// conversion/configuration changes without duplicate wallet credit.
+				intent := &model.AppCheckout{Actor: "matrix-admin", IdentitySource: user.Source(), UserId: user.Id, AppId: app.Id, Kind: "topup", PaymentMethod: model.PaymentMethodWaffoPancake, Currency: "USD", Money: "0", Quota: int(2 * common.QuotaPerUnit), QuotaPerCredit: new(int64(100))}
+				created, err := model.ReserveAppCheckout(intent, "payment-once", []int{2})
+				require.NoError(t, err)
+				require.True(t, created)
+				originalUnit := common.QuotaPerUnit
+				topup := &model.TopUp{UserId: user.Id, AppId: app.Id, Amount: 2, Money: 2, TradeNo: intent.OrderId, PaymentProvider: model.PaymentProviderWaffoPancake, PaymentMethod: model.PaymentMethodWaffoPancake, Status: common.TopUpStatusPending}
+				require.NoError(t, topup.Insert())
+				require.NoError(t, model.VerifyAppCheckoutPayment(intent.OrderId, "2.00", "USD"))
+				for _, payment := range [][2]string{{"1.99", "USD"}, {"2", "CNY"}, {"2", ""}, {"invalid", "USD"}, {"-2", "USD"}} {
+					assert.ErrorIs(t, model.VerifyAppCheckoutPayment(intent.OrderId, payment[0], payment[1]), model.ErrAppOperationConflict)
+				}
+				pending, err := model.ReadAppCheckout(user.Id, app.Id, intent.OrderId)
+				require.NoError(t, err)
+				assert.Equal(t, "reconciliation_required", pending.State)
+				var unchanged model.TopUp
+				require.NoError(t, db.Where("trade_no = ?", intent.OrderId).First(&unchanged).Error)
+				assert.Equal(t, common.TopUpStatusPending, unchanged.Status)
+				require.NoError(t, db.Model(&model.AppCheckout{}).Where("order_id = ?", intent.OrderId).Update("expires_at", common.GetTimestamp()-1).Error)
+				assert.ErrorIs(t, model.VerifyAppCheckoutPayment(intent.OrderId, "2", "USD"), model.ErrAppOperationConflict)
+
+				require.NoError(t, db.Model(&app).Update("api_key_enabled", false).Error)
+				common.QuotaPerUnit = originalUnit * 2
+				t.Cleanup(func() { common.QuotaPerUnit = originalUnit })
+				require.NoError(t, model.RechargeWaffoPancake(intent.OrderId))
+				require.NoError(t, model.RechargeWaffoPancake(intent.OrderId))
+				common.QuotaPerUnit = originalUnit
+				observed, err := model.ReadAppCheckout(user.Id, app.Id, intent.OrderId)
+				require.NoError(t, err)
+				assert.Equal(t, "success", observed.State)
+				// Valid duplicate webhooks acknowledge the already-paid order after expiry.
+				require.NoError(t, model.VerifyAppCheckoutPayment(intent.OrderId, "2", "USD"))
+				assert.Equal(t, int(2*originalUnit), observed.Quota)
+				assert.EqualValues(t, 100, *observed.QuotaPerCredit)
+				require.NotNil(t, observed.Credits)
+				assert.Equal(t, "10000", *observed.Credits)
+				page := &common.PageInfo{Page: 1, PageSize: 10}
+				orders, total, err := model.ListScopedAppOrders(user.Id, app.Id, "", page)
+				require.NoError(t, err)
+				assert.EqualValues(t, 1, total)
+				require.Len(t, orders, 1)
+				assert.Equal(t, intent.OrderId, orders[0].OrderId)
+				assert.Equal(t, "USD", orders[0].Currency)
+				assert.Equal(t, 2.0, orders[0].Money)
+				assert.Equal(t, observed.Credits, orders[0].Credits)
+
+				// Legacy providers did not persist a currency; never infer it
+				// from today's configuration or mislabel a stored unit count.
+				for _, provider := range []string{model.PaymentProviderEpay, model.PaymentProviderStripe, model.PaymentProviderCreem} {
+					legacy := &model.TopUp{UserId: user.Id, AppId: app.Id, Amount: 1, Money: 2, TradeNo: "legacy-" + provider, PaymentProvider: provider, Status: common.TopUpStatusSuccess}
+					require.NoError(t, legacy.Insert())
+					items, count, err := model.ListScopedAppOrders(user.Id, app.Id, legacy.TradeNo, page)
+					require.NoError(t, err)
+					require.EqualValues(t, 1, count)
+					require.Len(t, items, 1)
+					currency := ""
+					if provider == model.PaymentProviderEpay {
+						currency = "CNY"
+					}
+					assert.Equal(t, currency, items[0].Currency)
+					assert.Nil(t, items[0].QuotaPerCredit)
+					assert.Nil(t, items[0].Credits)
+				}
+				for i, invalid := range []float64{math.NaN(), math.Inf(1), math.Inf(-1), -1} {
+					bad := &model.AppCheckout{Actor: "matrix-admin", IdentitySource: user.Source(), UserId: user.Id, AppId: app.Id, Kind: "topup", Money: "0", Quota: 100}
+					_, err := model.ReserveAppCheckout(bad, fmt.Sprintf("invalid-money-%d", i), i)
+					require.NoError(t, err)
+					topup := &model.TopUp{UserId: user.Id, AppId: app.Id, Amount: 100, Money: invalid, TradeNo: bad.OrderId, PaymentProvider: model.PaymentProviderWaffoPancake}
+					require.Error(t, topup.Insert())
+					stored, err := model.ReadAppCheckout(user.Id, app.Id, bad.OrderId)
+					require.NoError(t, err)
+					assert.False(t, stored.SnapshotReady)
+				}
+
+				require.NoError(t, db.Model(&app).Update("api_key_enabled", true).Error)
+				require.NoError(t, db.Model(user).Update("status", common.UserStatusDisabled).Error)
+				recoveredUser, err := model.ProvisionAppProxyUser(app.Id, app.ProxyIssuer, "native-subject")
+				require.NoError(t, err)
+				assert.Equal(t, user.Id, recoveredUser.Id)
+				assert.Equal(t, common.UserStatusDisabled, recoveredUser.Status)
+				_, err = model.CreateAppProxyKey(user.Id, app.Id, "disabled-create", &model.Token{}, 0)
+				assert.ErrorIs(t, err, model.ErrProxyIdentity)
+				for range 2 {
+					require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.UserAppWallet{}, &model.AppCheckout{}))
+				}
+				wallet, err = model.ReadAppWallet(user.Id, app.Id)
+				require.NoError(t, err)
+				assert.Equal(t, 1000+int(2*originalUnit), wallet.Quota)
+			})
+		}
+	}
+}
+
+func TestAppProxyHTTPAndFunding(t *testing.T) {
+	admin, _ := setupAccessTokenAudit(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.Token{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.SubscriptionPlan{}))
+	write, _ := createScopedAccessToken(t, admin.Id, 0, "user:write", "api_key:write", "api_key:read", "user:read")
+	read, _ := createScopedAccessToken(t, admin.Id, 0, "user:read")
+	router := gin.New()
+	router.POST("/api/app-proxy/users", middleware.AdminAuth(), ProvisionAppProxyUser)
+	router.GET("/api/app-proxy/users/:user_id/wallet", middleware.AdminAuth(), AdminAppWallet)
+	router.POST("/api/app-proxy/users/:user_id/keys", middleware.AdminAuth(), CreateAppProxyKey)
+	router.GET("/api/app-proxy/users/:user_id/keys", middleware.AdminAuth(), ListAppProxyKeys)
+	app := model.OAuthApp{Name: "HTTP", ClientID: "proxy-http", ProxyIssuer: "https://native.example/auth/v1", APIKeyEnabled: true, Status: 1}
+	require.NoError(t, model.DB.Create(&app).Error)
+	body := fmt.Sprintf(`{"app_id":%d,"issuer":%q,"subject":"native-user"}`, app.Id, app.ProxyIssuer)
+	assert.Equal(t, 401, accessTokenRequest(router, "POST", "/api/app-proxy/users", "", "", body).Code)
+	assert.Equal(t, 403, accessTokenRequest(router, "POST", "/api/app-proxy/users", read, "", body).Code)
+	response := accessTokenRequest(router, "POST", "/api/app-proxy/users", write, "", body)
+	require.Equal(t, 200, response.Code, response.Body.String())
+	assert.NotContains(t, response.Body.String(), "password")
+	var provision struct {
+		Data struct {
+			UserId int `json:"user_id"`
+		}
+	}
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &provision))
+	userID := provision.Data.UserId
+	require.Positive(t, userID)
+	_, err := service.CreateLoginSession(userID, "password", "", "")
+	assert.ErrorIs(t, err, service.ErrLoginSessionInvalid)
+	_, _, err = service.IssueOAuthAccessToken(userID, app.ClientID, "openid")
+	assert.ErrorIs(t, err, service.ErrOAuthTokenInvalid)
+	plan := &model.SubscriptionPlan{Id: 1}
+	_, err = model.CreateUserSubscriptionFromPlanTx(model.DB, userID, plan, "admin")
+	assert.ErrorIs(t, err, model.ErrProxySubscriptionUnsupported)
+	path := fmt.Sprintf("/api/app-proxy/users/%d/keys?app_id=%d", userID, app.Id)
+	for _, unsupported := range []string{`{"name":"Hosted","quota_rule_id":1}`, `{"name":"Hosted","user_id":1}`, `null`} {
+		rejected := accessTokenRequest(router, "POST", path, write, "", unsupported)
+		assert.Contains(t, rejected.Body.String(), `"success":false`)
+	}
+	request := httptest.NewRequest("POST", path, strings.NewReader(`{"name":"Hosted","unlimited_quota":true}`))
+	request.Header.Set("Authorization", "Bearer "+write)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "http-issue-once")
+	result := httptest.NewRecorder()
+	router.ServeHTTP(result, request)
+	require.Equal(t, 200, result.Code, result.Body.String())
+	var created struct {
+		Success bool
+		Data    model.Token
+	}
+	require.NoError(t, common.Unmarshal(result.Body.Bytes(), &created))
+	require.True(t, created.Success)
+	require.NotEmpty(t, created.Data.Key)
+	listed := accessTokenRequest(router, "GET", path, write, "", "")
+	assert.NotContains(t, listed.Body.String(), created.Data.Key)
+	assert.Contains(t, listed.Body.String(), `"app_id":`)
+	readOnly := gin.New()
+	readOnly.GET("/key-status", middleware.TokenAuthReadOnly(), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	assert.Equal(t, http.StatusNoContent, accessTokenRequest(readOnly, "GET", "/key-status", "sk-"+created.Data.Key, "", "").Code)
+	require.NoError(t, model.IncreaseUserAppQuota(userID, app.Id, 1000))
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	require.NoError(t, middleware.SetupContextForToken(c, &created.Data))
+	assert.Equal(t, app.Id, common.GetContextKeyInt(c, constant.ContextKeyOAuthAppID))
+	info := &relaycommon.RelayInfo{UserId: userID, AppId: app.Id, IsPlayground: true, RequestId: "proxy-funding", UserSetting: dto.UserSetting{BillingPreference: "subscription_only"}}
+	session, billingErr := service.NewBillingSession(c, info, 100)
+	require.Nil(t, billingErr)
+	require.NotNil(t, session)
+	require.NoError(t, session.Settle(125))
+	wallet, err := model.ReadAppWallet(userID, app.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 875, wallet.Quota)
+	assert.Equal(t, 125, wallet.UsedQuota)
+	user, err := model.GetUserById(userID, true)
+	require.NoError(t, err)
+	assert.Zero(t, user.Quota)
+	require.NoError(t, model.DB.Model(&app).Update("api_key_enabled", false).Error)
+	c, _ = gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	assert.ErrorIs(t, middleware.SetupContextForToken(c, &created.Data), model.ErrProxyIdentity)
+	assert.True(t, c.IsAborted())
+	assert.Equal(t, http.StatusForbidden, accessTokenRequest(readOnly, "GET", "/key-status", "sk-"+created.Data.Key, "", "").Code)
+	require.NoError(t, model.DB.Model(&app).Update("api_key_enabled", true).Error)
+	require.NoError(t, model.DB.Model(&created.Data).Update("status", common.TokenStatusDisabled).Error)
+	assert.Equal(t, http.StatusUnauthorized, accessTokenRequest(readOnly, "GET", "/key-status", "sk-"+created.Data.Key, "", "").Code)
+}
+
+func TestAppProviderPaymentSnapshots(t *testing.T) {
+	env := setupOAuthPurchaseTestEnv(t, "api:read api:write")
+	secret, webhook, priceID, minimum, promotion, stripeKey := setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId, setting.StripeMinTopUp, setting.StripePromotionCodesEnabled, stripe.Key
+	backend := stripe.GetBackend(stripe.APIBackend)
+	t.Cleanup(func() {
+		setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId, setting.StripeMinTopUp, setting.StripePromotionCodesEnabled, stripe.Key = secret, webhook, priceID, minimum, promotion, stripeKey
+		stripe.SetBackend(stripe.APIBackend, backend)
+	})
+	setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId, setting.StripeMinTopUp, setting.StripePromotionCodesEnabled = "sk_test_fixture", "whsec_fixture", "price_fixture", 1, true
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/prices/price_fixture":
+			_, _ = w.Write([]byte(`{"id":"price_fixture","active":true,"currency":"usd","type":"one_time","billing_scheme":"per_unit","unit_amount":250}`))
+		case "/v1/checkout/sessions":
+			assert.NoError(t, r.ParseForm())
+			assert.Equal(t, "false", r.PostForm.Get("allow_promotion_codes"))
+			_, _ = w.Write([]byte(`{"id":"cs_fixture","url":"https://checkout.stripe.com/fixture"}`))
+		default:
+			t.Errorf("unexpected provider path %s", r.URL.Path)
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(provider.Close)
+	stripe.SetBackend(stripe.APIBackend, stripe.GetBackendWithConfig(stripe.APIBackend, &stripe.BackendConfig{URL: stripe.String(provider.URL), HTTPClient: provider.Client(), MaxNetworkRetries: stripe.Int64(0)}))
+	amount := max(int64(2), getStripeMinTopup())
+	quota, err := validateTopUpQuota(amount)
+	require.NoError(t, err)
+	intent := &model.AppCheckout{Actor: "provider-test", IdentitySource: env.user.Source(), UserId: env.user.Id, AppId: env.app.Id, Kind: "topup", PaymentMethod: "stripe", Currency: "USD", Money: "0", Quota: quota}
+	_, err = model.ReserveAppCheckout(intent, "stripe-snapshot", amount)
+	require.NoError(t, err)
+	_, _, err = generateStripeTopUpCheckout(model.WithAppCheckout(context.Background(), intent), env.user, amount, env.app.Id)
+	require.NoError(t, err)
+	order, err := model.ReadAppCheckout(env.user.Id, env.app.Id, intent.OrderId)
+	require.NoError(t, err)
+	units := amount
+	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
+		units = amount / int64(common.QuotaPerUnit)
+	}
+	assert.Equal(t, fmt.Sprintf("%g", float64(units)*2.5), order.Money)
+	assert.Equal(t, quota, order.Quota)
+	require.NoError(t, model.VerifyAppCheckoutPayment(intent.OrderId, order.Money, "USD"))
+
+	address, id, key, methods := operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey, operation_setting.PayMethods
+	t.Cleanup(func() {
+		operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey, operation_setting.PayMethods = address, id, key, methods
+	})
+	operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey = "https://pay.example.com", "epay_id", "test-key"
+	operation_setting.PayMethods = []map[string]string{{"type": "alipay"}}
+	epayIntent := &model.AppCheckout{Actor: "provider-test", IdentitySource: env.user.Source(), UserId: env.user.Id, AppId: env.app.Id, Kind: "topup", PaymentMethod: "alipay", Money: "0", Quota: quota}
+	_, err = model.ReserveAppCheckout(epayIntent, "epay-snapshot", amount)
+	require.NoError(t, err)
+	topup := &model.TopUp{UserId: env.user.Id, AppId: env.app.Id, Amount: amount, Money: 2, TradeNo: epayIntent.OrderId, PaymentProvider: model.PaymentProviderEpay, PaymentMethod: "alipay", Status: common.TopUpStatusPending}
+	require.NoError(t, topup.Insert())
+	require.NoError(t, model.VerifyAppCheckoutPayment(epayIntent.OrderId, "2", "CNY"))
+	router := gin.New()
+	router.GET("/notify", EpayNotify)
+	params := url.Values{"pid": {"epay_id"}, "type": {"alipay"}, "money": {"0.01"}, "name": {"item"}, "out_trade_no": {epayIntent.OrderId}, "trade_status": {epay.StatusTradeSuccess}}
+	params.Set("sign", epay.MD5String(params.Encode(), "test-key"))
+	params.Set("sign_type", "MD5")
+	result := httptest.NewRecorder()
+	router.ServeHTTP(result, httptest.NewRequest("GET", "/notify?"+params.Encode(), nil))
+	assert.Equal(t, "fail", result.Body.String())
+	saved, err := model.ReadAppCheckout(env.user.Id, env.app.Id, epayIntent.OrderId)
+	require.NoError(t, err)
+	assert.Equal(t, "reconciliation_required", saved.State)
+	require.NoError(t, env.db.First(topup, topup.Id).Error)
+	assert.Equal(t, common.TopUpStatusPending, topup.Status)
+}
+
+func TestAppCheckoutRecoveryAndOrderOwnership(t *testing.T) {
+	env := setupOAuthPurchaseTestEnv(t, "api:read api:write")
+	require.NoError(t, env.db.Model(env.app).Update("quota_per_credit", 100).Error)
+	require.NoError(t, env.db.Model(env.user).Update("quota", 3000000).Error)
+	router := gin.New()
+	router.POST("/oauth/topup/checkout", OAuthTopupCheckout)
+	router.GET("/oauth/orders/:order_id", OAuthAppOrder)
+	purchase := func(key, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest("POST", "/oauth/topup/checkout", strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+env.token)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", key)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+	first := purchase("recover-purchase-1", `{"amount":2,"payment_method":"balance"}`)
+	require.Equal(t, 200, first.Code, first.Body.String())
+	var result struct {
+		OrderId        string `json:"order_id"`
+		Status         string
+		Credits        string
+		QuotaPerCredit *int64 `json:"quota_per_credit"`
+	}
+	require.NoError(t, common.Unmarshal(first.Body.Bytes(), &result))
+	require.NotEmpty(t, result.OrderId)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, "10000", result.Credits)
+	require.NoError(t, env.db.Model(env.app).Update("quota_per_credit", 1000).Error)
+	retry := purchase("recover-purchase-1", `{"amount":2,"payment_method":"balance"}`)
+	assert.JSONEq(t, first.Body.String(), retry.Body.String())
+	wallet, err := model.ReadAppWallet(env.user.Id, env.app.Id)
+	require.NoError(t, err)
+	assert.Equal(t, 1000000, wallet.Quota)
+	user, err := model.GetUserById(env.user.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, 2000000, user.Quota)
+	conflict := purchase("recover-purchase-1", `{"amount":3,"payment_method":"balance"}`)
+	assert.Equal(t, 409, conflict.Code)
+	second := purchase("recover-purchase-2", `{"amount":2,"payment_method":"balance"}`)
+	require.Equal(t, 200, second.Code, second.Body.String())
+	var next struct {
+		OrderId string `json:"order_id"`
+	}
+	require.NoError(t, common.Unmarshal(second.Body.Bytes(), &next))
+	assert.NotEqual(t, result.OrderId, next.OrderId)
+	queried := accessTokenRequest(router, "GET", "/oauth/orders/"+result.OrderId, env.token, "", "")
+	require.Equal(t, 200, queried.Code, queried.Body.String())
+	assert.Contains(t, queried.Body.String(), `"status":"success"`)
+	assert.Contains(t, queried.Body.String(), `"quota_per_credit":100`)
+	assert.Contains(t, queried.Body.String(), `"credits":"10000"`)
+	wrongScope, _, err := service.IssueOAuthAccessToken(env.user.Id, env.app.ClientID, "api:write")
+	require.NoError(t, err)
+	assert.Equal(t, 403, accessTokenRequest(router, "GET", "/oauth/orders/"+result.OrderId, wrongScope, "", "").Code)
+	other := &model.User{Username: "other-buyer", Password: "", AffCode: "other-buyer", Status: 1, Role: 1, Group: "default", AuthVersion: 1}
+	require.NoError(t, env.db.Create(other).Error)
+	otherToken, _, err := service.IssueOAuthAccessToken(other.Id, env.app.ClientID, "api:read")
+	require.NoError(t, err)
+	leak := accessTokenRequest(router, "GET", "/oauth/orders/"+result.OrderId, otherToken, "", "")
+	assert.NotContains(t, leak.Body.String(), `"status":"success"`)
+}

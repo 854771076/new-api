@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -43,6 +44,15 @@ var (
 // OAuthApp is a registered external application (OAuth 2.0 client).
 // ClientSecret is never stored in plaintext; only its SHA-256 hash is kept.
 type OAuthApp struct {
+	ProxyIssuer   string `json:"proxy_issuer" gorm:"type:text"`
+	APIKeyEnabled bool   `json:"api_key_enabled" gorm:"column:api_key_enabled"`
+	// NULL preserves OAuth for apps created before mode switches existed.
+	OAuthEnabled           *bool  `json:"-" gorm:"column:oauth_enabled"`
+	QuotaPerCredit         *int64 `json:"quota_per_credit" gorm:"column:quota_per_credit;type:bigint"`
+	MarketplaceVisible     bool   `json:"marketplace_visible"`
+	MarketplaceDescription string `json:"marketplace_description" gorm:"type:text"`
+	MarketplaceURL         string `json:"marketplace_url" gorm:"type:text"`
+	MarketplaceSort        int    `json:"marketplace_sort"`
 	Id                     int    `json:"id" gorm:"primaryKey"`
 	Name                   string `json:"name" gorm:"type:varchar(100);not null;index"`
 	LogoURL                string `json:"logo_url" gorm:"type:text;column:logo_url"`
@@ -146,9 +156,28 @@ func (app *OAuthApp) SetScopes(scopes []string) error {
 	return nil
 }
 
-// IsEnabled reports whether the app can participate in OAuth flows.
+// IsEnabled reports the overall App status, independently of its integration modes.
 func (app *OAuthApp) IsEnabled() bool {
 	return app != nil && app.Status == OAuthAppStatusEnabled
+}
+
+// OAuthAllowed preserves the legacy NULL setting without changing overall App status.
+func (app *OAuthApp) OAuthAllowed() bool {
+	return app != nil && (app.OAuthEnabled == nil || *app.OAuthEnabled)
+}
+
+func (app *OAuthApp) IsOAuthEnabled() bool {
+	return app.IsEnabled() && app.OAuthAllowed()
+}
+
+// Credits converts only the display unit; quota remains the accounting ledger.
+func (app *OAuthApp) Credits(quota int) *string {
+	if app == nil || app.QuotaPerCredit == nil || *app.QuotaPerCredit <= 0 {
+		return nil
+	}
+	value, _ := decimal.NewFromInt(int64(quota)).QuoRem(decimal.NewFromInt(*app.QuotaPerCredit), 6)
+	text := value.String()
+	return &text
 }
 
 // GetAIModelWhitelist parses the stored AIModelWhitelist JSON array. It
@@ -354,7 +383,7 @@ func CreateOAuthApp(app *OAuthApp) error {
 	if app == nil || app.Name == "" || app.ClientID == "" {
 		return ErrOAuthAppInvalid
 	}
-	if !app.PublicClient && app.ClientSecretHash == "" {
+	if app.OAuthAllowed() && !app.PublicClient && app.ClientSecretHash == "" {
 		return ErrOAuthAppInvalid
 	}
 	app.Id = 0
@@ -367,6 +396,21 @@ func CreateOAuthApp(app *OAuthApp) error {
 		app.Status = OAuthAppStatusEnabled
 	}
 	return DB.Create(app).Error
+}
+
+// SaveOAuthAppSettings commits mode changes and refresh-token revocation together.
+func SaveOAuthAppSettings(app *OAuthApp) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(app).Error; err != nil {
+			return err
+		}
+		if !app.IsOAuthEnabled() {
+			return tx.Model(&OAuthRefreshToken{}).
+				Where("app_id = ? AND revoked_at = 0", app.Id).
+				Update("revoked_at", common.GetTimestamp()).Error
+		}
+		return nil
+	})
 }
 
 // UpdateOAuthApp updates mutable fields of an existing app. ClientID and

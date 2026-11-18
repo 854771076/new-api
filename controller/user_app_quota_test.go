@@ -114,6 +114,7 @@ func TestUsersForAppListAndSearchJoinWalletQuota(t *testing.T) {
 	beta := createUserAppQuotaUser(t, db, "beta", 2000, 20)
 	gamma := createUserAppQuotaUser(t, db, "gamma", 3000, 30)
 	const appId = 7
+	require.NoError(t, db.Create(&model.OAuthApp{Id: appId, Name: "App seven", ClientID: "app-seven", ClientSecretHash: "test-hash", Status: model.OAuthAppStatusEnabled}).Error)
 	setUserAppQuotaWallet(t, db, alpha.Id, appId, 50, 5)
 	setUserAppQuotaWallet(t, db, gamma.Id, appId, 400, 25)
 

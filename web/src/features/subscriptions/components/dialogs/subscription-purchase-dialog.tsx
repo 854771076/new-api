@@ -48,6 +48,7 @@ interface PaymentMethod {
 }
 
 interface Props {
+  onPay?: (method: string) => Promise<void>
   open: boolean
   onOpenChange: (open: boolean) => void
   plan: PlanRecord | null
@@ -103,7 +104,21 @@ export function SubscriptionPurchaseDialog(props: Props) {
     (props.purchaseLimit || 0) > 0 &&
     (props.purchaseCount || 0) >= (props.purchaseLimit || 0)
 
+  const payScoped = async (method: string) => {
+    setPaying(true)
+    try {
+      await props.onPay?.(method)
+      props.onOpenChange(false)
+      await props.onPurchaseSuccess?.()
+    } catch (error) {
+      handleServerError(error, t('Payment request failed'))
+    } finally {
+      setPaying(false)
+    }
+  }
+
   const handlePayStripe = async () => {
+    if (props.onPay) return payScoped('stripe')
     setPaying(true)
     try {
       const res = await paySubscriptionStripe({ plan_id: plan.id })
@@ -122,6 +137,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
   }
 
   const handlePayCreem = async () => {
+    if (props.onPay) return payScoped('creem')
     setPaying(true)
     try {
       const res = await paySubscriptionCreem({ plan_id: plan.id })
@@ -142,6 +158,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
   // In-tab redirect (not window.open) — user-gesture context is lost
   // across the await, so a popup would be blocked. Same as the wallet hook.
   const handlePayWaffoPancake = async () => {
+    if (props.onPay) return payScoped('waffo_pancake')
     setPaying(true)
     try {
       const res = await paySubscriptionWaffoPancake({ plan_id: plan.id })
@@ -163,6 +180,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
     /^((?!chrome|android).)*safari/i.test(navigator.userAgent)
 
   const handlePayEpay = async () => {
+    if (props.onPay) return payScoped('epay')
     if (!selectedEpayMethod) {
       toast.error(t('Please select a payment method'))
       return
@@ -203,6 +221,7 @@ export function SubscriptionPurchaseDialog(props: Props) {
   }
 
   const handlePayBalance = async () => {
+    if (props.onPay) return payScoped('balance')
     if (!allowBalancePay) {
       toast.error(t('This plan does not allow balance redemption'))
       return

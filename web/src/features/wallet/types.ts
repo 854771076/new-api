@@ -247,12 +247,22 @@ export interface UserWalletData {
 /**
  * Topup record status
  */
-export type TopupStatus = 'success' | 'pending' | 'expired'
+export type TopupStatus =
+  | 'success'
+  | 'pending'
+  | 'expired'
+  | 'failed'
+  | 'processing'
+  | 'reconciliation_required'
 
 /**
  * Topup billing record
  */
 export interface TopupRecord {
+  purchase_type?: string
+  credits?: string | null
+  quota_snapshot?: number | null
+  currency?: string
   /** Record ID */
   id: number
   /** User ID */

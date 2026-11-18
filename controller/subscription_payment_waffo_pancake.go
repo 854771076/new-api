@@ -115,6 +115,7 @@ func createWaffoPancakeSubscriptionOrder(ctx context.Context, user *model.User, 
 	// WAFFO_PANCAKE_SUB- prefix (vs. wallet's WAFFO_PANCAKE-) drives webhook
 	// dispatch in WaffoPancakeWebhook.
 	tradeNo := fmt.Sprintf("WAFFO_PANCAKE_SUB-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
+	tradeNo = model.AppCheckoutTradeNo(ctx, tradeNo)
 
 	order := &model.SubscriptionOrder{
 		AppId:           plan.AppId,
@@ -147,8 +148,10 @@ func createWaffoPancakeSubscriptionOrder(ctx context.Context, user *model.User, 
 	})
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create subscription checkout session user_id=%d plan_id=%d trade_no=%s error=%q", user.Id, plan.Id, tradeNo, err.Error()))
-		order.Status = common.TopUpStatusFailed
-		_ = order.Update()
+		if model.AppCheckoutFromContext(ctx) == nil {
+			order.Status = common.TopUpStatusFailed
+			_ = order.Update()
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText("Waffo Pancake subscription order created user_id=%d plan_id=%d trade_no=%s session_id=%s money=%.2f", user.Id, plan.Id, tradeNo, session.SessionID, plan.PriceAmount))

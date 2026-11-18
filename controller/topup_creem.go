@@ -310,6 +310,12 @@ func handleCheckoutCompleted(c *gin.Context, event *CreemWebhookEvent) {
 		return
 	}
 
+	if err := model.VerifyAppCheckoutPayment(referenceId, decimal.NewFromInt(int64(event.Object.Order.AmountPaid)).Shift(-2).String(), event.Object.Order.Currency); err != nil {
+		logger.LogError(c.Request.Context(), common.LogText("App checkout payment verification failed trade_no=%s", referenceId))
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+
 	// Try complete subscription order first
 	LockOrder(referenceId)
 	defer UnlockOrder(referenceId)
@@ -526,16 +532,18 @@ func generateCreemTopUpCheckout(ctx context.Context, user *model.User, amount in
 	}
 
 	tradeNo := fmt.Sprintf("CREEM-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
+	tradeNo = model.AppCheckoutTradeNo(ctx, tradeNo)
 	topUp := &model.TopUp{
-		AppId:           appId,
-		UserId:          user.Id,
-		Amount:          selected.Quota,
-		Money:           selected.Price,
-		TradeNo:         tradeNo,
-		PaymentMethod:   model.PaymentMethodCreem,
-		PaymentProvider: model.PaymentProviderCreem,
-		CreateTime:      time.Now().Unix(),
-		Status:          common.TopUpStatusPending,
+		CheckoutCurrency: selected.Currency,
+		AppId:            appId,
+		UserId:           user.Id,
+		Amount:           selected.Quota,
+		Money:            selected.Price,
+		TradeNo:          tradeNo,
+		PaymentMethod:    model.PaymentMethodCreem,
+		PaymentProvider:  model.PaymentProviderCreem,
+		CreateTime:       time.Now().Unix(),
+		Status:           common.TopUpStatusPending,
 	}
 	if err := topUp.Insert(); err != nil {
 		logger.LogError(ctx, common.LogText("Creem failed to create top-up order user_id=%d app_id=%d trade_no=%s product_id=%s error=%q", user.Id, appId, tradeNo, selected.ProductId, err.Error()))
@@ -545,8 +553,10 @@ func generateCreemTopUpCheckout(ctx context.Context, user *model.User, amount in
 	checkoutURL, err = genCreemLink(ctx, tradeNo, selected, user.Email, user.Username)
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Creem failed to create payment link user_id=%d trade_no=%s product_id=%s error=%q", user.Id, tradeNo, selected.ProductId, err.Error()))
-		topUp.Status = common.TopUpStatusFailed
-		_ = topUp.Update()
+		if model.AppCheckoutFromContext(ctx) == nil {
+			topUp.Status = common.TopUpStatusFailed
+			_ = topUp.Update()
+		}
 		return "", "", common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText("Creem top-up order created user_id=%d trade_no=%s product_id=%s product_name=%q quota=%d money=%.2f", user.Id, tradeNo, selected.ProductId, selected.Name, selected.Quota, selected.Price))

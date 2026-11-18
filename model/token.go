@@ -12,6 +12,7 @@ import (
 )
 
 type Token struct {
+	AppId              int             `json:"app_id" gorm:"index;<-:create"`
 	Id                 int             `json:"id"`
 	UserId             int             `json:"user_id" gorm:"index"`
 	Key                string          `json:"key" gorm:"type:varchar(128);uniqueIndex"`
@@ -294,7 +295,7 @@ func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
 		// Don't return error - fall through to DB
 	}
 	token = &Token{}
-	if err = DB.Where(commonKeyCol+" = ?", key).First(token).Error; err != nil {
+	if err = DB.Where(map[string]any{"key": key}).First(token).Error; err != nil {
 		return nil, err
 	}
 	if common.RedisEnabled {

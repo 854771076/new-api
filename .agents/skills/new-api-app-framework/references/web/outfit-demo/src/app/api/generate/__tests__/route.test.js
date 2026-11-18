@@ -105,7 +105,12 @@ test('rejects requests with a disallowed origin', async () => {
 });
 
 test('freezes the quote and creates a pending task with a provider snapshot', async () => {
-  const res = await post(validBody());
+  const first = await post(validBody());
+  expect(first.status).toBe(409);
+  const current = (await first.json()).data;
+  expect(current).toMatchObject({ estimated_quota: 15000, estimated_credits: null, estimate_only: true });
+  expect(inserts).toHaveLength(0);
+  const res = await post({ ...validBody(), quote_id: current.quote_id });
   const json = await res.json();
   expect(res.status).toBe(200);
   expect(json.success).toBe(true);
@@ -122,12 +127,27 @@ test('freezes the quote and creates a pending task with a provider snapshot', as
 });
 
 test('accepts an explicit quality and freezes it in the provider snapshot', async () => {
-  const res = await post({ ...validBody(), quality: 'high' });
+  const first = await post({ ...validBody(), quality: 'high' });
+  const current = (await first.json()).data;
+  const res = await post({ ...validBody(), quality: 'high', quote_id: current.quote_id });
   const json = await res.json();
   expect(res.status).toBe(200);
 
   const insert = inserts.find((i) => i.table === 'outfit_generations');
   expect(insert.input.provider_snapshot).toEqual({ model: 'img-model', size: '1024x1536', quality: 'high', vision_model: 'vision-model' });
+});
+
+test('an old confirmation cannot authorize changed inputs or another user', async () => {
+  const first = await post(validBody());
+  const current = (await first.json()).data;
+  const changed = await post({ ...validBody(), quote_id: current.quote_id, quality: 'high' });
+  expect(changed.status).toBe(409);
+  expect(inserts).toHaveLength(0);
+  user = { id: otherUser };
+  tables.characters[0].user_id = otherUser;
+  tables.outfits[0].user_id = otherUser;
+  expect((await post({ ...validBody(), quote_id: current.quote_id })).status).toBe(409);
+  expect(inserts).toHaveLength(0);
 });
 
 test('a repeated idempotency key returns the original task without re-creating it', async () => {

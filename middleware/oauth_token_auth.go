@@ -48,7 +48,7 @@ func setupContextForOAuthToken(c *gin.Context, rawToken string) bool {
 		return false
 	}
 	app, err := service.LoadOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() {
+	if err != nil || !app.IsOAuthEnabled() {
 		abortWithOpenAiMessage(c, http.StatusForbidden, "oauth app is disabled or unavailable")
 		return false
 	}

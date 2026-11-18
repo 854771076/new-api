@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import { useTranslation } from 'react-i18next'
 
 import { SectionPageLayout } from '@/components/layout'
+import { ActiveAppSwitcher } from '@/components/layout/components/active-app-switcher'
+import { AdminAppScope } from '@/components/layout/components/admin-app-scope'
 
 import { UsersDeleteDialog } from './components/users-delete-dialog'
 import { UsersMutateDrawer } from './components/users-mutate-drawer'
@@ -35,6 +37,7 @@ function UsersContent() {
       <SectionPageLayout fixedContent>
         <SectionPageLayout.Title>{t('Users')}</SectionPageLayout.Title>
         <SectionPageLayout.Actions>
+          <ActiveAppSwitcher includeProxy />
           <UsersPrimaryButtons />
         </SectionPageLayout.Actions>
         <SectionPageLayout.Content>
@@ -52,10 +55,18 @@ function UsersContent() {
   )
 }
 
-export function Users() {
+function UsersInner() {
   return (
     <UsersProvider>
       <UsersContent />
     </UsersProvider>
+  )
+}
+
+export function Users() {
+  return (
+    <AdminAppScope>
+      <UsersInner />
+    </AdminAppScope>
   )
 }

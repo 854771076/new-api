@@ -12,14 +12,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTokenAutoGroupsContext() *gin.Context {
+func newTokenAutoGroupsContext(t *testing.T) *gin.Context {
+	t.Helper()
+	setupDashboardAuthMiddlewareTest(t)
+	require.NoError(t, model.DB.Create(&model.User{Id: 2, Username: "auto-groups-user", AuthVersion: 1}).Error)
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	return ctx
 }
 
 func TestSetupContextForTokenPreservesCustomAutoGroupsOrder(t *testing.T) {
-	ctx := newTokenAutoGroupsContext()
+	ctx := newTokenAutoGroupsContext(t)
 	token := &model.Token{Id: 1, UserId: 2, AutoGroups: `["vip","default"]`}
 
 	require.NoError(t, SetupContextForToken(ctx, token))
@@ -29,7 +32,7 @@ func TestSetupContextForTokenPreservesCustomAutoGroupsOrder(t *testing.T) {
 }
 
 func TestSetupContextForTokenTreatsStoredEmptyArrayAsInheritance(t *testing.T) {
-	ctx := newTokenAutoGroupsContext()
+	ctx := newTokenAutoGroupsContext(t)
 	token := &model.Token{Id: 1, UserId: 2, AutoGroups: `[]`}
 
 	require.NoError(t, SetupContextForToken(ctx, token))
@@ -38,7 +41,7 @@ func TestSetupContextForTokenTreatsStoredEmptyArrayAsInheritance(t *testing.T) {
 }
 
 func TestSetupContextForTokenMalformedAutoGroupsFailsClosed(t *testing.T) {
-	ctx := newTokenAutoGroupsContext()
+	ctx := newTokenAutoGroupsContext(t)
 	token := &model.Token{Id: 1, UserId: 2, AutoGroups: `not-json`}
 
 	require.NoError(t, SetupContextForToken(ctx, token))

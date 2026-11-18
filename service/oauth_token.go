@@ -224,6 +224,9 @@ func IssueOAuthAccessTokenForGrant(grant *model.OAuthRefreshToken, clientID stri
 }
 
 func issueOAuthAccessToken(userID int, clientID, scope string, authVersion int64, sid string, authTime int64) (string, int64, error) {
+	if err := model.RequireNativeUserTx(model.DB, userID); err != nil {
+		return "", 0, ErrOAuthTokenInvalid
+	}
 	if userID <= 0 || clientID == "" || authVersion <= 0 {
 		return "", 0, ErrOAuthTokenInvalid
 	}
@@ -492,11 +495,11 @@ func ValidateOAuthAccessToken(raw string) (*model.User, string, error) {
 	if err != nil {
 		return nil, "", ErrOAuthTokenInvalid
 	}
-	if user.Status != common.UserStatusEnabled || user.AuthVersion != claims.AuthVersion {
+	if user.IsProxy() || user.Status != common.UserStatusEnabled || user.AuthVersion != claims.AuthVersion {
 		return nil, "", ErrOAuthTokenInvalid
 	}
 	app, err := model.GetOAuthAppByClientID(claims.ClientID)
-	if err != nil || !app.IsEnabled() {
+	if err != nil || !app.IsOAuthEnabled() {
 		return nil, "", ErrOAuthTokenInvalid
 	}
 	return user, claims.Scope, nil

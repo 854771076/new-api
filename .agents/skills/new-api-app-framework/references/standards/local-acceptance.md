@@ -26,7 +26,7 @@ For the Management API form, the path is
 Supabase's Auth service fetches the issuer's discovery document when you create
 or use the custom provider. It cannot reach `http://localhost`, so to run the
 full login flow against a cloud Supabase project you must expose the gateway
-over HTTPS. Do **not** tunnel the Next.js frontend — Supabase reaches the
+over HTTPS. For OAuth against hosted Supabase, the frontend can remain local while Supabase reaches the
 **gateway** (the OIDC issuer), not the app.
 
 ```bash
@@ -73,3 +73,10 @@ restart cloudflared** (2b 在 Dashboard 里一次配置多个 tunnel origin 即�
 after testing. `bootstrap.ps1` / `bootstrap.sh` handle the localhost case
 automatically; tunnel origin handling is left manual because the hostname
 changes each session.
+
+
+## Native Supabase proxy acceptance
+
+No custom:newapi provider or OAuth redirect registration is required. Use an isolated local Supabase CLI project and a disposable native user. Expose the gateway, Supabase API (when local), and Next.js App over HTTPS. Configure Supabase external_url/jwt_issuer to the exact public Auth issuer and site_url to the App origin; set the App proxy_issuer to that issuer and production APP_ORIGIN to the public App origin. Production CSRF checks the configured origin, including when Next.js sees an internal localhost URL behind a reverse proxy. Browser and BFF share the App host.
+
+Run committed migrations through Supabase CLI and `scripts/verify-native-rls.py` with explicit test credentials. Then verify native login → studio → profile credits → native owner admin → logout → protected route rejected, with no new-api authorization hop. A fixture credit proves display/scoping only, not a real payment or upstream settlement. Record the session's temporary hostnames and local project ID in the acceptance report, restore configuration, delete disposable users, and stop only the test project's services/tunnels.

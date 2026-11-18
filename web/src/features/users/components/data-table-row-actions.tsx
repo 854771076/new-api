@@ -60,6 +60,7 @@ import {
 } from '../constants'
 import { getUserActionMessage } from '../lib'
 import type { User } from '../types'
+import { AppProxyKeysDialog } from './dialogs/app-proxy-keys-dialog'
 import { UserBindingDialog } from './dialogs/user-binding-dialog'
 import { useUsers } from './users-provider'
 
@@ -87,6 +88,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
   const [resetPasskeyOpen, setResetPasskeyOpen] = useState(false)
   const [resetTwoFAOpen, setResetTwoFAOpen] = useState(false)
   const [bindingDialogOpen, setBindingDialogOpen] = useState(false)
+  const [keysDialogOpen, setKeysDialogOpen] = useState(false)
   const [subscriptionsDialogOpen, setSubscriptionsDialogOpen] = useState(false)
 
   const handleEdit = () => {
@@ -268,6 +270,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             event.preventDefault()
             setSubscriptionsDialogOpen(true)
           }}
+          disabled={user.identity_source === 'proxy'}
         >
           {t('Manage Subscriptions')}
           <DropdownMenuShortcut>
@@ -275,6 +278,16 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
           </DropdownMenuShortcut>
         </DropdownMenuItem>
 
+        {user.identity_source === 'proxy' && (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault()
+              setKeysDialogOpen(true)
+            }}
+          >
+            {t('App AI Keys')}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
 
         <DropdownMenuItem
@@ -341,6 +354,13 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         handleConfirm={handleResetTwoFA}
       />
 
+      {keysDialogOpen && (
+        <AppProxyKeysDialog
+          user={user}
+          open={keysDialogOpen}
+          onOpenChange={setKeysDialogOpen}
+        />
+      )}
       <UserBindingDialog
         open={bindingDialogOpen}
         onOpenChange={setBindingDialogOpen}

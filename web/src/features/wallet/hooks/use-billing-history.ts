@@ -31,6 +31,7 @@ import {
   completeOrder,
   isApiSuccess,
 } from '../api'
+import { getAppOrders } from '../app-wallet-api'
 import type { TopupRecord } from '../types'
 
 // ============================================================================
@@ -38,6 +39,8 @@ import type { TopupRecord } from '../types'
 // ============================================================================
 
 interface UseBillingHistoryOptions {
+  selfOnly?: boolean
+  appId?: number
   /** Initial page number */
   initialPage?: number
   /** Initial page size */
@@ -46,8 +49,10 @@ interface UseBillingHistoryOptions {
 
 export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
   const { initialPage = 1, initialPageSize = 10 } = options
-  const isAdmin = useIsAdmin()
-  const { appId } = useActiveApp()
+  const admin = useIsAdmin()
+  const isAdmin = admin && !options.selfOnly
+  const active = useActiveApp()
+  const appId = options.appId ?? active.appId
 
   const [records, setRecords] = useState<TopupRecord[]>([])
   const [total, setTotal] = useState(0)
@@ -66,6 +71,33 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
     const requestId = ++requestIdRef.current
     setLoading(true)
     try {
+      if (options.selfOnly && appId > 0) {
+        const result = await getAppOrders(
+          appId,
+          page,
+          debouncedKeyword,
+          pageSize
+        )
+        if (requestId !== requestIdRef.current) return
+        setRecords(
+          result.items.map((order, index) => ({
+            id: index,
+            user_id: 0,
+            trade_no: order.order_id,
+            status: order.status as TopupRecord['status'],
+            money: order.money,
+            amount: 0,
+            payment_method: order.purchase_type,
+            create_time: order.created_at,
+            purchase_type: order.purchase_type,
+            credits: order.credits,
+            quota_snapshot: order.quota,
+            currency: order.currency,
+          }))
+        )
+        setTotal(result.total)
+        return
+      }
       const response = isAdmin
         ? await getAllBillingHistory(page, pageSize, debouncedKeyword, appId)
         : await getUserBillingHistory(page, pageSize, debouncedKeyword)
@@ -90,7 +122,7 @@ export function useBillingHistory(options: UseBillingHistoryOptions = {}) {
         setLoading(false)
       }
     }
-  }, [debouncedKeyword, isAdmin, appId, page, pageSize])
+  }, [debouncedKeyword, isAdmin, appId, page, pageSize, options.selfOnly])
 
   /**
    * Complete a pending order (admin only)

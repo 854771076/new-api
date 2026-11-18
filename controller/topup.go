@@ -405,6 +405,7 @@ func generateEpayTopUpCheckout(ctx context.Context, user *model.User, amount int
 	returnUrl, _ := url.Parse(paymentReturnPath("/usage-logs"))
 	notifyUrl, _ := url.Parse(callBackAddress + "/api/user/epay/notify")
 	tradeNo := fmt.Sprintf("USR%dNO%s%d", user.Id, common.GetRandomString(6), time.Now().Unix())
+	tradeNo = model.AppCheckoutTradeNo(ctx, tradeNo)
 	client := GetEpayClient()
 	if client == nil {
 		return "", nil, common.NewMessage("Payment information has not been configured by administrator")
@@ -545,6 +546,10 @@ func EpayNotify(c *gin.Context) {
 	logger.LogInfo(c.Request.Context(), common.LogText("Epay webhook signature verified trade_no=%s callback_type=%s trade_status=%s client_ip=%s verify_info=%q", verifyInfo.ServiceTradeNo, verifyInfo.Type, verifyInfo.TradeStatus, c.ClientIP(), common.GetJsonString(verifyInfo)))
 
 	if verifyInfo.TradeStatus == epay.StatusTradeSuccess {
+		if err := model.VerifyAppCheckoutPayment(verifyInfo.ServiceTradeNo, params["money"], "CNY"); err != nil {
+			_, _ = c.Writer.Write([]byte("fail"))
+			return
+		}
 		// 进程内锁只是优化；重复/并发回调的正确性由 RechargeEpay 的
 		// 数据库行锁 + 事务内状态校验保证（多实例部署下同样安全）。
 		LockOrder(verifyInfo.ServiceTradeNo)

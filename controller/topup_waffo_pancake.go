@@ -70,6 +70,7 @@ func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount 
 	}
 
 	tradeNo := fmt.Sprintf("WAFFO_PANCAKE-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(6))
+	tradeNo = model.AppCheckoutTradeNo(ctx, tradeNo)
 	topUp := &model.TopUp{
 		AppId:           appId,
 		UserId:          user.Id,
@@ -101,8 +102,10 @@ func generateWaffoPancakeCheckout(ctx context.Context, user *model.User, amount 
 	})
 	if err != nil {
 		logger.LogError(ctx, common.LogText("Waffo Pancake failed to create checkout session user_id=%d trade_no=%s error=%q", user.Id, tradeNo, err.Error()))
-		topUp.Status = common.TopUpStatusFailed
-		_ = topUp.Update()
+		if model.AppCheckoutFromContext(ctx) == nil {
+			topUp.Status = common.TopUpStatusFailed
+			_ = topUp.Update()
+		}
 		return nil, common.NewMessage("Failed to start payment")
 	}
 	logger.LogInfo(ctx, common.LogText("Waffo Pancake top-up order created user_id=%d trade_no=%s session_id=%s amount=%d money=%.2f", user.Id, tradeNo, session.SessionID, amount, payMoney))
@@ -526,6 +529,11 @@ func WaffoPancakeWebhook(c *gin.Context) {
 	// Dispatch by trade_no prefix. OrderMerchantExternalID = our trade_no;
 	// OrderID is Pancake's internal ORD_* (logs only).
 	rawTradeNo := strings.TrimSpace(event.Data.OrderMerchantExternalID)
+	if err := model.VerifyAppCheckoutPayment(rawTradeNo, event.Data.Amount, event.Data.Currency); err != nil {
+		logger.LogError(c.Request.Context(), common.LogText("App checkout payment verification failed trade_no=%s", rawTradeNo))
+		c.String(http.StatusBadRequest, "payment verification failed")
+		return
+	}
 
 	if strings.HasPrefix(rawTradeNo, model.AppProductOrderTradeNoPrefix) {
 		completeAppProductWaffoPancakeOrder(c, event, rawTradeNo, bodyBytes)

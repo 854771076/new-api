@@ -15,12 +15,12 @@ export function gatewayFailure(error: unknown) {
 }
 export function requireGatewayOrigin(request: NextRequest): void {
   const origin = request.headers.get('origin');
-  const target = request.nextUrl.origin;
+  let target = request.nextUrl.origin;
   let configured = '';
   try { if (config.appOrigin) configured = new URL(config.appOrigin).origin; } catch { /* fail closed */ }
-  // Do not trust client-supplied Host / X-Forwarded-Host as the production origin.
-  if (!origin || origin !== target ||
-      (process.env.NODE_ENV === 'production' && (!configured || target !== configured))) {
+  // Reverse proxies may expose an internal nextUrl; production trusts only configured APP_ORIGIN.
+  if (process.env.NODE_ENV === 'production') target = configured;
+  if (!origin || !target || origin !== target) {
     throw new GatewayError(403, 'Request origin is not allowed.', 'AUTH_CSRF_REJECTED');
   }
 }

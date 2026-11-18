@@ -26,7 +26,7 @@ func OAuthToken(c *gin.Context) {
 		return
 	}
 	app, err := model.GetOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() {
+	if err != nil || !app.IsOAuthEnabled() {
 		oauthTokenError(c, http.StatusUnauthorized, oauthErrInvalidClient, "client not found or disabled")
 		return
 	}
@@ -76,7 +76,7 @@ func oauthClientCredentials(c *gin.Context) (clientID, clientSecret string) {
 // ignores any presented secret; a confidential client must present the secret
 // that matches the stored hash.
 func oauthClientAuthenticated(app *model.OAuthApp, clientSecret string) bool {
-	if app == nil || !app.IsEnabled() {
+	if app == nil || !app.IsOAuthEnabled() {
 		return false
 	}
 	if app.PublicClient {

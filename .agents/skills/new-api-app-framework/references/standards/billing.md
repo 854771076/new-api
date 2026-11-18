@@ -4,11 +4,17 @@
 
 Prefer the user's existing Supabase login plus a trusted backend holding each user's AI key. Use a scoped admin PAT for supported management calls; create a specified-user checkout only after confirming that the target server actually implements that contract. Existing self-payment and `/api/token/*` handlers use the PAT owner's identity, even when the PAT owner is an administrator. Passing a target `user_id` to them does not delegate the operation.
 
-App-bound key billing, specified-user PAT checkout, App credit configuration and unified credit fields are planned capabilities. An ordinary `sk-...` key currently charges the platform wallet; an OAuth App token charges its App pool. Verify matching funding scopes before connecting checkout to AI use. Do not substitute the administrator's self checkout, manually grant quota as payment confirmation, or create a parallel credits ledger.
+App credit configuration is implemented on this development branch in admin `/api/oauth-apps/` (`quota_per_credit: integer | null`, 1..9007199254740991; omitted update keeps the value, null clears it). It changes display units only. App-bound key billing, specified-user PAT checkout and normalized wallet/quote credit fields are implemented on this branch. An ordinary platform `sk-...` key charges the platform wallet; an App-bound proxy key charges its immutable App wallet only; an OAuth App token charges its App pool. Verify matching funding scopes before connecting checkout to AI use. Do not substitute the administrator's self checkout, manually grant quota as payment confirmation, or create a parallel credits ledger.
 
-When the planned credit APIs are available, display their returned credits and conversion ratio rather than duplicating conversion in each client. `quota` remains the remaining ledger balance; it must not have `used_quota` subtracted again. A quote is an estimate, while actual consumption comes from settlement. These requirements do not imply that the fields already exist on the current endpoints below.
+Display their returned credits and conversion ratio rather than duplicating conversion in each client. `quota` remains the remaining ledger balance; it must not have `used_quota` subtracted again. A quote is an estimate, while actual consumption comes from settlement. Verify deployed support before relying on these fields.
 
-The planned normalized wallet is a separate contract from legacy `/oauth/userinfo`. Its `quota`/`used_quota` are only for its response `app_id`, and credits use that App balance and current ratio; platform `app_id=0` keeps currency display with null ratio/credits. Legacy OAuth `quota`/`used_quota` remain platform fields and `app_quota`/`app_used_quota` remain token-App fields; leave that endpoint unchanged. The new DTO is accessed via the native console session, an authorized specified-user admin PAT, or a planned OAuth `api:read` surface fixed to the token App; never send a dashboard PAT to OAuth or let OAuth choose another App. Proxy reads only its bound App. Routes remain to be implemented. Regression: platform 9000, App 1000, App used 200, ratio 100 returns App credits "10" and used credits "2", never 90 or 8; legacy OAuth still returns platform 9000 and App 1000.
+The normalized wallet is a separate contract from legacy `/oauth/userinfo`. Its `quota`/`used_quota` are only for its response `app_id`, and credits use that App balance and current ratio; platform `app_id=0` keeps currency display with null ratio/credits. Legacy OAuth `quota`/`used_quota` remain platform fields and `app_quota`/`app_used_quota` remain token-App fields; leave that endpoint unchanged. The new DTO is accessed via the native console session, an authorized specified-user admin PAT, or the OAuth `api:read` surface fixed to the token App; never send a dashboard PAT to OAuth or let OAuth choose another App. Proxy reads only its bound App. Routes: `/api/user/self/wallet`, `/api/app-proxy/users/:user_id/wallet`, `/oauth/wallet`. All return the success envelope. Regression: platform 9000, App 1000, App used 200, ratio 100 returns App credits "10" and used credits "2", never 90 or 8; legacy OAuth still returns platform 9000 and App 1000.
+
+Credit conversion preserves signed wallet debt. Truncate toward zero to at most six decimal places: quota -100 / ratio 100 returns credits "-1", and -1 / 3 returns "-0.333333". Subprecision negative amounts return "0", but the UI must use the raw negative quota to show debt below 0.000001 credits, never a debt-free zero. Top-ups first repay debt (-100 + 60 = -40). Preserve actual settlement and reject insufficient-balance new requests; display rules do not change ledger accounting.
+
+OAuth order reads (`GET /oauth/orders` and `/oauth/orders/:order_id`): api:read, user and App fixed to the validated token, covering own App top-up, product and subscription orders. Add the reference OAuth BFF consumer there; the proxy reference remains independent of OAuth order reads and has no subscriptions. No dashboard PAT/session is needed for this target OAuth read contract. Verify deployed route support; keep awaiting-confirmation behavior on older instances. When OAuth is disabled, use the separate native-console historical read path.
+
+Checkout/read correlation: every checkout branch covered by order reads must return a stable order_id while retaining existing fields and synchronous success versus online pending, including balance top-up/subscription and Stripe/Epay. Persist a queryable balance order and its ownership atomically with the transfer/purchase. Before any charge, grant or provider creation, persist an idempotency request scoped to the trusted actor, source, user, App and purchase type with canonical inputs: same key/inputs recovers the same order ID/snapshot; changed inputs conflict. Recover in-flight or unknown provider results by that key/reconciliation without repeating side effects. Expired orders keep their ID/status; a deliberate new purchase uses a new key. Update the reference BFF, gateway-contract.ts, response schemas and trusted order mapping together; save the key before calling so a lost first response or mapping-write failure is recoverable. The new BFF must send the key; retain legacy keyless requests compatibly, but never promise recoverable retries or automatically resubmit an unknown result without a key. Two same-plan purchases with distinct keys must remain distinguishable. Never infer an ID from the newest order, plan/amount, URL or balance. These are branch extensions to existing checkout cores; capability-gate required order_id validation and keep old instances without IDs awaiting confirmation.
 
 Target proxy contracts are balance/top-up/one-time quota products only: **no subscriptions**, including reads, checkout, admin grants and relay funding. Dual-mode users are independent and must not share gateway IDs/assets. Enforce capability from trusted user origin, not merely `oauth_enabled`. OAuth-only plans and subscription examples below remain available to OAuth users.
 
@@ -22,9 +28,8 @@ surfaces exist:
 - `/api/*` — the dashboard user system (platform wallet, platform plans, PATs).
   It rejects OAuth access tokens; use a dashboard session or a PAT.
 - `/oauth/*` — identity, App quota, plans, products, and top-up accept the OAuth
-  access token. Catalog/payment calls are App-scoped. `/oauth/logs` is the
-  exception: it returns the token owner's user-wide redacted logs without an
-  App filter; do not label it as this App's usage history.
+  access token. Catalog/payment calls are App-scoped. `/oauth/logs` returns the
+  token owner's redacted logs, filtered to the fixed App.
 
 An OAuth App has its own catalog (`app_id`) and its own quota pool
 (`app_quota`). Platform `quota` keeps its original meaning and is not charged
@@ -62,7 +67,7 @@ or role. Admin permissions therefore come from your own store
 (`app_metadata.admin_role` / `app_admins`), not from new-api — see **Step 8** in
 `../../SKILL.md`.
 
-Provision an ordinary user for the existing native/OAuth path (admin session, or admin PAT with the matching `user` scope). This example does not establish proxy origin/App ownership, a unique external identity or recoverable stable-ID return; it is insufficient for proxy provisioning. That planned contract is defined in `identity.md`.
+Provision an ordinary user for the existing native/OAuth path (admin session, or admin PAT with the matching `user` scope). This example does not establish proxy origin/App ownership, a unique external identity or recoverable stable-ID return; it is insufficient for proxy provisioning. That controlled contract is defined in `identity.md`.
 
 ```http
 POST /api/user/
@@ -110,7 +115,9 @@ external system:
 
 Admin list/search accept `app_id` to switch to the App view: each user then
 carries `app_quota` and `app_used_quota` for that App (`0` when the user has no
-wallet there). Omitting `app_id`, or passing `0`, keeps the platform view.
+wallet there). This is a LEFT JOIN over all users, not an App-account ownership filter. Omitting `app_id`, or passing `0`, keeps the platform view.
+
+The App user-list contract adds the protected proxy-account ownership condition: in App A, proxy rows must belong to A, even without an explicit source filter. Include A accounts without a wallet as zero balance; exclude B proxy accounts. Apply identical conditions to list/search/count/pagination/sort. Preserve existing OAuth/platform account funding-view behavior and the global admin directory; showing a proxy account globally does not authorize crediting another App or its platform wallet.
 
 ## 3. Quota units
 
@@ -125,8 +132,7 @@ display type (money amount or token count), **not** quota units — never send a
 only; relay calls made with an App token are charged to that App's pool
 (`app_quota`) and, when the App has an active subscription, to the App-scoped
 subscription first. Platform subscriptions (`GET /api/subscription/self`) and
-App subscriptions are separate scopes; no OAuth endpoint currently exposes App
-subscription state.
+App subscriptions are separate scopes. `/oauth/wallet` exposes normalized balances and capabilities; the native console scoped catalog includes own App subscriptions. Proxy users have no subscription state.
 
 ## 4. Personal access tokens (PAT)
 
@@ -273,8 +279,8 @@ Payment matrix:
 | Purchase | Supported `payment_method` |
 |----------|----------------------------|
 | App subscription plan | `balance`, `epay`, `stripe`, `creem`, `waffo_pancake` |
-| App product | `balance`, `waffo_pancake` |
-| App top-up | `balance`, `waffo_pancake` (default when omitted) |
+| App product | `balance`, `epay`, `stripe`, `creem`, `waffo_pancake`, subject to configured product IDs/currency |
+| App top-up | `balance`, configured Epay method, `stripe`, `creem`, `waffo_pancake` (default when omitted); proxy supports Pancake only |
 
 Rules specific to the App pool:
 
@@ -290,8 +296,7 @@ Rules specific to the App pool:
 - `balance` plan and product purchases debit `app_quota` itself (platform plans
   debit the platform wallet). An empty App pool fails with `400
   checkout_failed`; fund it with App top-up first.
-- App top-up and product orders are App records; no OAuth endpoint lists their
-  status yet. Record `order_id` (`trade_no`) and its verified user/App ownership.
+- App top-up, product and subscription orders are App records. Use `/oauth/orders` and `/oauth/orders/:order_id` (`api:read`) fixed to the token user/App. Record `order_id` (`trade_no`) and its verified user/App ownership.
   Confirm success only through a supported, authorized order query for that
   exact order, then refresh `app_quota`. Without that query capability, show
   awaiting confirmation; balance changes cannot establish an order's status.
@@ -398,9 +403,9 @@ quota units to credits for display, but there is exactly one balance per pool.
 |------------|-----------------|-----|
 | Platform balance / credits | `quota`, `used_quota` | `GET /api/user/self` (scope `profile:read`) or `/oauth/userinfo` (`api:read`) |
 | App quota pool | `app_quota`, `app_used_quota` | `GET /oauth/userinfo` (`api:read`) |
-| Subscription quota | active subscriptions | `GET /api/subscription/self` (platform, scope `wallet:read`); App subscriptions are not exposed |
+| Subscription quota | active subscriptions | `GET /api/subscription/self` (platform, scope `wallet:read`); console `/api/user/self/app-catalog?app_id=<id>` includes own App subscriptions |
 | App plans and products | App catalog | `GET /oauth/subscription/plans`, `GET /oauth/products` (`api:read`) |
-| Top-up orders | payment records | `GET /api/user/topup/self` (platform, scope `wallet:read`); App orders are not exposed |
+| App orders | immutable App purchase records | `GET /oauth/orders` (`api:read`), console `/api/user/self/orders?app_id=<id>`, or scoped proxy admin route (`billing:read`) |
 | Consumption / usage | request logs | `/oauth/logs` (`api:read`), or `GET /api/log/self`, `/self/stat`, `/self/search` (scope `usage:read`) |
 | Channels and compliance | payment config | `GET /api/user/topup/info` |
 
@@ -410,7 +415,7 @@ Choose the access mode that matches the identity flow:
 |------|-------------------------|-----|
 | Dashboard session (embedded dashboard or BFF login) | Yes | Browser session cookie on the gateway origin, or a same-site BFF |
 | PAT (`profile:read`, `wallet:read`, `billing:read`, `usage:read`) | Yes, for that user | User creates it in the new-api dashboard |
-| OAuth access token only (Supabase direct mode) | App pool/catalog and platform wallet totals: yes; order/subscription history: no | `/oauth/userinfo` includes platform `quota` and App `app_quota`; `/oauth/*` handles App purchases and user-wide redacted logs; `/api/*` rejects OAuth tokens |
+| OAuth access token only (Supabase direct mode) | App pool/catalog, platform wallet totals and exact App order history: yes | `/oauth/userinfo` includes platform `quota` and App `app_quota`; `/oauth/*` handles App purchases and App-scoped redacted logs; `/api/*` rejects OAuth tokens |
 
 Rules:
 
@@ -419,9 +424,7 @@ Rules:
   user to `<GATEWAY_PUBLIC_URL>/app.html#/topup` for App quota, and do not
   reimplement payment. Platform wallet top-up and platform order history still
   require the dashboard (or a PAT), and an OAuth token can never mint a PAT.
-- A service-account PAT cannot read another user's wallet: every `/self`
-  endpoint returns the token owner's data. Cross-user reads require admin
-  endpoints (`GET /api/user/` with `user:read`, `GET /api/user/topup` with
+- Every `/self` endpoint returns the PAT owner's data. A scoped administrator PAT can read a specified user through `/api/app-proxy/users/:user_id/wallet?app_id=<id>` (`user:read`). Other cross-user reads require admin endpoints (`GET /api/user/` with `user:read`, `GET /api/user/topup` with
   `billing:read`) and belong in the admin console, never in the consumer app to
   fabricate per-user balances.
 - No second ledger: no local `credits`, `wallet`, or `orders` table as the
@@ -445,12 +448,12 @@ Rules:
 
 **不要**让用户跳 `{gateway}/app.html#/topup` 充 App 额度——站内体验断了。推荐模式：
 
-1. Server Action / Route Handler 内持有 OAuth access token（来自 Supabase session 的 provider_token），调 new-api `POST /oauth/topup/checkout`，body 为 `{"amount":10,"payment_method":"waffo_pancake"}`（省略 `payment_method` 时默认 `waffo_pancake`）。返回 `checkout_url` 与 `order_id`；后端保存订单与已验证用户/App 的归属，Route Handler 对前端仅返回收银台链接及订单标识；**不向前端透传 access token**。
+1. OAuth 模式的 Server Action / Route Handler 从私有加密会话库读取 OAuth access token（仅在已验证的 PKCE 回调初始化，禁止每次请求从 provider_token 恢复），调 new-api `POST /oauth/topup/checkout`，body 为 `{"amount":10,"payment_method":"waffo_pancake"}`（省略 `payment_method` 时默认 `waffo_pancake`）。返回 `checkout_url` 与 `order_id`；后端保存订单与已验证用户/App 的归属，Route Handler 对前端仅返回收银台链接及订单标识；**不向前端透传 access token**。
    - 也可用 `"payment_method":"balance"`：从用户**平台余额**扣款并转入该 App 额度池，余额不足返回 `400 checkout_failed`（不是免费发放）。
    - `amount` 是配置的展示单位整数，不是 quota。
 2. 前端点击"充值"按钮 → fetch Route Handler → 得到 checkout_url → 打开 DaisyUI `<dialog>` / `<dialog className="modal">` + iframe `src={checkoutUrl}`。Modal 右上角关闭按钮。
 3. 降级路径：如果 Waffo 策略阻止 iframe，catch 后 `window.open(checkoutUrl, '_blank', 'width=720,height=640')`。
-4. 用户关闭 Modal 后，后端通过已支持且有权限的订单查询核对该 `order_id` 的用户/App 归属与成功状态，再刷新 `/oauth/userinfo` 的 `app_quota`。若目标实例没有对应查询能力，界面保持“待确认”；不能以余额变化、关闭弹窗或浏览器回跳确认该订单支付成功，也不能假定存在尚未实现的 OAuth 订单接口。
+4. 用户关闭 Modal 后，后端通过已支持且有权限的订单查询核对该 `order_id` 的用户/App 归属与成功状态，再刷新 `/oauth/userinfo` 的 `app_quota`。若目标实例没有对应查询能力，界面保持“待确认”；不能以余额变化、关闭弹窗或浏览器回跳确认该订单支付成功，本分支使用 `/oauth/orders/:order_id`，旧部署需要先确认能力。
 
 平台钱包充值、平台订单历史仍需 newapi 仪表板或 PAT；App 额度与 App 套餐/商品不需要。
 
@@ -461,9 +464,11 @@ Rules:
 - 用 OAuth access token 调 `/oauth/logs`（scope `api:read`），走 Route Handler 代理（前端不拿 token）。
 - 返回已脱敏的白名单字段；不需要也不应该在外部 app 显示 prompt 原文或上游 API key。
 - Profile 页面用 DaisyUI `<table>` 渲染，服务端分页（`page`/`page_size`）+ 空状态。
-- `/oauth/logs` 当前返回用户全量日志，未按 App 筛选。成功响应是裸
+- `/oauth/logs` 按已验证 token 的用户和 App 在服务端筛选。代理使用 `/api/app-proxy/users/:user_id/logs?app_id=<id>`（管理员 `log:read`），BFF 固定可信目标。成功响应是裸
   `{total,page,page_size,items}`；item 白名单仅为 `id,created_at,username,token_name,
   model_name,quota,prompt_tokens,completion_tokens,use_time,channel_name,group,request_id`。
   不返回 `type,is_stream,channel_id,upstream_request_id,content,other,ip,user_id,token_id`。
   默认 page=1/page_size=20，page 最大 10000，page_size 上限 100；不支持 `order`。
-  不能靠客户端筛选把此接口变成租户隔离；如需 App 专属日志，需要新的服务端契约。
+  租户隔离由服务端查询实现，不能依赖客户端筛选。
+
+Scoped payment limits: proxy checkout and top-up preview currently use Waffo Pancake only. OAuth retains supported payment cores. Epay scoped purchases require CNY; Stripe scoped top-up requires an active USD one-time per-unit Price with an integer minor-unit price and whole quantities. Its payable snapshot uses the provider Price, not the purchased unit count. Promotion codes are disabled for scoped Stripe checkout so the paid amount matches the frozen snapshot. A provider price/currency mismatch or late payment remains reconciliation_required; sandbox merchant acceptance is still required. Unsupported periodic key-rule fields are rejected explicitly; this branch does not add a separate rules engine.

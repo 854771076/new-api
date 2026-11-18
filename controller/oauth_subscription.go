@@ -50,7 +50,7 @@ func OAuthSubscriptionPlans(c *gin.Context) {
 		return
 	}
 	app, err := service.LoadOAuthAppByClientID(clientID)
-	if err != nil || !app.IsEnabled() {
+	if err != nil || !app.IsOAuthEnabled() {
 		c.JSON(http.StatusForbidden, gin.H{"error": "invalid_client", "error_description": "oauth app is disabled or unavailable"})
 		return
 	}
@@ -62,6 +62,9 @@ func OAuthSubscriptionPlans(c *gin.Context) {
 	}
 	result := make([]SubscriptionPlanDTO, 0, len(plans))
 	for _, p := range plans {
+		if p.TotalAmount > 0 {
+			p.Credits = app.Credits(int(p.TotalAmount))
+		}
 		result = append(result, SubscriptionPlanDTO{Plan: p})
 	}
 	c.JSON(http.StatusOK, gin.H{"plans": result})
