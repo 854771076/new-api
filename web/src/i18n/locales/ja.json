@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "この API キーのクォータルールは開始前です",
     "API key quota rule has expired": "この API キーのクォータルールは期限切れです",
     "rotation_cancelled": "ローテーションは取消済みのため置換キーを復元できません",
-    "reservation_snapshot_unavailable": "元の予約に予算スナップショットがなく追加予約できません"
+    "reservation_snapshot_unavailable": "元の予約に予算スナップショットがなく追加予約できません",
+    "Basic information": "基本情報",
+    "Integration modes": "連携方式",
+    "Credits and payments": "クレジットと支払い",
+    "OAuth configuration": "OAuth 設定",
+    "Discover AI apps for your next idea. Choose an app to get started.": "次のアイデアに役立つ AI アプリを見つけましょう。アプリを選んで始めましょう。",
+    "Published apps will appear here. Check back soon to discover something new.": "公開されたアプリがここに表示されます。新しいアプリの登場をお待ちください。"
   }
 }

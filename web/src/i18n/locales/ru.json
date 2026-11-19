@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "Правило квоты API-ключа ещё не вступило в силу",
     "API key quota rule has expired": "Срок действия правила квоты API-ключа истёк",
     "rotation_cancelled": "Ротация отменена, новый ключ нельзя восстановить",
-    "reservation_snapshot_unavailable": "У исходного резерва нет снимка бюджета; дополнительное резервирование недоступно"
+    "reservation_snapshot_unavailable": "У исходного резерва нет снимка бюджета; дополнительное резервирование недоступно",
+    "Basic information": "Основная информация",
+    "Integration modes": "Режимы интеграции",
+    "Credits and payments": "Баллы и платежи",
+    "OAuth configuration": "Настройки OAuth",
+    "Discover AI apps for your next idea. Choose an app to get started.": "Откройте ИИ-приложения для ваших идей. Выберите приложение, чтобы начать.",
+    "Published apps will appear here. Check back soon to discover something new.": "Опубликованные приложения появятся здесь. Загляните позже, чтобы узнать о новинках."
   }
 }

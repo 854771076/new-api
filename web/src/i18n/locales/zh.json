@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "此 API Key 的配额规则尚未生效",
     "API key quota rule has expired": "此 API Key 的配额规则已到期",
     "rotation_cancelled": "此轮换已取消，替换 Key 不可恢复",
-    "reservation_snapshot_unavailable": "原预留缺少预算快照，无法补充预扣"
+    "reservation_snapshot_unavailable": "原预留缺少预算快照，无法补充预扣",
+    "Basic information": "基本信息",
+    "Integration modes": "接入方式",
+    "Credits and payments": "积分与支付",
+    "OAuth configuration": "OAuth 授权配置",
+    "Discover AI apps for your next idea. Choose an app to get started.": "发现适合你的 AI 应用，让下一个想法成为现实。选择应用，即刻开始。",
+    "Published apps will appear here. Check back soon to discover something new.": "应用发布后会展示在这里，敬请期待新的发现。"
   }
 }

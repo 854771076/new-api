@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "Quy tắc hạn ngạch của khóa API chưa bắt đầu",
     "API key quota rule has expired": "Quy tắc hạn ngạch của khóa API đã hết hạn",
     "rotation_cancelled": "Đã hủy xoay khóa, không thể khôi phục khóa thay thế",
-    "reservation_snapshot_unavailable": "Khoản giữ chỗ gốc thiếu ảnh chụp ngân sách; không thể giữ chỗ bổ sung"
+    "reservation_snapshot_unavailable": "Khoản giữ chỗ gốc thiếu ảnh chụp ngân sách; không thể giữ chỗ bổ sung",
+    "Basic information": "Thông tin cơ bản",
+    "Integration modes": "Chế độ tích hợp",
+    "Credits and payments": "Điểm và thanh toán",
+    "OAuth configuration": "Cấu hình OAuth",
+    "Discover AI apps for your next idea. Choose an app to get started.": "Khám phá ứng dụng AI cho ý tưởng tiếp theo. Chọn một ứng dụng để bắt đầu.",
+    "Published apps will appear here. Check back soon to discover something new.": "Các ứng dụng đã xuất bản sẽ xuất hiện ở đây. Hãy quay lại để khám phá những điều mới."
   }
 }

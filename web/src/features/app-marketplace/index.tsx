@@ -17,12 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
+import { ArrowUpRight, LayoutGrid } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout'
 import { LoadingState } from '@/components/loading-state'
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { buttonVariants } from '@/components/ui/button'
 import {
   Card,
@@ -57,8 +59,22 @@ export function AppMarketplace() {
   })
   return (
     <PublicLayout>
-      <div className='space-y-6 py-6'>
-        <h1 className='text-2xl font-semibold'>{t('App marketplace')}</h1>
+      <div className='mx-auto max-w-6xl space-y-8 py-6 sm:py-10'>
+        <header className='bg-muted/30 flex items-start gap-4 rounded-2xl border p-6 sm:gap-6 sm:p-10'>
+          <div className='bg-primary/10 text-primary flex size-12 shrink-0 items-center justify-center rounded-xl sm:size-14'>
+            <LayoutGrid className='size-6' aria-hidden='true' />
+          </div>
+          <div className='min-w-0 space-y-3'>
+            <h1 className='text-2xl font-semibold tracking-tight sm:text-3xl'>
+              {t('App marketplace')}
+            </h1>
+            <p className='text-muted-foreground max-w-xl text-sm leading-relaxed sm:text-base'>
+              {t(
+                'Discover AI apps for your next idea. Choose an app to get started.'
+              )}
+            </p>
+          </div>
+        </header>
         {query.isPending && <LoadingState />}
         {query.isError && (
           <ErrorState
@@ -67,36 +83,64 @@ export function AppMarketplace() {
           />
         )}
         {query.isSuccess && query.data.length === 0 && (
-          <EmptyState title={t('No apps available yet')} />
+          <EmptyState
+            icon={LayoutGrid}
+            title={t('No apps available yet')}
+            description={t(
+              'Published apps will appear here. Check back soon to discover something new.'
+            )}
+            bordered
+            className='bg-muted/10 min-h-80 rounded-2xl sm:min-h-96'
+          />
         )}
         {query.isSuccess && (
-          <div className='grid gap-4 sm:grid-cols-2 lg:grid-cols-3'>
+          <div className='grid gap-5 sm:grid-cols-2 lg:grid-cols-3'>
             {query.data.map((app) => (
-              <Card key={app.id}>
-                <CardHeader>
-                  {app.logo_url && (
-                    <img
+              <Card
+                key={app.id}
+                className='min-w-0 gap-6 pt-6 transition-shadow hover:shadow-md motion-reduce:transition-none'
+              >
+                <CardHeader className='gap-4 px-6'>
+                  <Avatar className='size-14 rounded-xl after:rounded-xl'>
+                    <AvatarImage
                       src={app.logo_url}
                       alt=''
-                      className='mb-2 size-12 rounded-md object-contain'
+                      className='rounded-xl object-contain'
                       loading='lazy'
                       referrerPolicy='no-referrer'
                     />
-                  )}
-                  <CardTitle className='break-words'>{app.name}</CardTitle>
-                  <CardDescription className='break-words whitespace-pre-wrap'>
+                    <AvatarFallback className='bg-primary/10 text-primary rounded-xl text-lg font-semibold'>
+                      {app.name.slice(0, 1).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <CardTitle>
+                    <h2
+                      className='line-clamp-2 text-lg font-semibold [overflow-wrap:anywhere]'
+                      title={app.name}
+                    >
+                      {app.name}
+                    </h2>
+                  </CardTitle>
+                  <CardDescription
+                    className='line-clamp-3 min-h-16 leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap'
+                    title={app.description}
+                  >
                     {app.description}
                   </CardDescription>
                 </CardHeader>
-                <CardFooter className='mt-auto'>
+                <CardFooter className='bg-muted/20 mt-auto border-t px-6 py-4'>
                   <a
-                    className={buttonVariants()}
+                    className={buttonVariants({
+                      variant: 'outline',
+                      className: 'w-full justify-between',
+                    })}
                     href={app.url}
                     target='_blank'
                     rel='noopener noreferrer'
                     aria-label={t('Open {{app}}', { app: app.name })}
                   >
                     {t('Open App')}
+                    <ArrowUpRight className='size-4' aria-hidden='true' />
                   </a>
                 </CardFooter>
               </Card>

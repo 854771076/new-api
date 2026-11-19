@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "此 API Key 的配額規則尚未生效",
     "API key quota rule has expired": "此 API Key 的配額規則已到期",
     "rotation_cancelled": "此輪換已取消，替換 Key 無法恢復",
-    "reservation_snapshot_unavailable": "原預留缺少預算快照，無法補充預扣"
+    "reservation_snapshot_unavailable": "原預留缺少預算快照，無法補充預扣",
+    "Basic information": "基本資訊",
+    "Integration modes": "接入方式",
+    "Credits and payments": "點數與付款",
+    "OAuth configuration": "OAuth 授權設定",
+    "Discover AI apps for your next idea. Choose an app to get started.": "探索適合你的 AI 應用，實現下一個靈感。選擇應用，立即開始。",
+    "Published apps will appear here. Check back soon to discover something new.": "應用發布後會顯示於此，敬請期待新的發現。"
   }
 }

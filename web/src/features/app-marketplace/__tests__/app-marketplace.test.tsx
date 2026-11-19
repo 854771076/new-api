@@ -65,6 +65,13 @@ test('renders public App metadata as text and opens a protected external link', 
   expect(link).toHaveAttribute('target', '_blank')
   expect(link).toHaveAttribute('rel', 'noopener noreferrer')
   expect(screen.getByText('<script>example</script>')).toBeInTheDocument()
+  expect(
+    screen.getByRole('heading', { name: 'Drawing App', level: 2 })
+  ).toBeInTheDocument()
+  expect(screen.getByTitle('<script>example</script>')).toHaveClass(
+    'line-clamp-3'
+  )
+  expect(screen.getByText('D')).toBeInTheDocument()
   expect(document.querySelector('main script')).toBeNull()
 })
 
@@ -72,6 +79,11 @@ test('distinguishes an empty catalogue from a failed request', async () => {
   vi.spyOn(api, 'get').mockResolvedValue({ data: { success: true, data: [] } })
   renderMarketplace()
   expect(await screen.findByText('No apps available yet')).toBeInTheDocument()
+  expect(
+    screen.getByText(
+      'Published apps will appear here. Check back soon to discover something new.'
+    )
+  ).toBeInTheDocument()
   expect(screen.queryByText('Failed to load apps')).not.toBeInTheDocument()
 })
 

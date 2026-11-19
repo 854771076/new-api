@@ -23,6 +23,7 @@ import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CopyButton } from '@/components/copy-button'
+import { Dialog as AppDialog } from '@/components/dialog'
 import { ErrorState } from '@/components/error-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -600,109 +601,104 @@ function AppForm({
   }
 
   return (
-    <div className='space-y-4'>
-      <div>
-        <Label htmlFor={logoInputId} className='mb-1 block text-sm font-medium'>
-          {t('App Logo')}
-        </Label>
-        <div className='flex items-center gap-3'>
-          {logoUrl ? (
-            <img
-              src={logoUrl}
-              alt=''
-              className='bg-background size-12 shrink-0 rounded-md border object-contain'
-            />
-          ) : (
-            <div
-              aria-hidden='true'
-              className='bg-muted flex size-12 shrink-0 items-center justify-center rounded-md border text-lg font-semibold'
-            >
-              {(name || '?').slice(0, 1).toUpperCase()}
-            </div>
-          )}
-          <input
-            id={logoInputId}
-            ref={logoInputRef}
-            type='file'
-            accept={LOGO_TYPES.join(',')}
-            className='sr-only'
-            disabled={loading}
-            onChange={handleLogoChange}
-          />
-          <Button
-            type='button'
-            variant='outline'
-            size='sm'
-            disabled={loading}
-            onClick={() => logoInputRef.current?.click()}
+    <div className='min-w-0 space-y-6'>
+      <fieldset className='grid min-w-0 gap-4 sm:grid-cols-2'>
+        <legend className='mb-4 text-sm font-semibold'>
+          {t('Basic information')}
+        </legend>
+        <div>
+          <Label
+            htmlFor={logoInputId}
+            className='mb-1 block text-sm font-medium'
           >
-            {t('Upload')}
-          </Button>
-          {logoUrl ? (
+            {t('App Logo')}
+          </Label>
+          <div className='flex items-center gap-3'>
+            {logoUrl ? (
+              <img
+                src={logoUrl}
+                alt=''
+                className='bg-background size-12 shrink-0 rounded-md border object-contain'
+              />
+            ) : (
+              <div
+                aria-hidden='true'
+                className='bg-muted flex size-12 shrink-0 items-center justify-center rounded-md border text-lg font-semibold'
+              >
+                {(name || '?').slice(0, 1).toUpperCase()}
+              </div>
+            )}
+            <input
+              id={logoInputId}
+              ref={logoInputRef}
+              type='file'
+              accept={LOGO_TYPES.join(',')}
+              className='sr-only'
+              disabled={loading}
+              onChange={handleLogoChange}
+            />
             <Button
               type='button'
-              variant='ghost'
+              variant='outline'
               size='sm'
               disabled={loading}
-              onClick={() => {
-                setLogoUrl('')
-                setLogoError('')
-              }}
+              onClick={() => logoInputRef.current?.click()}
             >
-              {t('Remove')}
+              {t('Upload')}
             </Button>
+            {logoUrl ? (
+              <Button
+                type='button'
+                variant='ghost'
+                size='sm'
+                disabled={loading}
+                onClick={() => {
+                  setLogoUrl('')
+                  setLogoError('')
+                }}
+              >
+                {t('Remove')}
+              </Button>
+            ) : null}
+          </div>
+          {logoError ? (
+            <p className='text-destructive mt-1 text-xs'>{logoError}</p>
           ) : null}
         </div>
-        {logoError ? (
-          <p className='text-destructive mt-1 text-xs'>{logoError}</p>
-        ) : null}
-      </div>
-      <div>
-        <Label
-          htmlFor={`${fieldID}-name`}
-          className='mb-1 block text-sm font-medium'
-        >
-          {t('App Name')}
-        </Label>
-        <Input
-          id={`${fieldID}-name`}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder='My App'
-          disabled={loading}
-        />
-      </div>
-      <div>
-        <Label
-          htmlFor={`${fieldID}-return`}
-          className='mb-1 block text-sm font-medium'
-        >
-          {t('Payment return URL (Waffo Pancake)')}
-        </Label>
-        <Input
-          id={`${fieldID}-return`}
-          value={waffoPancakeReturnUrl}
-          onChange={(e) => setWaffoPancakeReturnUrl(e.target.value)}
-          placeholder='https://example.com/payment/return'
-          disabled={loading}
-        />
-        <p className='text-muted-foreground mt-1 text-xs'>
-          {t('Leave empty to use the global return URL')}
-        </p>
-      </div>
-      <div className='space-y-3 rounded-md border p-3'>
-        <div className='flex items-center justify-between gap-4'>
+        <div>
+          <Label
+            htmlFor={`${fieldID}-name`}
+            className='mb-1 block text-sm font-medium'
+          >
+            {t('App Name')}
+          </Label>
+          <Input
+            id={`${fieldID}-name`}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder='My App'
+            disabled={loading}
+          />
+        </div>
+      </fieldset>
+      <fieldset className='min-w-0 space-y-4 rounded-xl border p-4'>
+        <legend className='px-2 text-sm font-semibold'>
+          {t('Integration modes')}
+        </legend>
+        <div className='flex min-w-0 items-center justify-between gap-4'>
           <Label htmlFor={`${fieldID}-proxy`}>{t('API key proxy')}</Label>
           <Switch
+            className='shrink-0'
             id={`${fieldID}-proxy`}
             checked={apiKeyEnabled}
             onCheckedChange={setAPIKeyEnabled}
             disabled={loading}
           />
         </div>
-        <div className='flex items-center justify-between gap-4'>
+        <div className='flex min-w-0 items-center justify-between gap-4'>
           <Label htmlFor={`${fieldID}-oauth`}>{t('OAuth login')}</Label>
           <Switch
+            className='shrink-0'
             id={`${fieldID}-oauth`}
             checked={oauthEnabled}
             onCheckedChange={setOAuthEnabled}
@@ -734,77 +730,119 @@ function AppForm({
             {t('Enable at least one App integration mode')}
           </p>
         )}
-      </div>
-      <div className='space-y-2'>
-        <Label htmlFor={`${fieldID}-ratio`}>{t('Quota per credit')}</Label>
-        <Input
-          id={`${fieldID}-ratio`}
-          type='number'
-          min={1}
-          max={Number.MAX_SAFE_INTEGER}
-          step={1}
-          value={creditRatio}
-          onChange={(event) => setCreditRatio(event.target.value)}
-          disabled={loading}
-          aria-invalid={!ratioValid}
-        />
-        <p className='text-muted-foreground text-xs'>
-          {t('Leave empty to keep the original quota display')}
-        </p>
-        {ratioValid && ratio !== null && (
+      </fieldset>
+      <fieldset className='grid min-w-0 gap-4 rounded-xl border p-4 sm:grid-cols-2'>
+        <legend className='px-2 text-sm font-semibold'>
+          {t('Credits and payments')}
+        </legend>
+        <div className='min-w-0 space-y-2'>
+          <Label htmlFor={`${fieldID}-ratio`}>{t('Quota per credit')}</Label>
+          <Input
+            id={`${fieldID}-ratio`}
+            type='number'
+            min={1}
+            max={Number.MAX_SAFE_INTEGER}
+            step={1}
+            value={creditRatio}
+            onChange={(event) => setCreditRatio(event.target.value)}
+            disabled={loading}
+            aria-invalid={!ratioValid}
+          />
           <p className='text-muted-foreground text-xs'>
-            {t('1 credit = {{quota}} quota', {
-              quota: formatNumber(ratio, locale),
-            })}
+            {t('Leave empty to keep the original quota display')}
           </p>
-        )}
-        {!ratioValid && (
-          <p role='alert' className='text-destructive text-xs'>
-            {t('Invalid App credit ratio')}
+          {ratioValid && ratio !== null && (
+            <p className='text-muted-foreground text-xs'>
+              {t('1 credit = {{quota}} quota', {
+                quota: formatNumber(ratio, locale),
+              })}
+            </p>
+          )}
+          {!ratioValid && (
+            <p role='alert' className='text-destructive text-xs'>
+              {t('Invalid App credit ratio')}
+            </p>
+          )}
+        </div>
+        <div>
+          <Label
+            htmlFor={`${fieldID}-return`}
+            className='mb-1 block text-sm font-medium'
+          >
+            {t('Payment return URL (Waffo Pancake)')}
+          </Label>
+          <Input
+            id={`${fieldID}-return`}
+            value={waffoPancakeReturnUrl}
+            onChange={(e) => setWaffoPancakeReturnUrl(e.target.value)}
+            placeholder='https://example.com/payment/return'
+            disabled={loading}
+          />
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {t('Leave empty to use the global return URL')}
           </p>
-        )}
-      </div>
-      <div className='space-y-3 rounded-md border p-3'>
-        <div className='flex items-center justify-between gap-4'>
+        </div>
+      </fieldset>
+      <fieldset className='min-w-0 space-y-4 rounded-xl border p-4'>
+        <legend className='px-2 text-sm font-semibold'>
+          {t('App marketplace')}
+        </legend>
+        <div className='flex min-w-0 items-center justify-between gap-4'>
           <Label htmlFor={`${fieldID}-visible`}>
             {t('Show in App marketplace')}
           </Label>
           <Switch
+            className='shrink-0'
             id={`${fieldID}-visible`}
             checked={marketplaceVisible}
             onCheckedChange={setMarketplaceVisible}
             disabled={loading}
           />
         </div>
-        <Label htmlFor={`${fieldID}-description`}>{t('App description')}</Label>
-        <Textarea
-          id={`${fieldID}-description`}
-          maxLength={2000}
-          value={marketplaceDescription}
-          onChange={(event) => setMarketplaceDescription(event.target.value)}
-          disabled={loading}
-        />
-        <Label htmlFor={`${fieldID}-url`}>{t('App visit URL')}</Label>
-        <Input
-          id={`${fieldID}-url`}
-          type='url'
-          placeholder='https://app.example.com'
-          value={marketplaceURL}
-          onChange={(event) => setMarketplaceURL(event.target.value)}
-          disabled={loading}
-        />
-        <Label htmlFor={`${fieldID}-sort`}>{t('Display order')}</Label>
-        <Input
-          id={`${fieldID}-sort`}
-          type='number'
-          step={1}
-          value={marketplaceSort}
-          onChange={(event) => setMarketplaceSort(Number(event.target.value))}
-          disabled={loading}
-        />
-      </div>
+        <div className='space-y-2'>
+          <Label htmlFor={`${fieldID}-description`}>
+            {t('App description')}
+          </Label>
+          <Textarea
+            id={`${fieldID}-description`}
+            maxLength={2000}
+            value={marketplaceDescription}
+            onChange={(event) => setMarketplaceDescription(event.target.value)}
+            disabled={loading}
+          />
+        </div>
+        <div className='grid gap-4 sm:grid-cols-[minmax(0,1fr)_8rem]'>
+          <div className='space-y-2'>
+            <Label htmlFor={`${fieldID}-url`}>{t('App visit URL')}</Label>
+            <Input
+              id={`${fieldID}-url`}
+              type='url'
+              placeholder='https://app.example.com'
+              value={marketplaceURL}
+              onChange={(event) => setMarketplaceURL(event.target.value)}
+              disabled={loading}
+            />
+          </div>
+          <div className='space-y-2'>
+            <Label htmlFor={`${fieldID}-sort`}>{t('Display order')}</Label>
+            <Input
+              id={`${fieldID}-sort`}
+              type='number'
+              step={1}
+              value={marketplaceSort}
+              onChange={(event) =>
+                setMarketplaceSort(Number(event.target.value))
+              }
+              disabled={loading}
+            />
+          </div>
+        </div>
+      </fieldset>
       {oauthEnabled && (
-        <div className='space-y-4'>
+        <fieldset className='grid min-w-0 gap-4 rounded-xl border p-4 sm:grid-cols-2'>
+          <legend className='px-2 text-sm font-semibold'>
+            {t('OAuth configuration')}
+          </legend>
           <div>
             <Label
               htmlFor={`${fieldID}-redirect`}
@@ -839,11 +877,9 @@ function AppForm({
               disabled={loading}
             />
           </div>
-          <div>
-            <label className='mb-1 block text-sm font-medium'>
-              {t('Allowed Scopes')}
-            </label>
-            <div className='space-y-2'>
+          <div className='sm:col-span-2'>
+            <p className='mb-2 text-sm font-medium'>{t('Allowed Scopes')}</p>
+            <div className='grid gap-3 sm:grid-cols-2'>
               {OAUTH_SCOPES.map((scope) => (
                 <label key={scope.value} className='flex items-start gap-2'>
                   <Checkbox
@@ -867,7 +903,7 @@ function AppForm({
               ))}
             </div>
           </div>
-          <div className='flex items-start justify-between gap-4 rounded-md border p-3'>
+          <div className='flex items-start justify-between gap-4 rounded-lg border p-3 sm:col-span-2'>
             <div className='space-y-1'>
               <Label htmlFor={publicClientId}>
                 {t('Public Client (PKCE, no client secret)')}
@@ -879,15 +915,16 @@ function AppForm({
               </p>
             </div>
             <Switch
+              className='shrink-0'
               id={publicClientId}
               checked={publicClient}
               onCheckedChange={(checked) => setPublicClient(checked === true)}
               disabled={loading}
             />
           </div>
-        </div>
+        </fieldset>
       )}
-      <DialogFooter>
+      <DialogFooter className='bg-popover sticky -bottom-1 z-10 m-0 rounded-none border-t py-4'>
         <Button
           onClick={handleSubmit}
           disabled={
@@ -932,21 +969,22 @@ function CreateAppDialog({
 }) {
   const { t } = useTranslation()
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='max-w-lg'>
-        <DialogHeader>
-          <DialogTitle>{t('Create OAuth Application')}</DialogTitle>
-          <DialogDescription>
-            {t('Register an external application to integrate with new-api.')}
-          </DialogDescription>
-        </DialogHeader>
-        <AppForm
-          onSubmit={onSubmit}
-          submitLabel={t('Create')}
-          loading={loading}
-        />
-      </DialogContent>
-    </Dialog>
+    <AppDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title={t('Create OAuth Application')}
+      description={t(
+        'Register an external application to integrate with new-api.'
+      )}
+      contentClassName='w-[calc(100%-2rem)] sm:max-w-3xl'
+      headerClassName='pr-8'
+    >
+      <AppForm
+        onSubmit={onSubmit}
+        submitLabel={t('Create')}
+        loading={loading}
+      />
+    </AppDialog>
   )
 }
 
@@ -967,53 +1005,54 @@ function EditAppDialog({
 }) {
   const { t } = useTranslation()
   return (
-    <Dialog open onOpenChange={onOpenChange}>
-      <DialogContent className='max-w-lg'>
-        <DialogHeader>
-          <DialogTitle>{t('Edit OAuth Application')}</DialogTitle>
-        </DialogHeader>
-        {secretRecovery ? (
-          <ErrorState
-            title={t('Failed to rotate secret')}
-            description={t(
-              'App saved, but no client secret was issued. Rotate the secret before using this confidential client.'
-            )}
-            action={
-              <Button
-                variant='outline'
-                size='sm'
-                disabled={loading}
-                onClick={onRetrySecret}
-              >
-                {t('Retry')}
-              </Button>
-            }
-          />
-        ) : (
-          <AppForm
-            defaultValues={{
-              proxy_issuer: app.proxy_issuer ?? '',
-              api_key_enabled: app.api_key_enabled ?? false,
-              oauth_enabled: app.oauth_enabled ?? true,
-              quota_per_credit: app.quota_per_credit ?? null,
-              marketplace_visible: app.marketplace_visible ?? false,
-              marketplace_description: app.marketplace_description ?? '',
-              marketplace_url: app.marketplace_url ?? '',
-              marketplace_sort: app.marketplace_sort ?? 0,
-              name: app.name,
-              logo_url: app.logo_url,
-              redirect_uris: app.redirect_uris,
-              post_logout_redirect_uris: app.post_logout_redirect_uris,
-              scopes: app.scopes,
-              public_client: app.public_client,
-              waffo_pancake_return_url: app.waffo_pancake_return_url,
-            }}
-            onSubmit={onSubmit}
-            submitLabel={t('Save')}
-            loading={loading}
-          />
-        )}
-      </DialogContent>
-    </Dialog>
+    <AppDialog
+      open
+      onOpenChange={onOpenChange}
+      title={t('Edit OAuth Application')}
+      contentClassName='w-[calc(100%-2rem)] sm:max-w-3xl'
+      headerClassName='pr-8'
+    >
+      {secretRecovery ? (
+        <ErrorState
+          title={t('Failed to rotate secret')}
+          description={t(
+            'App saved, but no client secret was issued. Rotate the secret before using this confidential client.'
+          )}
+          action={
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={loading}
+              onClick={onRetrySecret}
+            >
+              {t('Retry')}
+            </Button>
+          }
+        />
+      ) : (
+        <AppForm
+          defaultValues={{
+            proxy_issuer: app.proxy_issuer ?? '',
+            api_key_enabled: app.api_key_enabled ?? false,
+            oauth_enabled: app.oauth_enabled ?? true,
+            quota_per_credit: app.quota_per_credit ?? null,
+            marketplace_visible: app.marketplace_visible ?? false,
+            marketplace_description: app.marketplace_description ?? '',
+            marketplace_url: app.marketplace_url ?? '',
+            marketplace_sort: app.marketplace_sort ?? 0,
+            name: app.name,
+            logo_url: app.logo_url,
+            redirect_uris: app.redirect_uris,
+            post_logout_redirect_uris: app.post_logout_redirect_uris,
+            scopes: app.scopes,
+            public_client: app.public_client,
+            waffo_pancake_return_url: app.waffo_pancake_return_url,
+          }}
+          onSubmit={onSubmit}
+          submitLabel={t('Save')}
+          loading={loading}
+        />
+      )}
+    </AppDialog>
   )
 }

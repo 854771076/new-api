@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "La règle de quota de cette clé API n’a pas encore commencé",
     "API key quota rule has expired": "La règle de quota de cette clé API a expiré",
     "rotation_cancelled": "Rotation annulée : la clé de remplacement ne peut pas être restaurée",
-    "reservation_snapshot_unavailable": "La réservation originale n’a pas de budget figé ; aucune réservation supplémentaire n’est possible"
+    "reservation_snapshot_unavailable": "La réservation originale n’a pas de budget figé ; aucune réservation supplémentaire n’est possible",
+    "Basic information": "Informations générales",
+    "Integration modes": "Modes d’intégration",
+    "Credits and payments": "Crédits et paiements",
+    "OAuth configuration": "Configuration OAuth",
+    "Discover AI apps for your next idea. Choose an app to get started.": "Découvrez des applications IA pour votre prochaine idée. Choisissez une application pour commencer.",
+    "Published apps will appear here. Check back soon to discover something new.": "Les applications publiées apparaîtront ici. Revenez bientôt pour découvrir les nouveautés."
   }
 }

@@ -7646,6 +7646,12 @@
     "API key quota rule has not started": "API key quota rule has not started",
     "API key quota rule has expired": "API key quota rule has expired",
     "rotation_cancelled": "rotation_cancelled",
-    "reservation_snapshot_unavailable": "reservation_snapshot_unavailable"
+    "reservation_snapshot_unavailable": "reservation_snapshot_unavailable",
+    "Basic information": "Basic information",
+    "Integration modes": "Integration modes",
+    "Credits and payments": "Credits and payments",
+    "OAuth configuration": "OAuth configuration",
+    "Discover AI apps for your next idea. Choose an app to get started.": "Discover AI apps for your next idea. Choose an app to get started.",
+    "Published apps will appear here. Check back soon to discover something new.": "Published apps will appear here. Check back soon to discover something new."
   }
 }

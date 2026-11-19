@@ -85,6 +85,21 @@ function mockCreate() {
   })
 }
 
+test('keeps the app editor wide on desktop with labelled configuration groups', async () => {
+  const dialog = await openCreateDialog()
+  expect(dialog).toHaveClass('sm:max-w-3xl')
+  expect(dialog).toHaveClass('w-[calc(100%-2rem)]')
+  expect(
+    within(dialog).getByRole('group', { name: 'Integration modes' })
+  ).toBeInTheDocument()
+  expect(
+    within(dialog).getByRole('group', { name: 'Credits and payments' })
+  ).toBeInTheDocument()
+  expect(
+    within(dialog).getByRole('group', { name: 'App marketplace' })
+  ).toBeInTheDocument()
+})
+
 test('submits the per-app payment return URL trimmed', async () => {
   const post = mockCreate()
   const dialog = await openCreateDialog()
