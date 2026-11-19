@@ -8,9 +8,12 @@ DEV_POSTGRES_DB = new-api
 DEV_POSTGRES_USER = root
 DEV_SQLITE_PATH ?= one-api.db
 
-.PHONY: all build-web build-all-web start-api dev dev-api dev-api-rebuild dev-web reset-setup test
+.PHONY: all build-cli-assets build-web build-all-web start-api dev dev-api dev-api-rebuild dev-web reset-setup test
 
-all: build-all-web start-api
+all: build-cli-assets build-all-web start-api
+
+build-cli-assets:
+	@go run ./cmd/newapi-cli-assets
 
 build-web:
 	@echo "Building web frontend..."
