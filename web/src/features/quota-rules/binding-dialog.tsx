@@ -57,6 +57,7 @@ export function QuotaRuleBindingDialog(props: {
     mutationFn: () => bindQuotaRule(props.apiKey.id, selected),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: quotaRuleQueryKey })
+      void client.invalidateQueries({ queryKey: ['api-key', props.apiKey.id] })
       props.onSuccess()
       toast.success(t('Quota rule binding saved'))
       props.onClose()

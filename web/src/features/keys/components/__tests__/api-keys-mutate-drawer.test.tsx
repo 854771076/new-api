@@ -205,6 +205,132 @@ afterEach(() => {
   }
 })
 
+describe('API key quota rule binding from the edit drawer', () => {
+  test.each([true, false])(
+    'opens the rule picker without losing draft changes when binding success is %s',
+    async (success) => {
+      installApiFixtures([])
+      const rule = {
+        id: 7,
+        name: 'Daily budget',
+        enabled: true,
+      }
+      const key: ApiKey = {
+        id: 1,
+        name: 'Existing key',
+        key: '',
+        status: 1,
+        remain_quota: 0,
+        used_quota: 0,
+        unlimited_quota: true,
+        expired_time: -1,
+        created_time: 1,
+        accessed_time: 0,
+        group: 'default',
+        auto_groups: [],
+        cross_group_retry: false,
+        model_limits_enabled: false,
+        model_limits: '',
+        allow_ips: '',
+        allow_user_quota_query: true,
+        quota_rule_id: 0,
+      }
+      let boundRuleId = 0
+      const getFixture = apiClient.get
+      vi.spyOn(apiClient, 'get').mockImplementation(async (url) => {
+        if (url === '/api/token/1') {
+          return {
+            data: {
+              success: true,
+              data: {
+                ...key,
+                quota_rule_id: boundRuleId,
+                quota_rule: boundRuleId ? rule : undefined,
+              },
+            },
+          }
+        }
+        if (url === '/api/token/quota_rules') {
+          return { data: { success: true, data: { items: [rule], total: 1 } } }
+        }
+        return getFixture(url)
+      })
+      const put = vi
+        .spyOn(api, 'put')
+        .mockImplementation(async (_url, data) => {
+          if (success) boundRuleId = (data as { rule_id: number }).rule_id
+          return {
+            data: { success, message: success ? '' : 'Binding rejected' },
+          }
+        })
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      })
+      renderedDrawer = { queryClient }
+      const close = vi.fn()
+      render(
+        <QueryClientProvider client={queryClient}>
+          <I18nextProvider i18n={i18n}>
+            <ApiKeysProvider>
+              <ApiKeysMutateDrawer open currentRow={key} onOpenChange={close} />
+            </ApiKeysProvider>
+          </I18nextProvider>
+        </QueryClientProvider>
+      )
+      await waitFor(() =>
+        expect(findButton('Save changes', true)).toBeEnabled()
+      )
+      changeInput(getControlByLabel('Name'), 'Unsaved name')
+      fireEvent.click(screen.getByRole('button', { name: 'Bind quota rule' }))
+      const select = await screen.findByRole('combobox', { name: 'Quota rule' })
+      await screen.findByRole('option', { name: 'Daily budget' })
+      fireEvent.change(select, { target: { value: '7' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+      await waitFor(() =>
+        expect(put).toHaveBeenCalledWith('/api/token/1/quota_rule', {
+          rule_id: 7,
+        })
+      )
+      if (success) {
+        await waitFor(() =>
+          expect(
+            screen.queryByRole('dialog', { name: 'Bind quota rule' })
+          ).not.toBeInTheDocument()
+        )
+        expect(await screen.findByText('Daily budget')).toBeVisible()
+        expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue(
+          'Unsaved name'
+        )
+        fireEvent.click(screen.getByRole('button', { name: 'Bind quota rule' }))
+        expect(
+          await screen.findByRole('combobox', { name: 'Quota rule' })
+        ).toHaveValue('7')
+        fireEvent.change(screen.getByRole('combobox', { name: 'Quota rule' }), {
+          target: { value: '0' },
+        })
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+        await waitFor(() =>
+          expect(put).toHaveBeenLastCalledWith('/api/token/1/quota_rule', {
+            rule_id: 0,
+          })
+        )
+        expect(await screen.findByText('No quota rule')).toBeVisible()
+      } else {
+        expect(
+          screen.getByRole('dialog', { name: 'Bind quota rule' })
+        ).toBeVisible()
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+        expect(await screen.findByText('No quota rule')).toBeVisible()
+        expect(screen.getByRole('textbox', { name: 'Name' })).toHaveValue(
+          'Unsaved name'
+        )
+      }
+      expect(close).not.toHaveBeenCalled()
+      expect(put).toHaveBeenCalledTimes(success ? 2 : 1)
+    }
+  )
+})
+
 describe('API keys mutate drawer Auto group integration', () => {
   test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
