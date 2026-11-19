@@ -1,5 +1,7 @@
 param([Parameter(Mandatory=$true)][string]$Server)
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell progress rendering severely slows binary downloads.
+$ProgressPreference = 'SilentlyContinue'
 $Server = $Server.TrimEnd('/')
 $uri = [Uri]$Server
 if ($uri.Scheme -ne 'https' -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) { throw 'An HTTPS server URL is required' }
@@ -9,7 +11,7 @@ $tempDir = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Path $tempDir | Out-Null
 try {
   $binary = Join-Path $tempDir 'newapi-cli.exe'
-  $response = Invoke-WebRequest -UseBasicParsing -MaximumRedirection 0 -Uri "$Server/api/cli/download/newapi-cli-windows-$arch.exe" -OutFile $binary -PassThru
+  $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 180 -MaximumRedirection 0 -Uri "$Server/api/cli/download/newapi-cli-windows-$arch.exe" -OutFile $binary -PassThru
   $expected = $response.Headers['X-Checksum-Sha256']
   if (-not $expected -or (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash -ne $expected) { throw 'Checksum mismatch' }
   & $binary self-update --run --server $Server

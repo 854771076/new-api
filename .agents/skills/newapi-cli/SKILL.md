@@ -21,7 +21,7 @@ the database directly and only needs a server URL plus a personal access token
 
 Use the administrator avatar menu **CLI installation & usage** on your trusted new-api server. Download `/api/cli/install.ps1` (Windows) or `/api/cli/install.sh` (macOS/Linux) from that server and run it with the HTTPS server URL. npm publishing has stopped; do not install/update this CLI from npm or GitHub releases.
 
-The backend bundles six native binaries and `skills.zip` for `newapi-cli` and `new-api-app-framework`, all pinned to `/api/cli/manifest`. Installers verify SHA-256, then install the CLI into `~/.newapi-cli/bin` and both skills into `~/.agents/skills`. Existing skill directories are replaced together; keep personal edits elsewhere. Login profiles in `~/.newapi-cli/config.json` are preserved. Restart the terminal after Windows installation; on macOS/Linux add `~/.newapi-cli/bin` to PATH.
+The backend bundles six native binaries and `skills.zip` for `newapi-cli` and `new-api-app-framework`, all pinned to `/api/cli/manifest`. Installer downloads time out after three minutes; Windows disables slow progress rendering. Installers verify SHA-256, then install the CLI into `~/.newapi-cli/bin` and both skills into `~/.agents/skills`. Existing skill directories are replaced together; keep personal edits elsewhere. Login profiles in `~/.newapi-cli/config.json` are preserved. Restart the terminal after Windows installation; on macOS/Linux add `~/.newapi-cli/bin` to PATH.
 
 For source/server builds, run `go run ./cmd/newapi-cli-assets <version>` before building the gateway. Docker and release builds do this automatically. A source build without assets returns HTTP 503 at the manifest endpoint instead of advertising an incomplete distribution.
 

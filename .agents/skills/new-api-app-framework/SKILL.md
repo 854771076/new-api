@@ -105,7 +105,7 @@ Select the integration first, then complete the applicable path. Existing script
 
 ### newapi-cli updates must sync the skills (mandatory)
 
-The gateway distributes the CLI and **both** `newapi-cli` and `new-api-app-framework` skills through `/api/cli/manifest` and `/api/cli/download/:name`. npm publishing has stopped. Prefer the administrator avatar menu **CLI installation & usage** for server-specific installation commands.
+The gateway distributes the CLI and **both** `newapi-cli` and `new-api-app-framework` skills through `/api/cli/manifest` and `/api/cli/download/:name`. npm publishing has stopped. Installer downloads time out after three minutes; Windows disables slow progress rendering. Prefer the administrator avatar menu **CLI installation & usage** for server-specific installation commands.
 
 - Every CLI command or behavior change MUST update both skill entrypoints in the same change.
 - Run `go run ./cmd/newapi-cli-assets <version>` before the gateway build. Docker/release builds do this automatically. The manifest checksums pin all six binaries and both complete skill trees to one version; verify `skills.zip` before shipping.

@@ -32,7 +32,7 @@ export function CliDocsDialog(props: {
   const commands = [
     {
       label: t('Windows PowerShell'),
-      value: `$server = ${psServer}\n$installer = Join-Path $env:TEMP ([Guid]::NewGuid().ToString() + '.ps1')\nInvoke-WebRequest -UseBasicParsing -MaximumRedirection 0 "$server/api/cli/install.ps1" -OutFile $installer\npowershell -NoProfile -ExecutionPolicy Bypass -File $installer -Server $server`,
+      value: `$server = ${psServer}\n$installer = Join-Path $env:TEMP ([Guid]::NewGuid().ToString() + '.ps1')\nInvoke-WebRequest -UseBasicParsing -TimeoutSec 180 -MaximumRedirection 0 "$server/api/cli/install.ps1" -OutFile $installer\npowershell -NoProfile -ExecutionPolicy Bypass -File $installer -Server $server`,
     },
     {
       label: t('macOS / Linux'),
