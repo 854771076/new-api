@@ -1,13 +1,21 @@
 package commands
 
 import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/QuantumNous/new-api/cmd/newapi-cli/internal/client"
+	"github.com/QuantumNous/new-api/pkg/clidistribution"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -310,4 +318,145 @@ func TestProductWriteValidation(t *testing.T) {
 	err := executeCommand(newProductCmd(), "create", "--name", "p", "--price", "1", "--quota", "10")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "app-id")
+}
+
+func TestDistributionDownloadIntegrityAndRedirect(t *testing.T) {
+	payload := []byte("new CLI")
+	asset := clidistribution.Asset{Size: int64(len(payload)), SHA256: fmt.Sprintf("%x", sha256.Sum256(payload))}
+	for _, tc := range []struct {
+		name    string
+		body    []byte
+		status  int
+		badHash bool
+	}{
+		{"valid", payload, 200, false}, {"corrupt", []byte("bad CLI"), 200, false},
+		{"truncated", []byte("bad"), 200, false}, {"oversize", append(payload, 'x'), 200, false},
+		{"missing", nil, 404, false}, {"bad hash", payload, 200, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Empty(t, r.Header.Get("Authorization"))
+				assert.Equal(t, "/api/cli/download/skills.zip", r.URL.Path)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write(tc.body)
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL, "must-not-send")
+			require.NoError(t, err)
+			a := asset
+			if tc.badHash {
+				a.SHA256 = strings.Repeat("0", 64)
+			}
+			data, err := downloadAsset(c, clidistribution.Manifest{Assets: map[string]clidistribution.Asset{"skills.zip": a}}, "skills.zip")
+			if tc.name == "valid" {
+				require.NoError(t, err)
+				assert.Equal(t, payload, data)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Error("cross-origin download followed") }))
+	defer destination.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, destination.URL, 302) }))
+	defer source.Close()
+	c, err := client.New(source.URL, "")
+	require.NoError(t, err)
+	_, err = downloadAsset(c, clidistribution.Manifest{Assets: map[string]clidistribution.Asset{"skills.zip": asset}}, "skills.zip")
+	require.Error(t, err)
+}
+
+func TestSkillInstallPreservesConfigAndRejectsUnsafeArchives(t *testing.T) {
+	makeZip := func(extra string) []byte {
+		var buf bytes.Buffer
+		z := zip.NewWriter(&buf)
+		for _, name := range []string{"newapi-cli/SKILL.md", "new-api-app-framework/SKILL.md", extra} {
+			if name == "" {
+				continue
+			}
+			w, err := z.Create(name)
+			require.NoError(t, err)
+			_, err = w.Write([]byte("latest skill"))
+			require.NoError(t, err)
+		}
+		require.NoError(t, z.Close())
+		return buf.Bytes()
+	}
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".newapi-cli", "config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0700))
+	require.NoError(t, os.WriteFile(configPath, []byte("existing private profile"), 0600))
+	for _, name := range []string{"newapi-cli", "new-api-app-framework"} {
+		dir := filepath.Join(home, ".agents", "skills", name)
+		require.NoError(t, os.MkdirAll(dir, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "old.txt"), []byte("old"), 0600))
+	}
+	require.NoError(t, installDistribution(home, []byte("latest CLI"), makeZip("")))
+	for _, name := range []string{"newapi-cli", "new-api-app-framework"} {
+		data, err := os.ReadFile(filepath.Join(home, ".agents", "skills", name, "SKILL.md"))
+		require.NoError(t, err)
+		assert.Equal(t, "latest skill", string(data))
+		_, err = os.Stat(filepath.Join(home, ".agents", "skills", name, "old.txt"))
+		require.True(t, os.IsNotExist(err))
+	}
+	binaryName := "newapi-cli"
+	if runtime.GOOS == "windows" {
+		binaryName += ".exe"
+	}
+	binaryPath := filepath.Join(home, ".newapi-cli", "bin", binaryName)
+	for _, bad := range []string{"newapi-cli/../../../escape", "newapi-cli/.. /.. /escape", "other/SKILL.md", "newapi-cli/..\\escape", "newapi-cli/C:/escape", "newapi-cli/SKILL.md"} {
+		require.Error(t, installDistribution(home, []byte("bad CLI"), makeZip(bad)))
+		data, err := os.ReadFile(binaryPath)
+		require.NoError(t, err)
+		assert.Equal(t, "latest CLI", string(data))
+	}
+	require.Error(t, installDistribution(home, []byte("bad CLI"), []byte("not zip")))
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "existing private profile", string(data))
+}
+
+func TestUpdateServerRejectsUntrustedURLs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, server := range []string{"http://example.com", "https://user:secret@example.com", "https://example.com?token=secret", "https://example.com#fragment", "file:///tmp/file"} {
+		_, err := distributionClient(server)
+		require.Error(t, err)
+	}
+	c, err := distributionClient("https://example.com")
+	require.NoError(t, err)
+	assert.Empty(t, c.Token)
+}
+
+func TestFailedBinaryReplacementRestoresBothSkills(t *testing.T) {
+	home := t.TempDir()
+	var buf bytes.Buffer
+	z := zip.NewWriter(&buf)
+	for _, name := range []string{"newapi-cli", "new-api-app-framework"} {
+		dir := filepath.Join(home, ".agents", "skills", name)
+		require.NoError(t, os.MkdirAll(dir, 0700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("original"), 0600))
+		w, err := z.Create(name + "/SKILL.md")
+		require.NoError(t, err)
+		_, err = w.Write([]byte("replacement"))
+		require.NoError(t, err)
+	}
+	require.NoError(t, z.Close())
+	name := "newapi-cli"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	target := filepath.Join(home, ".newapi-cli", "bin", name)
+	require.NoError(t, os.MkdirAll(target, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(target, "keep"), []byte("existing"), 0600))
+	require.ErrorContains(t, installDistribution(home, []byte("new CLI"), buf.Bytes()), "target type")
+	for _, name := range []string{"newapi-cli", "new-api-app-framework"} {
+		data, err := os.ReadFile(filepath.Join(home, ".agents", "skills", name, "SKILL.md"))
+		require.NoError(t, err)
+		assert.Equal(t, "original", string(data))
+	}
+	data, err := os.ReadFile(filepath.Join(target, "keep"))
+	require.NoError(t, err)
+	assert.Equal(t, "existing", string(data))
 }

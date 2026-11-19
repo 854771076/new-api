@@ -171,7 +171,7 @@ check_cli bun --version 'curl -fsSL https://bun.sh/install | bash' install_bun
 check_cli go version 'https://go.dev/dl/'
 check_cli supabase --version 'brew install supabase/tap/supabase' install_supabase
 check_cli cloudflared --version 'brew install cloudflared' install_cloudflared
-check_cli newapi-cli --version '仓库自带 cmd/newapi-cli（go build 生成）或 npm 安装 @aswless_854771076/newapi-cli'
+check_cli newapi-cli --version 'Use your new-api administrator avatar menu: CLI installation & usage'
 check_cli vercel --version 'npm install -g vercel' install_npm_cli
 
 echo

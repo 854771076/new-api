@@ -33,5 +33,6 @@
     "new-api",
     "cli",
     "admin"
-  ]
+  ],
+  "private": true
 }

@@ -57,6 +57,9 @@ jobs:
       #     go mod download
       #     go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$(git describe --tags)' -extldflags '-static'" -o new-api
 
+      - name: Package CLI and skills
+        run: go run ./cmd/newapi-cli-assets "$(git describe --tags)"
+
       - name: Build Go binary (Windows)
         if: runner.os == 'Windows'
         run: |

@@ -15,32 +15,20 @@ description: >-
 
 `newapi-cli` is a thin HTTP client for the new-api admin API. It never touches
 the database directly and only needs a server URL plus a personal access token
-(PAT). Source lives in `cmd/newapi-cli/`; it depends only on the standard
-library and `spf13/cobra`.
+(PAT). Source lives in `cmd/newapi-cli/`; it uses Cobra and the gateway JSON wrapper.
 
 ## Install
 
-- npm: `npm install -g @aswless_854771076/newapi-cli` installs the matching
-  binary from the package's GitHub release on Windows, macOS, and Linux.
-  Installing it as a project dependency also copies the bundled `newapi-cli`
-  and `new-api-app-framework` skills to `.agents/skills/` in that project.
-- From source: `go build -o newapi-cli ./cmd/newapi-cli` on macOS/Linux; on
-  Windows the output is `newapi-cli.exe`.
-- PATH (macOS/Linux): if the npm global prefix is not on `PATH`, locate it with
-  `npm prefix -g`; the binary is under `<prefix>/bin`.
+Use the administrator avatar menu **CLI installation & usage** on your trusted new-api server. Download `/api/cli/install.ps1` (Windows) or `/api/cli/install.sh` (macOS/Linux) from that server and run it with the HTTPS server URL. npm publishing has stopped; do not install/update this CLI from npm or GitHub releases.
 
-`~/.newapi-cli/config.json` resolves from the OS user home on Windows, macOS,
-and Linux (no `%APPDATA%` special case). Examples use a POSIX shell; PowerShell
-users pass the same arguments unchanged (`--data` quoting applies).
+The backend bundles six native binaries and `skills.zip` for `newapi-cli` and `new-api-app-framework`, all pinned to `/api/cli/manifest`. Installers verify SHA-256, then install the CLI into `~/.newapi-cli/bin` and both skills into `~/.agents/skills`. Existing skill directories are replaced together; keep personal edits elsewhere. Login profiles in `~/.newapi-cli/config.json` are preserved. Restart the terminal after Windows installation; on macOS/Linux add `~/.newapi-cli/bin` to PATH.
 
-The server must be the same build that embeds the dashboard, because the login
-flow is served by the web UI. Rebuild and restart the server after changing
-either the frontend or `controller/cli_auth.go`.
+For source/server builds, run `go run ./cmd/newapi-cli-assets <version>` before building the gateway. Docker and release builds do this automatically. A source build without assets returns HTTP 503 at the manifest endpoint instead of advertising an incomplete distribution.
 
 ## Authenticate
 
 ```bash
-newapi-cli auth login                      # uses the packaged server by default
+newapi-cli auth login                      # uses configured server, or prompts
 newapi-cli auth login --server https://api.example.com --name my-agent
 newapi-cli auth status
 newapi-cli auth logout
@@ -121,7 +109,7 @@ product list [--app-id <id>] [--p 1] [--page-size 20]
         | complete-order <trade_no>
 oauth-app list | get <id> | create [flags] | update <id> [flags] | delete <id>
 version
-self-update [--run]
+self-update [--run] [--server URL]
 api    <METHOD> </path> [--data '<json>' | --data @file.json]
 ```
 
@@ -225,14 +213,13 @@ Notes:
 ## Version and self-update
 
 ```bash
-newapi-cli version              # prints the version, then checks npm for updates
-newapi-cli self-update          # prints the command without running it
-newapi-cli self-update --run    # runs npm install -g @aswless_854771076/newapi-cli@latest
+newapi-cli --version                         # offline version
+newapi-cli version --server https://gateway.example.com
+newapi-cli self-update --server https://gateway.example.com
+newapi-cli self-update --run --server https://gateway.example.com
 ```
 
-`version` is non-fatal: a failed or unreachable registry lookup is silently
-skipped. `self-update` refreshes the binary and the bundled `newapi-cli` skill
-(server default and skill version ship with the npm package).
+`version` checks the configured server on a best-effort basis, never npm. `self-update` downloads and verifies the matching CLI plus both skills before replacing them, and rolls back failed replacements. Updates without `--run` only print the command. Server precedence is `--server`, `NEWAPI_CLI_SERVER`, selected profile, build default. No PAT is sent to distribution endpoints. An explicit trusted HTTPS server is required on first install; HTTP is allowed only for loopback development through the native CLI. The server's bundled version is authoritative, even if it is older than the current local build.
 
 ## Output
 

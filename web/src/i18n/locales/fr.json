@@ -7652,6 +7652,18 @@
     "Credits and payments": "Crédits et paiements",
     "OAuth configuration": "Configuration OAuth",
     "Discover AI apps for your next idea. Choose an app to get started.": "Découvrez des applications IA pour votre prochaine idée. Choisissez une application pour commencer.",
-    "Published apps will appear here. Check back soon to discover something new.": "Les applications publiées apparaîtront ici. Revenez bientôt pour découvrir les nouveautés."
+    "Published apps will appear here. Check back soon to discover something new.": "Les applications publiées apparaîtront ici. Revenez bientôt pour découvrir les nouveautés.",
+    "Account menu": "Menu du compte",
+    "CLI installation & usage": "Installation et utilisation du CLI",
+    "Install the CLI and both skills directly from this server.": "Installez le CLI et les deux skills depuis ce serveur.",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "Connexion et utilisation",
+    "Update CLI and skills": "Mettre à jour CLI et skills",
+    "Copy {{name}} commands": "Copier les commandes {{name}}",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "Utilisez un site HTTPS de confiance. Les téléchargements sont vérifiés par SHA-256. npm n’est plus utilisé.",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI : ~/.newapi-cli/bin. Skills : ~/.agents/skills/newapi-cli et ~/.agents/skills/new-api-app-framework. Les mises à jour remplacent les skills et conservent les profils de connexion.",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "Redémarrez le terminal sous Windows. Sous macOS/Linux, ajoutez ~/.newapi-cli/bin au PATH. Si l’ancien CLI npm reste prioritaire, supprimez uniquement son paquet après vérification du CLI natif.",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "Autorisez la connexion dans le navigateur avec les seules permissions nécessaires, puis collez le code unique dans le CLI. Gardez les PAT et clés API secrets."
   }
 }

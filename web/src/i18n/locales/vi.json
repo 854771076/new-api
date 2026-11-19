@@ -7652,6 +7652,18 @@
     "Credits and payments": "Điểm và thanh toán",
     "OAuth configuration": "Cấu hình OAuth",
     "Discover AI apps for your next idea. Choose an app to get started.": "Khám phá ứng dụng AI cho ý tưởng tiếp theo. Chọn một ứng dụng để bắt đầu.",
-    "Published apps will appear here. Check back soon to discover something new.": "Các ứng dụng đã xuất bản sẽ xuất hiện ở đây. Hãy quay lại để khám phá những điều mới."
+    "Published apps will appear here. Check back soon to discover something new.": "Các ứng dụng đã xuất bản sẽ xuất hiện ở đây. Hãy quay lại để khám phá những điều mới.",
+    "Account menu": "Menu tài khoản",
+    "CLI installation & usage": "Cài đặt và sử dụng CLI",
+    "Install the CLI and both skills directly from this server.": "Cài CLI và hai skill trực tiếp từ máy chủ này.",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "Đăng nhập và sử dụng",
+    "Update CLI and skills": "Cập nhật CLI và skill",
+    "Copy {{name}} commands": "Sao chép lệnh {{name}}",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "Dùng trang HTTPS đáng tin cậy. Tệp được kiểm tra SHA-256. Không còn sử dụng npm.",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI: ~/.newapi-cli/bin. Skill: ~/.agents/skills/newapi-cli và ~/.agents/skills/new-api-app-framework. Cập nhật thay hai thư mục skill và giữ cấu hình đăng nhập.",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "Khởi động lại terminal trên Windows. Với macOS/Linux, thêm ~/.newapi-cli/bin vào PATH. Nếu CLI npm cũ được ưu tiên, chỉ gỡ gói newapi-cli cũ sau khi kiểm tra bản mới.",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "Đăng nhập qua trình duyệt, chỉ cấp quyền cần thiết rồi dán mã dùng một lần vào CLI. Giữ bí mật PAT và API key."
   }
 }

@@ -197,7 +197,7 @@ Check-Cli 'bun' '--version' 'winget install --id Oven-sh.Bun -e  或  https://bu
 Check-Cli 'go' 'version' 'winget install GoLang.Go  或  https://go.dev/dl/' $null
 Check-Cli 'supabase' '--version' 'winget install Supabase.CLI  或  scoop install supabase' $installSupabase
 Check-Cli 'cloudflared' '--version' 'winget install --id Cloudflare.cloudflared -e' $installCloudflared
-Check-Cli 'newapi-cli' '--version' '仓库自带 cmd/newapi-cli（go build 生成）或 npm 安装 @aswless_854771076/newapi-cli' $null
+Check-Cli 'newapi-cli' '--version' 'Use your new-api administrator avatar menu: CLI installation & usage' $null
 Check-Cli 'vercel' '--version' 'npm install -g vercel' $installFromNpm
 
 Write-Host ""

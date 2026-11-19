@@ -48,3 +48,6 @@ go.work.sum
 .trae
 # Supabase CLI scratch dir (contains .temp/ linked project metadata)
 /supabase/
+
+/pkg/cliassets/dist/*
+!/pkg/cliassets/dist/unbuilt.json

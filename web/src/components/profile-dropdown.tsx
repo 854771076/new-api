@@ -17,10 +17,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useNavigate } from '@tanstack/react-router'
-import { User, Wallet, LogOut, Settings, ShieldCheck } from 'lucide-react'
-import { useMemo } from 'react'
+import {
+  User,
+  Wallet,
+  LogOut,
+  Settings,
+  ShieldCheck,
+  Terminal,
+} from 'lucide-react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { CliDocsDialog } from '@/components/cli-docs-dialog'
 import { SignOutDialog } from '@/components/sign-out-dialog'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -46,6 +54,8 @@ export function ProfileDropdown() {
   const [open, setOpen] = useDialogState()
   const user = useAuthStore((state) => state.auth.user)
   const { displayName, roleLabel } = useUserDisplay(user)
+  const [cliDocsOpen, setCliDocsOpen] = useState(false)
+  const isAdmin = (user?.role ?? ROLE.GUEST) >= ROLE.ADMIN
   const isSuperAdmin = user?.role === ROLE.SUPER_ADMIN
   const isWalletVisible = useIsSidebarModuleVisible('/wallet')
   const isSecurityVisible = useIsSidebarModuleVisible('/security')
@@ -60,7 +70,13 @@ export function ProfileDropdown() {
     <>
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger
-          render={<Button variant='ghost' className='relative size-6 p-0' />}
+          render={
+            <Button
+              variant='ghost'
+              className='relative size-6 p-0'
+              aria-label={t('Account menu')}
+            />
+          }
         >
           <Avatar className='size-6'>
             <AvatarFallback
@@ -122,6 +138,13 @@ export function ProfileDropdown() {
             </DropdownMenuItem>
           )}
 
+          {isAdmin && (
+            <DropdownMenuItem onClick={() => setCliDocsOpen(true)}>
+              <Terminal className='size-4' />
+              {t('CLI installation & usage')}
+            </DropdownMenuItem>
+          )}
+
           {isSuperAdmin && (
             <DropdownMenuItem
               onClick={() =>
@@ -145,6 +168,9 @@ export function ProfileDropdown() {
         </DropdownMenuContent>
       </DropdownMenu>
 
+      {isAdmin && (
+        <CliDocsDialog open={cliDocsOpen} onOpenChange={setCliDocsOpen} />
+      )}
       <SignOutDialog open={!!open} onOpenChange={setOpen} />
     </>
   )

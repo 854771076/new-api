@@ -10,3 +10,15 @@ docs
 /web/node_modules
 /web/dist
 !THIRD-PARTY-LICENSES.md
+
+# Skills are part of the backend distribution, including their Markdown references.
+!.agents/skills/newapi-cli/**
+!.agents/skills/new-api-app-framework/**
+**/node_modules
+**/.next
+**/.temp
+**/.vercel
+**/.env*
+!**/.env.example
+/pkg/cliassets/dist/*
+!/pkg/cliassets/dist/unbuilt.json

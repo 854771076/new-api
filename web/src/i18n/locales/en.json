@@ -7652,6 +7652,18 @@
     "Credits and payments": "Credits and payments",
     "OAuth configuration": "OAuth configuration",
     "Discover AI apps for your next idea. Choose an app to get started.": "Discover AI apps for your next idea. Choose an app to get started.",
-    "Published apps will appear here. Check back soon to discover something new.": "Published apps will appear here. Check back soon to discover something new."
+    "Published apps will appear here. Check back soon to discover something new.": "Published apps will appear here. Check back soon to discover something new.",
+    "Account menu": "Account menu",
+    "CLI installation & usage": "CLI installation & usage",
+    "Install the CLI and both skills directly from this server.": "Install the CLI and both skills directly from this server.",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "Login and usage",
+    "Update CLI and skills": "Update CLI and skills",
+    "Copy {{name}} commands": "Copy {{name}} commands",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private."
   }
 }

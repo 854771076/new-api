@@ -7652,6 +7652,18 @@
     "Credits and payments": "Баллы и платежи",
     "OAuth configuration": "Настройки OAuth",
     "Discover AI apps for your next idea. Choose an app to get started.": "Откройте ИИ-приложения для ваших идей. Выберите приложение, чтобы начать.",
-    "Published apps will appear here. Check back soon to discover something new.": "Опубликованные приложения появятся здесь. Загляните позже, чтобы узнать о новинках."
+    "Published apps will appear here. Check back soon to discover something new.": "Опубликованные приложения появятся здесь. Загляните позже, чтобы узнать о новинках.",
+    "Account menu": "Меню аккаунта",
+    "CLI installation & usage": "Установка и использование CLI",
+    "Install the CLI and both skills directly from this server.": "Установите CLI и оба skill с этого сервера.",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "Вход и использование",
+    "Update CLI and skills": "Обновить CLI и skills",
+    "Copy {{name}} commands": "Копировать команды {{name}}",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "Используйте доверенный HTTPS-сайт. Загрузки проверяются по SHA-256. npm больше не используется.",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli и ~/.agents/skills/new-api-app-framework. Обновления заменяют оба skill, сохраняя профили входа.",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "В Windows перезапустите терминал. В macOS/Linux добавьте ~/.newapi-cli/bin в PATH. Если запускается старый CLI npm, проверьте нативный CLI и удалите только старый пакет newapi-cli.",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "Разрешите вход в браузере только с нужными правами и вставьте одноразовый код в CLI. Храните PAT и API-ключи в секрете."
   }
 }

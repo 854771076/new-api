@@ -7652,6 +7652,18 @@
     "Credits and payments": "點數與付款",
     "OAuth configuration": "OAuth 授權設定",
     "Discover AI apps for your next idea. Choose an app to get started.": "探索適合你的 AI 應用，實現下一個靈感。選擇應用，立即開始。",
-    "Published apps will appear here. Check back soon to discover something new.": "應用發布後會顯示於此，敬請期待新的發現。"
+    "Published apps will appear here. Check back soon to discover something new.": "應用發布後會顯示於此，敬請期待新的發現。",
+    "Account menu": "帳戶選單",
+    "CLI installation & usage": "CLI 安裝與使用",
+    "Install the CLI and both skills directly from this server.": "直接從本站安裝 CLI 和兩個 skill。",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "登入與使用",
+    "Update CLI and skills": "更新 CLI 與 skill",
+    "Copy {{name}} commands": "複製{{name}}命令",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "請使用可信 HTTPS 站點。安裝程式會驗證 SHA-256，不再使用 npm。",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI：~/.newapi-cli/bin。Skill：~/.agents/skills/newapi-cli 和 ~/.agents/skills/new-api-app-framework。更新會替換兩個 skill 目錄，保留登入設定。",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "Windows 安裝後請重開終端。macOS/Linux 請將 ~/.newapi-cli/bin 加入 PATH。若舊 npm CLI 仍優先生效，確認新版可用後僅移除舊 newapi-cli npm 套件。",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "登入透過瀏覽器授權。僅核准所需權限，再將一次性授權碼貼到 CLI。請勿洩露 PAT 和 API Key。"
   }
 }

@@ -5,6 +5,7 @@ import (
 
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/pkg/cliassets"
 	"github.com/QuantumNous/new-api/service/authz"
 
 	// Import oauth package to register providers via init()
@@ -21,6 +22,7 @@ func SetApiRouter(router *gin.Engine) {
 	apiRouter.Use(middleware.AccessTokenAudit())
 	apiRouter.Use(middleware.BodyStorageCleanup()) // 清理请求体存储
 	apiRouter.Use(middleware.GlobalAPIRateLimit())
+	cliassets.Register(apiRouter)
 	anonymousRequestBodyLimit := middleware.AnonymousRequestBodyLimit()
 	{
 		apiRouter.GET("/setup", controller.GetSetup)

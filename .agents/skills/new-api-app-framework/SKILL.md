@@ -105,10 +105,11 @@ Select the integration first, then complete the applicable path. Existing script
 
 ### newapi-cli updates must sync the skills (mandatory)
 
-The `newapi-cli` npm package bundles **both** `newapi-cli` and `new-api-app-framework` skills through `cmd/newapi-cli/npm/scripts/prepare-skill.js`, whose `SKILLS` array is `['newapi-cli', 'new-api-app-framework']`. Therefore:
+The gateway distributes the CLI and **both** `newapi-cli` and `new-api-app-framework` skills through `/api/cli/manifest` and `/api/cli/download/:name`. npm publishing has stopped. Prefer the administrator avatar menu **CLI installation & usage** for server-specific installation commands.
 
-- Every time a `newapi-cli` command or its behavior changes (new commands, renamed flags, field-level updates, config/`DefaultServer` fields, or the update/version mechanism), you MUST update `.agents/skills/newapi-cli/SKILL.md` **and** `.agents/skills/new-api-app-framework/SKILL.md` in the same change, so the packaged skills match the shipped CLI version.
-- Keep both entries present in the `SKILLS` array of `prepare-skill.js`; never ship a CLI that carries an older skill. When the CLI version and the bundled skill versions diverge, refresh the skills (re-run the prepare step) or fail with an explicit version-mismatch error.
+- Every CLI command or behavior change MUST update both skill entrypoints in the same change.
+- Run `go run ./cmd/newapi-cli-assets <version>` before the gateway build. Docker/release builds do this automatically. The manifest checksums pin all six binaries and both complete skill trees to one version; verify `skills.zip` before shipping.
+- `newapi-cli self-update --run --server https://your-gateway` updates the native CLI and both global skills together, preserving login profiles. Skills live in `~/.agents/skills`; the CLI lives in `~/.newapi-cli/bin`. Existing skill directories are replaced; keep local customizations elsewhere. No npm or GitHub download is involved.
 
 ## Step 0: Environment Bootstrap
 
@@ -116,7 +117,7 @@ Install the applicable toolchain. Bootstrap defaults to proxy prerequisite valid
 
 ### 0.1 One command with optional auto-install
 
-`./scripts/check-env.ps1 -Install` (Windows) / `./scripts/check-env.sh --install` (macOS/Linux). Without the flag they only verify and print the exact fix; with it they install missing CLIs through the platform package manager or npm (including `supabase` and `vercel`) and re-run the checks. `newapi-cli` is bundled with the `newapi-cli` skill and is verified, not installed.
+`./scripts/check-env.ps1 -Install` (Windows) / `./scripts/check-env.sh --install` (macOS/Linux). Without the flag they only verify and print the exact fix; with it they install missing CLIs through the platform package manager or npm (including `supabase` and `vercel`) and re-run the checks. `newapi-cli` is installed through the gateway backend and is only verified by these bootstrap checks.
 
 ### 0.2 Install the CLIs manually
 

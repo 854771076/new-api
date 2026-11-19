@@ -7652,6 +7652,18 @@
     "Credits and payments": "クレジットと支払い",
     "OAuth configuration": "OAuth 設定",
     "Discover AI apps for your next idea. Choose an app to get started.": "次のアイデアに役立つ AI アプリを見つけましょう。アプリを選んで始めましょう。",
-    "Published apps will appear here. Check back soon to discover something new.": "公開されたアプリがここに表示されます。新しいアプリの登場をお待ちください。"
+    "Published apps will appear here. Check back soon to discover something new.": "公開されたアプリがここに表示されます。新しいアプリの登場をお待ちください。",
+    "Account menu": "アカウントメニュー",
+    "CLI installation & usage": "CLI のインストールと使い方",
+    "Install the CLI and both skills directly from this server.": "このサーバーから CLI と 2 つの skill をインストールします。",
+    "Windows PowerShell": "Windows PowerShell",
+    "macOS / Linux": "macOS / Linux",
+    "Login and usage": "ログインと使い方",
+    "Update CLI and skills": "CLI と skill を更新",
+    "Copy {{name}} commands": "{{name}} のコマンドをコピー",
+    "Use a trusted HTTPS site. Installers verify downloads with SHA-256. npm is no longer used.": "信頼できる HTTPS サイトを使用してください。SHA-256 で検証し、npm は使用しません。",
+    "CLI: ~/.newapi-cli/bin. Skills: ~/.agents/skills/newapi-cli and ~/.agents/skills/new-api-app-framework. Updates replace both skill directories and preserve login profiles.": "CLI: ~/.newapi-cli/bin。skill: ~/.agents/skills/newapi-cli と ~/.agents/skills/new-api-app-framework。更新時に両方の skill を置換し、ログイン設定を保持します。",
+    "Restart your terminal after Windows installation. On macOS/Linux, add ~/.newapi-cli/bin to your shell PATH. If an older npm CLI takes precedence, remove only the old newapi-cli npm package after verifying the native installation.": "Windows ではターミナルを再起動してください。macOS/Linux では ~/.newapi-cli/bin を PATH に追加してください。古い npm CLI が優先される場合は新版の確認後に古い newapi-cli パッケージだけを削除してください。",
+    "Login opens browser authorization. Approve only the required permissions, then paste the one-time code into the CLI. Keep PATs and API keys private.": "ブラウザーで必要な権限だけを許可し、ワンタイムコードを CLI に貼り付けてください。PAT と API キーは秘密にしてください。"
   }
 }
