@@ -62,6 +62,7 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { QuotaRuleBindingDialog } from '@/features/quota-rules/binding-dialog'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
@@ -113,6 +114,7 @@ export function ApiKeysMutateDrawer({
   const { status, loading: statusLoading } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [quotaRuleOpen, setQuotaRuleOpen] = useState(false)
   const [initializedTarget, setInitializedTarget] = useState<string | null>(
     null
   )
@@ -208,6 +210,7 @@ export function ApiKeysMutateDrawer({
   // Load existing data when updating
   useEffect(() => {
     if (!open) {
+      setQuotaRuleOpen(false)
       form.reset(
         getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
       )
@@ -369,6 +372,7 @@ export function ApiKeysMutateDrawer({
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
   const autoGroupsMode = form.watch('auto_groups_mode')
   const unlimitedQuota = form.watch('unlimited_quota')
+  const quotaRuleKey = apiKeyData?.data ?? currentRow
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -611,6 +615,24 @@ export function ApiKeysMutateDrawer({
                 icon={<WalletCards className='size-4' />}
                 iconTone='success'
               />
+              {isUpdate && quotaRuleKey && (
+                <div className='flex items-center justify-between gap-3'>
+                  <div className='min-w-0'>
+                    <div className='text-sm font-medium'>{t('Quota rule')}</div>
+                    <div className='text-muted-foreground text-xs break-words'>
+                      {quotaRuleKey.quota_rule?.name ?? t('No quota rule')}
+                    </div>
+                  </div>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    onClick={() => setQuotaRuleOpen(true)}
+                  >
+                    {t('Bind quota rule')}
+                  </Button>
+                </div>
+              )}
               {!unlimitedQuota && (
                 <FormField
                   control={form.control}
@@ -793,6 +815,14 @@ export function ApiKeysMutateDrawer({
             {isSubmitting ? t('Saving...') : t('Save changes')}
           </Button>
         </SheetFooter>
+        {open && quotaRuleOpen && quotaRuleKey && (
+          <QuotaRuleBindingDialog
+            key={quotaRuleKey.id}
+            apiKey={quotaRuleKey}
+            onClose={() => setQuotaRuleOpen(false)}
+            onSuccess={triggerRefresh}
+          />
+        )}
       </SheetContent>
     </Sheet>
   )
