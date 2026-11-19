@@ -1,6 +1,8 @@
 package model
 
 import (
+	"fmt"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/shopspring/decimal"
 )
@@ -60,13 +62,19 @@ func ListScopedAppOrders(userID, appID int, keyword string, page *common.PageInf
 	if err := ValidateUserAppScope(user, appID); err != nil {
 		return nil, 0, err
 	}
-	// UNION ALL is supported by all three engines. The heterogeneous existing
-	// order tables need one stable ordering and pagination before enrichment.
-	union := "SELECT trade_no AS order_id, 'topup' AS kind, status, user_id, app_id, money, CASE WHEN payment_provider = 'epay' THEN 'CNY' WHEN payment_provider = 'balance' THEN 'USD' ELSE '' END AS currency, create_time AS created_at FROM top_ups WHERE user_id = ? AND app_id = ? AND trade_no LIKE ? AND NOT EXISTS (SELECT 1 FROM subscription_orders AS s WHERE s.trade_no = top_ups.trade_no) UNION ALL SELECT trade_no AS order_id, 'product' AS kind, status, user_id, app_id, money, currency, create_time AS created_at FROM app_product_orders WHERE user_id = ? AND app_id = ? AND trade_no LIKE ?"
+	// Old MySQL order tables can retain a different charset/collation after upgrades.
+	orderID, status, currency := "trade_no", "status", "currency"
+	if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
+		orderID = "CONVERT(trade_no USING utf8mb4) COLLATE utf8mb4_general_ci"
+		status = "CONVERT(status USING utf8mb4) COLLATE utf8mb4_general_ci"
+		currency = "CONVERT(currency USING utf8mb4) COLLATE utf8mb4_general_ci"
+	}
+	// Apply ordering and pagination to the combined rows before enriching snapshots.
+	union := fmt.Sprintf("SELECT %s AS order_id, 'topup' AS kind, %s AS status, user_id, app_id, money, CASE WHEN payment_provider = 'epay' THEN 'CNY' WHEN payment_provider = 'balance' THEN 'USD' ELSE '' END AS currency, create_time AS created_at FROM top_ups WHERE user_id = ? AND app_id = ? AND trade_no LIKE ? AND NOT EXISTS (SELECT 1 FROM subscription_orders AS s WHERE s.trade_no = top_ups.trade_no) UNION ALL SELECT %s AS order_id, 'product' AS kind, %s AS status, user_id, app_id, money, %s AS currency, create_time AS created_at FROM app_product_orders WHERE user_id = ? AND app_id = ? AND trade_no LIKE ?", orderID, status, orderID, status, currency)
 	pattern := "%" + keyword + "%"
 	args := []any{userID, appID, pattern, userID, appID, pattern}
 	if !user.IsProxy() {
-		union += " UNION ALL SELECT trade_no AS order_id, 'subscription' AS kind, status, user_id, app_id, money, '' AS currency, create_time AS created_at FROM subscription_orders WHERE user_id = ? AND app_id = ? AND trade_no LIKE ?"
+		union += fmt.Sprintf(" UNION ALL SELECT %s AS order_id, 'subscription' AS kind, %s AS status, user_id, app_id, money, '' AS currency, create_time AS created_at FROM subscription_orders WHERE user_id = ? AND app_id = ? AND trade_no LIKE ?", orderID, status)
 		args = append(args, userID, appID, pattern)
 	}
 	var total int64

@@ -230,3 +230,16 @@ reset仅作用于本轮独立本地栈。原生迁移、重复push无待迁移�
 使用 open-code-review skill 收尾。基线仍为 `32ff3ba5acb90ca4a88a0e994879b20669c8a0ca`（origin/main 与 HEAD 的 merge base）；实际执行 `ocr review --audience agent --format json --background '<App baseline and credit cache / Epay fixes>' --from 32ff3ba5acb90ca4a88a0e994879b20669c8a0ca --to HEAD --output .local-tests/fix-baseline-review.json`，因 `no valid LLM endpoint configured` 失败。依项目规定直接审阅：复用前一轮全基线审计证据，本轮重点复核 service/oauth_app_policy.go、controller/oauth_app_purchase.go、controller/app_product_settings_test.go、订阅购买对话框及其新增测试、skill 两份合同文件，共 7 文件，并沿 scoped checkout、订单快照、易支付建单和钱包表单提交调用链核对。两项已报告 Medium/P2 均修复，未发现新增 Critical/High/Medium；不声称本轮重新逐行审过整个分支。
 
 本轮未使用真实支付商户或完成付款回调，未重跑公网 Supabase/真实 AI 端到端、最低数据库版本或生产多节点 Redis。没有更改认证流程、数据库模型或 SQL；先前记录的外部验收缺口仍然适用。验证后停止本轮启动的 MySQL/PostgreSQL 测试容器。
+
+
+## 2026-11-19 线上订单历史 MySQL 1271 热修复
+
+部署 main-193be3100 后，原生用户 App 订单列表 `/api/user/self/orders` 在生产 MySQL 8.2 报 `Error 1271 (HY000): Illegal mix of collations for operation 'UNION'`。只读元数据确认 top_ups/subscription_orders 的 trade_no/status 为 utf8mb4_0900_ai_ci，新 app_product_orders 为 utf8mb4_general_ci。仅对三张真实表的 trade_no 做空集合 UNION 也复现同一错误。此前三库测试默认统一排序规则，遗漏了历史表混用场景。
+
+修复 ListScopedAppOrders 的共享查询：仅 MySQL 将 UNION 的订单编号、状态和商品币种表达式转换为 utf8mb4/general_ci；SQLite/PostgreSQL 保留原表达式。没有更改生产表、索引、账户数据或支付结算。已有用户/App 范围、订阅镜像去重、搜索、全局排序、分页与账务快照补全保持。
+
+扩展已有 TestAppProxyDatabaseMatrix：MySQL 将旧表设置 unicode_ci、新表设置 general_ci，修复前 fresh/upgrade 均复现 1271（`.local-tests/collation-before.log`）；修复后 SQLite3.50.4/MySQL8.0.45/PostgreSQL16.15 六组合通过（`.local-tests/collation-after.log`）。同一测试增加原生账户三类订单的总数、跨 App 排除、订阅镜像去重、跨页顺序和币种，既有代理分支也在混合规则下运行。真实生产原用户/App 的修复后只读 COUNT 查询通过，返回20；没有通过修改表排序规则绕过问题。
+
+实际命令：`go test ./controller -run '^TestAppProxyDatabaseMatrix$' -count=1 -v`；`go test ./controller ./model -run '^(TestApp|TestOAuth(Product|Subscription|Topup|Purchas)|TestUsersForApp|TestPreConsumeUserSubscriptionAppIsolation)' -count=1`；`go build ./...`。均通过。未改前端，复用上一轮前端构建验证。
+
+open-code-review 基线仍为32ff3ba5a；OCR 实际执行后因无模型端点失败，按项目约定直接复核 model/app_assets.go、controller/app_product_settings_test.go 与本记录三文件增量，并检查两个管理/用户及 OAuth 调用入口、参数绑定、方言边界、隔离/分页/快照语义。复用此前全分支审计证据，没有重读整个分支。此 Medium/P2 已修复，未发现本次修复新增 Critical/High/Medium。未重跑最低数据库版本及真实支付/AI闭环。

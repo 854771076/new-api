@@ -453,6 +453,12 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 						assert.False(t, operation.Cancelled)
 					}
 				}
+				if kind == "mysql" {
+					// Released tables can retain a different collation from newly migrated tables.
+					require.NoError(t, db.Exec("ALTER TABLE top_ups CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci").Error)
+					require.NoError(t, db.Exec("ALTER TABLE subscription_orders CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci").Error)
+					require.NoError(t, db.Exec("ALTER TABLE app_product_orders CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci").Error)
+				}
 				app := model.OAuthApp{Name: "Proxy", ClientID: "matrix-proxy", APIKeyEnabled: true, ProxyIssuer: "https://native.example/auth/v1", Status: 1, QuotaPerCredit: new(int64(100))}
 				require.NoError(t, db.Create(&app).Error)
 				var ids [2]int
@@ -608,6 +614,34 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, "USD", orders[0].Currency)
 				assert.Equal(t, 2.0, orders[0].Money)
 				assert.Equal(t, observed.Credits, orders[0].Credits)
+
+				native := &model.User{Username: "history-native", AffCode: "history-native", Status: common.UserStatusEnabled, Group: "default"}
+				require.NoError(t, db.Create(native).Error)
+				for _, order := range []model.TopUp{
+					{UserId: native.Id, AppId: app.Id, TradeNo: "history-topup", Status: "success", Money: 1, PaymentProvider: model.PaymentProviderEpay, CreateTime: 1},
+					{UserId: native.Id, AppId: app.Id, TradeNo: "history-subscription", Status: "success", Money: 3, CreateTime: 3},
+					{UserId: native.Id, AppId: other.Id, TradeNo: "history-other-app", Status: "success", Money: 4, CreateTime: 4},
+				} {
+					require.NoError(t, db.Create(&order).Error)
+				}
+				require.NoError(t, db.Create(&model.AppProductOrder{UserId: native.Id, AppId: app.Id, TradeNo: "history-product", Status: "pending", Money: 2, Currency: "CNY", CreateTime: 2}).Error)
+				require.NoError(t, db.Create(&model.SubscriptionOrder{UserId: native.Id, AppId: app.Id, TradeNo: "history-subscription", Status: "success", Money: 3, CreateTime: 3}).Error)
+				nativePage := &common.PageInfo{Page: 1, PageSize: 2}
+				history, historyTotal, err := model.ListScopedAppOrders(native.Id, app.Id, "history", nativePage)
+				require.NoError(t, err)
+				assert.EqualValues(t, 3, historyTotal, "subscription top-up mirror is not counted twice; other scopes are excluded")
+				require.Len(t, history, 2)
+				assert.Equal(t, "history-subscription", history[0].OrderId)
+				assert.Equal(t, "subscription", history[0].Kind)
+				assert.Equal(t, "history-product", history[1].OrderId)
+				assert.Equal(t, "CNY", history[1].Currency)
+				nativePage.Page = 2
+				history, historyTotal, err = model.ListScopedAppOrders(native.Id, app.Id, "history", nativePage)
+				require.NoError(t, err)
+				assert.EqualValues(t, 3, historyTotal)
+				require.Len(t, history, 1)
+				assert.Equal(t, "history-topup", history[0].OrderId)
+				assert.Equal(t, "CNY", history[0].Currency)
 
 				// Legacy providers did not persist a currency; never infer it
 				// from today's configuration or mislabel a stored unit count.
