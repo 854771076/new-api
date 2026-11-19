@@ -25,6 +25,12 @@ func registerOAuthAppRoutes(apiRouter *gin.RouterGroup) {
 	proxy.GET("/users/:user_id/keys", controller.ListAppProxyKeys)
 	proxy.PUT("/users/:user_id/keys/:token_id", controller.UpdateAppProxyKey)
 	proxy.POST("/users/:user_id/keys/:token_id/commit-rotation", controller.CommitAppProxyKeyRotation)
+	proxy.POST("/users/:user_id/keys/:token_id/cancel-rotation", controller.CancelAppProxyKeyRotation)
+	proxy.GET("/users/:user_id/quota-rules", controller.ListTokenQuotaRules)
+	proxy.POST("/users/:user_id/quota-rules", controller.SaveTokenQuotaRule)
+	proxy.PUT("/users/:user_id/quota-rules/:id", controller.SaveTokenQuotaRule)
+	proxy.DELETE("/users/:user_id/quota-rules/:id", controller.DeleteTokenQuotaRule)
+	proxy.PUT("/users/:user_id/keys/:token_id/quota-rule", controller.BindTokenQuotaRule)
 	oauthAppRoute := apiRouter.Group("/oauth-apps")
 	oauthAppRoute.Use(middleware.AdminAuth())
 	{

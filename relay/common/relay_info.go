@@ -25,9 +25,12 @@ import (
 )
 
 type TokenQuotaReservation struct {
-	RuleID  int   `json:"rule_id"`
-	UsageID int   `json:"usage_id"`
-	Amount  int64 `json:"amount"`
+	SnapshotVersion   int   `json:"snapshot_version"`
+	QuotaLimitEnabled bool  `json:"quota_limit_enabled"`
+	QuotaLimit        int64 `json:"quota_limit"`
+	RuleID            int   `json:"rule_id"`
+	UsageID           int   `json:"usage_id"`
+	Amount            int64 `json:"amount"`
 }
 
 type ThinkingContentInfo struct {
@@ -88,6 +91,7 @@ type TokenCountMeta struct {
 
 type RelayInfo struct {
 	TokenQuotaReservation *TokenQuotaReservation
+	TaskReservationID     int64
 	TokenId               int
 	TokenKey              string
 	TokenGroup            string

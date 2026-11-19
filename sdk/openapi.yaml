@@ -371,6 +371,7 @@ paths:
                 allow_ips: {type: string}
                 group: {type: string}
                 old_token_id: {type: integer, minimum: 1}
+                quota_rule_id: {type: integer, minimum: 0, description: Atomic binding to a rule owned by this proxy user}
       responses:
         "200": {description: Success envelope with issued key; Cache-Control no-store}
         "409": {description: Operation conflict or limited rotation unsupported}
@@ -414,6 +415,83 @@ paths:
                 replacement_key: {type: string, writeOnly: true}
       responses:
         "200": {description: Old key revoked; repeat commit is idempotent}
+  /api/app-proxy/users/{user_id}/keys/{token_id}/cancel-rotation:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: token_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    post:
+      summary: Cancel pending replacement (admin api_key:write)
+      description: Idempotently disables only the replacement; permits authorized cleanup after App disablement. Cancelled replacements cannot be committed, reissued with the original operation ID, or enabled again.
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: Success envelope data.rotation_status=cancelled; no credentials}
+        "409": {description: operation_conflict if already committed}
+  /api/app-proxy/users/{user_id}/quota-rules:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+    get:
+      summary: List specified-user rules (admin api_key:read)
+      security: [{adminPAT: []}]
+      parameters:
+        - {name: p, in: query, schema: {type: integer, minimum: 1}}
+        - {name: page_size, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+      responses:
+        "200": {description: 'Success envelope data.items, total, server_time; each rule includes validity_status (disabled/scheduled/effective/expired), nullable valid_from/valid_until and bound_token_count'}
+    post:
+      summary: Create specified-user rule (admin api_key:write)
+      security: [{adminPAT: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AppQuotaRuleInput'}
+      responses:
+        "200": {description: Success envelope with target-owned rule; creates no wallet funds or subscription}
+  /api/app-proxy/users/{user_id}/quota-rules/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    put:
+      summary: Save specified-user rule (admin api_key:write)
+      description: Omitted validity endpoints preserve existing values; explicit null clears. Editing never clears period usage. Unknown fields and ownership metadata are rejected.
+      security: [{adminPAT: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AppQuotaRuleInput'}
+      responses:
+        "200": {description: Success envelope with updated rule}
+    delete:
+      summary: Delete an unbound rule (admin api_key:write)
+      security: [{adminPAT: []}]
+      responses:
+        "200": {description: Success envelope; original in-flight usage survives deletion}
+  /api/app-proxy/users/{user_id}/keys/{token_id}/quota-rule:
+    parameters:
+      - {$ref: '#/components/parameters/ProxyUserId'}
+      - {$ref: '#/components/parameters/AppId'}
+      - {name: token_id, in: path, required: true, schema: {type: integer, minimum: 1}}
+    put:
+      summary: Bind a target-owned rule (admin api_key:write)
+      description: Pending source rotations must first be committed or cancelled. rule_id=0 removes the restriction and is permitted for cleanup after App disablement.
+      security: [{adminPAT: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [rule_id]
+              properties:
+                rule_id: {type: integer, minimum: 0}
+      responses:
+        "200": {description: Success envelope}
+        "409": {description: operation_conflict for pending rotation}
   /api/app-proxy/users/{user_id}/checkout:
     parameters:
       - {$ref: '#/components/parameters/ProxyUserId'}
@@ -567,6 +645,22 @@ components:
     AppId: {name: app_id, in: query, required: true, schema: {type: integer, minimum: 1}}
     OperationId: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 128}}
   schemas:
+    AppQuotaRuleInput:
+      type: object
+      additionalProperties: false
+      required: [name, enabled, quota_limit_enabled, quota_period, quota_limit, time_window_enabled, time_window_timezone, allowed_weekdays]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 128}
+        description: {type: string, maxLength: 255}
+        enabled: {type: boolean, description: 'false bypasses the rule; it does not disable the key'}
+        quota_limit_enabled: {type: boolean}
+        quota_period: {type: string, enum: [daily, weekly, monthly]}
+        quota_limit: {type: integer, minimum: 0, maximum: 9007199254740991}
+        time_window_enabled: {type: boolean}
+        time_window_timezone: {type: string, enum: [UTC, Asia/Shanghai]}
+        allowed_weekdays: {type: string, description: 'JSON-encoded array of ISO weekday integers 1..7'}
+        valid_from: {type: integer, format: int64, nullable: true, minimum: 1, maximum: 253402300799, description: 'Inclusive UTC Unix seconds; must precede valid_until'}
+        valid_until: {type: integer, format: int64, nullable: true, minimum: 1, maximum: 253402300799, description: 'Exclusive UTC Unix seconds; expired requests fail 403 rule_expired'}
     AppWallet:
       type: object
       required: [user_id, app_id, identity_source, quota, used_quota, quota_per_credit, credits, used_credits, capabilities]

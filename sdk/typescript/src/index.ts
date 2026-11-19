@@ -357,10 +357,30 @@ export interface AppCheckout {
 export interface AppProxyKey {
   id: number; user_id: number; app_id: number; key: string; name: string;
   status: number; remain_quota: number; unlimited_quota: boolean;
+  quota_rule_id?: number; quota_rule?: AppQuotaRule; quota_rule_used?: number;
+  rotation_status?: 'pending' | 'committed' | 'cancelled';
+}
+export interface AppQuotaRuleInput {
+  name: string; description?: string; enabled: boolean;
+  quota_limit_enabled: boolean; quota_period: 'daily' | 'weekly' | 'monthly'; quota_limit: number;
+  time_window_enabled: boolean; time_window_timezone: 'UTC' | 'Asia/Shanghai'; allowed_weekdays: string;
+  valid_from?: number | null; valid_until?: number | null;
+}
+export interface AppQuotaRule extends AppQuotaRuleInput {
+  id: number; user_id: number; bound_token_count: number;
+  validity_status: 'disabled' | 'scheduled' | 'effective' | 'expired';
 }
 export interface AppProxyKeyInput {
   name?: string; expired_time?: number; remain_quota?: number; unlimited_quota?: boolean;
   model_limits_enabled?: boolean; model_limits?: string; allow_ips?: string; group?: string; old_token_id?: number;
+  quota_rule_id?: number;
+}
+
+export class AppProxyError extends Error {
+  constructor(public readonly status: number, public readonly code?: string) {
+    super(`App proxy request failed (${status})`);
+    this.name = 'AppProxyError';
+  }
 }
 
 /** Trusted backend only. The PAT must carry admin role and each operation's scope.
@@ -380,7 +400,7 @@ export function createAppProxyClient(config: {baseUrl:string;appId:number;access
     for (const [key,value] of Object.entries(query??{})) url.searchParams.set(key,String(value));
     const response=await send(url,{method,redirect:'error',cache:'no-store',signal:AbortSignal.timeout(15000),headers:{Authorization:`Bearer ${config.accessToken}`,'Content-Type':'application/json',...(operationId?{'Idempotency-Key':operationId}:{})},body:body===undefined?undefined:JSON.stringify(body)});
     const result=await response.json();
-    if (!response.ok || result.success===false || result.error) throw new Error(`App proxy request failed (${response.status})`);
+    if (!response.ok || result.success===false || result.error) throw new AppProxyError(response.status, typeof result.code === 'string' && /^[a-z_]{1,64}$/.test(result.code) ? result.code : undefined);
     return (Object.hasOwn(result,'data') && !path.endsWith('/pricing') ? result.data : result) as T;
   }
   return {
@@ -394,6 +414,15 @@ export function createAppProxyClient(config: {baseUrl:string;appId:number;access
     createKey: (userId:number,input:AppProxyKeyInput,operationId:string) => request<AppProxyKey>(`${userPath(userId)}/keys`,'POST',input,operationId),
     updateKey: (userId:number,tokenId:number,input:{status:1|2;name?:string;remain_quota?:number}) => request<null>(`${userPath(userId)}/keys/${id(tokenId)}`,'PUT',input),
     commitRotation: (userId:number,tokenId:number,replacementKey:string) => request<null>(`${userPath(userId)}/keys/${id(tokenId)}/commit-rotation`,'POST',{replacement_key:replacementKey}),
+    cancelRotation: (userId:number,tokenId:number) => request<{rotation_status:'cancelled'}>(`${userPath(userId)}/keys/${id(tokenId)}/cancel-rotation`,'POST',{}),
+    quotaRules: (userId:number,page=1) => request<{items:AppQuotaRule[];total:number;server_time:number}>(`${userPath(userId)}/quota-rules`,'GET',undefined,undefined,{p:page}),
+    createQuotaRule: (userId:number,input:AppQuotaRuleInput) => request<AppQuotaRule>(`${userPath(userId)}/quota-rules`,'POST',input),
+    updateQuotaRule: (userId:number,ruleId:number,input:AppQuotaRuleInput) => request<AppQuotaRule>(`${userPath(userId)}/quota-rules/${id(ruleId)}`,'PUT',input),
+    deleteQuotaRule: (userId:number,ruleId:number) => request<null>(`${userPath(userId)}/quota-rules/${id(ruleId)}`,'DELETE'),
+    bindQuotaRule: (userId:number,tokenId:number,ruleId:number) => {
+      if (!Number.isSafeInteger(ruleId) || ruleId<0) throw new Error('Invalid rule ID');
+      return request<null>(`${userPath(userId)}/keys/${id(tokenId)}/quota-rule`,'PUT',{rule_id:ruleId});
+    },
     checkout: (userId:number,input:{purchase_type:'topup'|'product';payment_method:'waffo_pancake';amount?:number;product_id?:number},requestId:string) => request<AppCheckout>(`${userPath(userId)}/checkout`,'POST',{...input,app_id:config.appId},requestId),
     order: (userId:number,orderId:string) => {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(orderId)) throw new Error('Invalid order ID');

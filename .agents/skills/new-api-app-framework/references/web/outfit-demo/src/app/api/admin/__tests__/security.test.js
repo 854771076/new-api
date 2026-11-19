@@ -5,7 +5,7 @@ mock.module('next/headers', () => ({ cookies: async () => ({ getAll: () => [], s
 const environment = {
   NEXT_PUBLIC_SUPABASE_URL: 'https://supabase.example', NEXT_PUBLIC_SUPABASE_ANON_KEY: 'anon-test',
   NEXT_PUBLIC_GATEWAY_BASE_URL: 'https://gateway.example', NEXT_PUBLIC_GATEWAY_CLIENT_ID: 'nac_outfit',
-  SUPABASE_SECRET_KEY: 'service-test', APP_ORIGIN: 'https://outfit.example', NODE_ENV: 'test',
+  SUPABASE_SECRET_KEY: 'service-test', APP_ORIGIN: 'https://outfit.example', NODE_ENV: 'test', NEXT_PUBLIC_GATEWAY_APP_ID: '7', GATEWAY_ADMIN_ACCESS_TOKEN: 'test-server-pat',
 };
 const originalEnvironment = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]]));
 Object.assign(process.env, environment);
@@ -72,6 +72,7 @@ mock.module('@supabase/supabase-js', () => ({ createClient: () => serviceDatabas
 const { NextRequest } = await import('next/server');
 const { requireAdmin } = await import('../../../../lib/admin/requireAdmin');
 const { GET, POST, PATCH, DELETE } = await import('../[table]/route');
+const { GET: proxyGet, PUT: proxyPut } = await import('../gateway-proxy/[user_id]/[...path]/route');
 const { GET: stats } = await import('../stats/route');
 const { GET: sign } = await import('../signed-url/route');
 const { GET: references } = await import('../generation-references/route');
@@ -89,6 +90,7 @@ beforeEach(() => {
   scopeError = false; grantError = false; rpcError = null; operations = []; signedPaths = [];
   process.env.NODE_ENV = 'test';
   rows = {
+    gateway_proxy_accounts: [{ user_id: userId, app_id: 7, client_id: clientId, issuer: 'https://supabase.example/auth/v1', identity_source: 'proxy', gateway_user_id: 42 }],
     app_admins: [{ user_id: userId, client_id: clientId, role: 'admin' }],
     outfits: [{ id: ownId, client_id: clientId, name_zh: 'Own', is_active: true }, { id: foreignId, client_id: 'other', name_zh: 'Foreign', is_active: true }],
     poses: [{ id: ownId, client_id: clientId, is_active: true }, { id: foreignId, client_id: 'other', is_active: true }],
@@ -200,4 +202,36 @@ test('admin signing uses caller Storage authorization and hides rejected diagnos
   const response = await sign(request('GET', '/api/admin/signed-url?bucket=media-user&path=other/result.png'));
   expect(response.status).toBe(404);
   expect(await response.json()).toEqual({ error: 'NOT_FOUND' });
+});
+
+
+test('proxy quota BFF resolves its protected native mapping and fixes App scope', async () => {
+ const originalFetch = globalThis.fetch;
+ const calls = [];
+ globalThis.fetch = async (url, options) => { calls.push({ url: String(url), options }); return Response.json({ success: true, data: { items: [], total: 0, server_time: 1 } }); };
+ const context = { params: Promise.resolve({ user_id: userId, path: ['quota-rules'] }) };
+ try {
+  const response = await proxyGet(request('GET', '/api/admin/gateway-proxy/ignored/quota-rules?app_id=999&user_id=999'), context);
+  expect(response.status).toBe(200);
+  expect(calls[0].url).toBe('https://gateway.example/api/app-proxy/users/42/quota-rules?app_id=7&p=1&page_size=20');
+  expect(calls[0].options.headers.Authorization).toBe('Bearer test-server-pat');
+  expect(JSON.stringify(await response.json())).not.toContain('test-server-pat');
+  rows.gateway_proxy_accounts[0].app_id = 999;
+  expect((await proxyGet(request('GET'), context)).status).toBe(404);
+  expect(calls.length).toBe(1);
+ } finally { globalThis.fetch = originalFetch; }
+});
+
+test('proxy quota BFF rejects consumer access, CSRF and forged ownership before forwarding', async () => {
+ const originalFetch = globalThis.fetch;
+ let forwarded = false;
+ globalThis.fetch = async () => { forwarded = true; throw new Error('must not forward'); };
+ const context = { params: Promise.resolve({ user_id: userId, path: ['keys', '1', 'quota-rule'] }) };
+ try {
+  expect((await proxyPut(request('PUT', undefined, { rule_id: 1 }, null), context)).status).toBe(403);
+  expect((await proxyPut(request('PUT', undefined, { rule_id: 1, user_id: 99 }), context)).status).toBe(400);
+  rows.app_admins = [];
+  expect((await proxyPut(request('PUT', undefined, { rule_id: 1 }), context)).status).toBe(403);
+  expect(forwarded).toBe(false);
+ } finally { globalThis.fetch = originalFetch; }
 });

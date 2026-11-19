@@ -12,15 +12,39 @@ import (
 
 var ErrAppOperationConflict = errors.New("operation id was already used with different parameters")
 var ErrLimitedKeyRotation = errors.New("limited key rotation is unavailable without a shared spending budget")
+var ErrRotationCancelled = errors.New("rotation_cancelled")
 
 func UpdateAppProxyKeyPolicy(token *Token, updates map[string]any) error {
 	if token == nil || token.AppId <= 0 {
 		return ErrProxyIdentity
 	}
-	if err := invalidateTokenCacheForMutation(token.Key); err != nil {
-		return err
-	}
-	return DB.Model(&Token{}).Where("id = ? AND user_id = ? AND app_id = ?", token.Id, token.UserId, token.AppId).Updates(updates).Error
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var op AppKeyOperation
+		err := tx.Where("token_id = ? AND old_token_id > 0", token.Id).First(&op).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if err == nil {
+			var source Token
+			if err := lockForUpdate(tx).First(&source, op.OldTokenId).Error; err != nil {
+				return err
+			}
+			if err := lockForUpdate(tx).First(&op, "operation_key = ?", op.OperationKey).Error; err != nil {
+				return err
+			}
+			if updates["status"] == common.TokenStatusEnabled && op.Cancelled {
+				return ErrRotationCancelled
+			}
+		}
+		var current Token
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ? AND app_id = ?", token.Id, token.UserId, token.AppId).First(&current).Error; err != nil {
+			return err
+		}
+		if err := invalidateTokenCacheForMutation(current.Key); err != nil {
+			return err
+		}
+		return tx.Model(&current).Updates(updates).Error
+	})
 }
 
 // AppKeyOperation makes initial issuance and staged rotation recoverable after
@@ -31,6 +55,7 @@ type AppKeyOperation struct {
 	TokenId      int    `gorm:"not null"`
 	OldTokenId   int    `gorm:"not null"`
 	Committed    bool
+	Cancelled    bool `gorm:"not null;default:false"`
 }
 
 func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldID int) (*Token, error) {
@@ -42,7 +67,12 @@ func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldI
 		return nil, err
 	}
 	digest := sha256.Sum256(encoded)
-	payload, err := common.Marshal([]any{token.Name, token.ExpiredTime, token.RemainQuota, token.UnlimitedQuota, token.ModelLimitsEnabled, token.ModelLimits, token.AllowIps, token.Group, oldID})
+	payloadValues := []any{token.Name, token.ExpiredTime, token.RemainQuota, token.UnlimitedQuota, token.ModelLimitsEnabled, token.ModelLimits, token.AllowIps, token.Group, oldID}
+	// Preserve existing operation fingerprints when the optional binding is absent.
+	if token.QuotaRuleId != 0 {
+		payloadValues = append(payloadValues, token.QuotaRuleId)
+	}
+	payload, err := common.Marshal(payloadValues)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +80,16 @@ func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldI
 	op := AppKeyOperation{OperationKey: fmt.Sprintf("%x", digest), Fingerprint: fmt.Sprintf("%x", fingerprint), OldTokenId: oldID}
 	var result Token
 	err = DB.Transaction(func(tx *gorm.DB) error {
+		// All rotation mutations and binding serialize source -> operation -> replacement.
+		var old Token
+		if oldID > 0 {
+			if err := lockForUpdate(tx).First(&old, oldID).Error; err != nil {
+				return err
+			}
+			if old.UserId != userID || old.AppId != appID {
+				return ErrProxyIdentity
+			}
+		}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&op).Error; err != nil {
 			return err
 		}
@@ -59,6 +99,9 @@ func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldI
 		}
 		if stored.Fingerprint != op.Fingerprint {
 			return ErrAppOperationConflict
+		}
+		if stored.Cancelled {
+			return ErrRotationCancelled
 		}
 		var user User
 		if err := tx.First(&user, userID).Error; err != nil {
@@ -84,19 +127,24 @@ func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldI
 			return ErrProxyIdentity
 		}
 		if oldID > 0 {
-			var old Token
-			if err := lockForUpdate(tx).First(&old, oldID).Error; err != nil {
-				return err
-			}
 			if old.UserId != userID || old.AppId != appID || old.Status != common.TokenStatusEnabled {
 				return ErrProxyIdentity
 			}
-			if !old.UnlimitedQuota {
+			if !old.UnlimitedQuota || old.QuotaRuleId > 0 || token.QuotaRuleId > 0 {
 				return ErrLimitedKeyRotation
 			}
 			// Copy the old policy, never accept broader replacement permissions.
 			*token = old
 			token.Id, token.UsedQuota, token.RemainQuota = 0, 0, 0
+		}
+		if token.QuotaRuleId < 0 {
+			return ErrProxyIdentity
+		}
+		if token.QuotaRuleId > 0 {
+			var rule TokenQuotaRule
+			if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", token.QuotaRuleId, userID).First(&rule).Error; err != nil {
+				return err
+			}
 		}
 		key, err := common.GenerateKey()
 		if err != nil {
@@ -117,35 +165,73 @@ func CreateAppProxyKey(userID, appID int, operationID string, token *Token, oldI
 // CommitAppProxyKeyRotation is called only after the backend has saved and
 // verified the replacement. Retrying cannot revoke a different old key.
 func CommitAppProxyKeyRotation(userID, appID, tokenID int, replacementKey string) error {
-	var old Token
-	err := DB.Transaction(func(tx *gorm.DB) error {
+	return finishAppProxyKeyRotation(userID, appID, tokenID, replacementKey, false)
+}
+
+func CancelAppProxyKeyRotation(userID, appID, tokenID int) error {
+	return finishAppProxyKeyRotation(userID, appID, tokenID, "", true)
+}
+
+func finishAppProxyKeyRotation(userID, appID, tokenID int, replacementKey string, cancel bool) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
 		var op AppKeyOperation
-		if err := lockForUpdate(tx).Where("token_id = ? AND old_token_id > 0", tokenID).First(&op).Error; err != nil {
+		if err := tx.Where("token_id = ? AND old_token_id > 0", tokenID).First(&op).Error; err != nil {
+			return err
+		}
+		var old Token
+		if err := lockForUpdate(tx).First(&old, op.OldTokenId).Error; err != nil {
+			return err
+		}
+		if old.UserId != userID || old.AppId != appID {
+			return ErrProxyIdentity
+		}
+		if err := lockForUpdate(tx).First(&op, "operation_key = ?", op.OperationKey).Error; err != nil {
 			return err
 		}
 		var replacement Token
-		if err := tx.First(&replacement, tokenID).Error; err != nil {
+		if err := lockForUpdate(tx).First(&replacement, tokenID).Error; err != nil {
 			return err
 		}
-		if replacement.UserId != userID || replacement.AppId != appID || replacement.Status != common.TokenStatusEnabled || replacement.Key != replacementKey {
+		if replacement.UserId != userID || replacement.AppId != appID {
+			return ErrProxyIdentity
+		}
+		if cancel {
+			if op.Committed {
+				return ErrAppOperationConflict
+			}
+			if err := invalidateTokenCacheForMutation(replacement.Key); err != nil {
+				return err
+			}
+			if err := tx.Model(&replacement).Update("status", common.TokenStatusDisabled).Error; err != nil {
+				return err
+			}
+			return tx.Model(&op).Update("cancelled", true).Error
+		}
+		if op.Cancelled {
+			return ErrRotationCancelled
+		}
+		if replacement.Status != common.TokenStatusEnabled || replacement.Key != replacementKey {
 			return ErrProxyIdentity
 		}
 		if op.Committed {
 			return nil
 		}
-		if err := tx.First(&old, op.OldTokenId).Error; err != nil {
+		if !old.UnlimitedQuota || old.QuotaRuleId > 0 {
+			return ErrLimitedKeyRotation
+		}
+		var app OAuthApp
+		if err := tx.First(&app, appID).Error; err != nil {
 			return err
 		}
-		if old.UserId != userID || old.AppId != appID || !old.UnlimitedQuota {
+		if !app.IsEnabled() || !app.APIKeyEnabled {
 			return ErrProxyIdentity
+		}
+		if err := invalidateTokenCacheForMutation(old.Key); err != nil {
+			return err
 		}
 		if err := tx.Model(&Token{}).Where("id = ?", old.Id).Update("status", common.TokenStatusDisabled).Error; err != nil {
 			return err
 		}
 		return tx.Model(&AppKeyOperation{}).Where("operation_key = ?", op.OperationKey).Update("committed", true).Error
 	})
-	if err == nil && old.Id > 0 {
-		_ = invalidateTokenCacheForMutation(old.Key)
-	}
-	return err
 }

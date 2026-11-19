@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "Danh tính proxy hoặc quyền sở hữu App không hợp lệ",
     "subscriptions are not supported for proxy users": "Người dùng proxy không hỗ trợ đăng ký gói",
     "operation id was already used with different parameters": "Mã thao tác đã được dùng với tham số khác",
-    "limited key rotation is unavailable without a shared spending budget": "Xoay khóa có giới hạn cần ngân sách sử dụng chung"
+    "limited key rotation is unavailable without a shared spending budget": "Xoay khóa có giới hạn cần ngân sách sử dụng chung",
+    "Valid from (inclusive)": "Có hiệu lực từ (bao gồm)",
+    "Valid until (exclusive)": "Có hiệu lực đến (không bao gồm)",
+    "Quota rule start must be before its end": "Thời điểm bắt đầu quy tắc phải trước thời điểm kết thúc",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "Thời hạn phải là giây Unix từ 1 đến 253402300799",
+    "Editing this rule affects {{count}} bound API keys.": "Chỉnh sửa sẽ ảnh hưởng {{count}} khóa API đã liên kết.",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "Tắt hoặc gỡ quy tắc sẽ loại bỏ giới hạn. Để hủy quyền thành viên, đặt thời điểm kết thúc hoặc thu hồi khóa.",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "Ngày trống là không giới hạn đầu mút. Chu kỳ lịch đặt lại theo múi giờ đã chọn; thay đổi chu kỳ hoặc múi giờ có thể chọn ngân sách khác.",
+    "Scheduled": "Chưa bắt đầu",
+    "Effective": "Có hiệu lực theo thời gian",
+    "Unbounded": "Không giới hạn đầu mút",
+    "Rotation cancelled": "Đã hủy xoay khóa",
+    "Cancel rotation": "Hủy xoay khóa",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "Khóa thay thế sẽ bị thu hồi. Khóa gốc và mức sử dụng không thay đổi.",
+    "API key quota rule has not started": "Quy tắc hạn ngạch của khóa API chưa bắt đầu",
+    "API key quota rule has expired": "Quy tắc hạn ngạch của khóa API đã hết hạn",
+    "rotation_cancelled": "Đã hủy xoay khóa, không thể khôi phục khóa thay thế",
+    "reservation_snapshot_unavailable": "Khoản giữ chỗ gốc thiếu ảnh chụp ngân sách; không thể giữ chỗ bổ sung"
   }
 }

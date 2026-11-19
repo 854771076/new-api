@@ -26,6 +26,7 @@ type Token struct {
 	QuotaRuleId        int             `json:"quota_rule_id" gorm:"index;default:0"`
 	QuotaRule          *TokenQuotaRule `json:"quota_rule,omitempty" gorm:"-"`
 	QuotaRuleUsed      int64           `json:"quota_rule_used" gorm:"-"`
+	RotationStatus     string          `json:"rotation_status,omitempty" gorm:"-"`
 	ModelLimitsEnabled bool            `json:"model_limits_enabled"`
 	ModelLimits        string          `json:"model_limits" gorm:"type:text"`
 	AllowIps           *string         `json:"allow_ips" gorm:"default:''"`

@@ -37,6 +37,7 @@ func (t TaskStatus) ToVideoStatus() string {
 
 const (
 	TaskStatusNotStart   TaskStatus = "NOT_START"
+	TaskStatusSubmitting            = "SUBMITTING"
 	TaskStatusSubmitted             = "SUBMITTED"
 	TaskStatusQueued                = "QUEUED"
 	TaskStatusInProgress            = "IN_PROGRESS"
@@ -372,6 +373,7 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 	var tasks []*Task
 	err := DB.Where("progress != ?", "100%").
 		Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess}).
+		Where("status != ?", TaskStatusSubmitting).
 		Where("submit_time < ?", cutoffUnix).
 		Order("submit_time").
 		Limit(limit).
@@ -386,7 +388,7 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
 	var err error
 	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	err = DB.Where("progress != ?", "100%").Where("status NOT IN ?", []string{TaskStatusFailure, TaskStatusSuccess, TaskStatusSubmitting}).Limit(limit).Order("id").Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
@@ -403,6 +405,7 @@ func HasUnfinishedSyncTasks() bool {
 		Where("progress != ?", "100%").
 		Where("status != ?", TaskStatusFailure).
 		Where("status != ?", TaskStatusSuccess).
+		Where("status != ?", TaskStatusSubmitting).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -517,6 +520,54 @@ func (Task *Task) InsertWithContext(ctx context.Context, omitColumns ...string) 
 		tx = tx.Omit(omitColumns...)
 	}
 	return tx.Create(Task).Error
+}
+
+// StageTaskQuotaReservation persists the admission contract before vendor work.
+// A crash with an unknown vendor outcome stays SUBMITTING for reconciliation;
+// polling must never resubmit or refund that uncertain operation automatically.
+func StageTaskQuotaReservation(ctx context.Context, info *commonRelay.RelayInfo, platform constant.TaskPlatform) error {
+	if info.TokenQuotaReservation == nil {
+		return nil
+	}
+	task := InitTask(platform, info)
+	task.ID, task.Status = info.TaskReservationID, TaskStatusSubmitting
+	snapshot := *info.TokenQuotaReservation
+	task.PrivateData.TokenQuotaReservation = &snapshot
+	task.PrivateData.TokenId = info.TokenId
+	task.PrivateData.BillingSource = info.BillingSource
+	task.PrivateData.SubscriptionId = info.SubscriptionId
+	if task.ID == 0 {
+		if err := task.InsertWithContext(ctx); err != nil {
+			return err
+		}
+		info.TaskReservationID = task.ID
+		return nil
+	}
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var staged Task
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ? AND app_id = ? AND status = ?", task.ID, task.UserId, task.AppId, TaskStatusSubmitting).First(&staged).Error; err != nil {
+			return err
+		}
+		// MySQL reports zero changed rows for an identical retry; existence is checked under lock.
+		return tx.Model(&staged).Updates(map[string]any{"private_data": task.PrivateData, "channel_id": task.ChannelId, "properties": task.Properties, "platform": task.Platform}).Error
+	})
+}
+
+// CompleteReservedTask replaces the pre-submit row and publishes App usage together.
+func (task *Task) CompleteReservedTask(ctx context.Context, appUsedQuotaDelta int, omitColumns ...string) error {
+	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var staged Task
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ? AND app_id = ? AND status = ?", task.ID, task.UserId, task.AppId, TaskStatusSubmitting).First(&staged).Error; err != nil {
+			return err
+		}
+		if appUsedQuotaDelta != 0 {
+			if err := adjustUserAppUsedQuota(tx, task.UserId, task.AppId, appUsedQuotaDelta); err != nil {
+				return err
+			}
+		}
+		task.CreatedAt = staged.CreatedAt
+		return tx.Model(&staged).Select("*").Omit(append([]string{"id"}, omitColumns...)...).Updates(task).Error
+	})
 }
 
 // Initial usage and task visibility must survive or roll back together.

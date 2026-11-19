@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "プロキシ ID または App の所有関係が無効です",
     "subscriptions are not supported for proxy users": "プロキシユーザーはサブスクリプションを利用できません",
     "operation id was already used with different parameters": "操作 ID は異なるパラメーターですでに使用されています",
-    "limited key rotation is unavailable without a shared spending budget": "制限付きキーのローテーションには共有利用予算が必要です"
+    "limited key rotation is unavailable without a shared spending budget": "制限付きキーのローテーションには共有利用予算が必要です",
+    "Valid from (inclusive)": "開始日時（含む）",
+    "Valid until (exclusive)": "終了日時（含まない）",
+    "Quota rule start must be before its end": "ルールの開始日時は終了日時より前にしてください",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "有効期限は 1〜253402300799 の Unix 秒で指定してください",
+    "Editing this rule affects {{count}} bound API keys.": "このルールの編集は {{count}} 個の関連 API キーに影響します。",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "ルールの無効化・解除は制限を取り除きます。会員権の取消には終了日時の設定またはキーの失効を使用してください。",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "空欄は境界なしを意味します。暦の期間は選択したタイムゾーンでリセットされ、期間やタイムゾーンの変更により別の予算が選ばれる場合があります。",
+    "Scheduled": "開始前",
+    "Effective": "期間内で有効",
+    "Unbounded": "境界なし",
+    "Rotation cancelled": "ローテーション取消済み",
+    "Cancel rotation": "ローテーションを取り消す",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "置換キーは失効します。元のキーと使用量は変わりません。",
+    "API key quota rule has not started": "この API キーのクォータルールは開始前です",
+    "API key quota rule has expired": "この API キーのクォータルールは期限切れです",
+    "rotation_cancelled": "ローテーションは取消済みのため置換キーを復元できません",
+    "reservation_snapshot_unavailable": "元の予約に予算スナップショットがなく追加予約できません"
   }
 }

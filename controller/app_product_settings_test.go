@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/Calcium-Ion/go-epay/epay"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
@@ -24,7 +25,9 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -349,6 +352,35 @@ type releasedProductToken struct {
 
 func (releasedProductToken) TableName() string { return "tokens" }
 
+// Pre-validity schema from main: upgrades must preserve existing budgets and rotations.
+type previousQuotaRule struct {
+	Id                 int
+	UserId             int    `gorm:"index"`
+	Name               string `gorm:"type:varchar(128)"`
+	Description        string `gorm:"type:varchar(255)"`
+	Enabled            bool
+	QuotaLimitEnabled  bool
+	QuotaPeriod        string `gorm:"type:varchar(16)"`
+	QuotaLimit         int64
+	TimeWindowEnabled  bool
+	TimeWindowTimezone string `gorm:"type:varchar(32)"`
+	AllowedWeekdays    string `gorm:"type:text"`
+	CreatedAt          int64
+	UpdatedAt          int64
+}
+
+func (previousQuotaRule) TableName() string { return "token_quota_rules" }
+
+type previousKeyOperation struct {
+	OperationKey string `gorm:"primaryKey;type:varchar(64)"`
+	Fingerprint  string `gorm:"type:varchar(64);not null"`
+	TokenId      int    `gorm:"not null"`
+	OldTokenId   int    `gorm:"not null"`
+	Committed    bool
+}
+
+func (previousKeyOperation) TableName() string { return "app_key_operations" }
+
 func TestAppProxyDatabaseMatrix(t *testing.T) {
 	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
 		dsn := os.Getenv("TEST_MYSQL_DSN")
@@ -385,9 +417,15 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 					require.NoError(t, db.AutoMigrate(&releasedProductUser{}, &releasedProductToken{}, &releasedProductApp{}))
 					require.NoError(t, db.Create(&releasedProductUser{Username: "legacy", Password: "hash", AffCode: "legacy", Quota: 9000, UsedQuota: 300}).Error)
 					require.NoError(t, db.Create(&releasedProductToken{UserId: 1, Key: "legacy-key", RemainQuota: 500, UsedQuota: 40}).Error)
+					require.NoError(t, db.AutoMigrate(&previousQuotaRule{}, &previousKeyOperation{}, &model.TokenQuotaRuleUsage{}))
+					require.NoError(t, db.Create(&previousQuotaRule{UserId: 1, Name: "Existing budget", Enabled: true, QuotaLimitEnabled: true, QuotaLimit: 100, QuotaPeriod: "daily", TimeWindowTimezone: "UTC", AllowedWeekdays: "[]"}).Error)
+					require.NoError(t, db.Create(&model.TokenQuotaRuleUsage{TokenId: 1, RuleId: 1, PeriodKey: "legacy", UsedQuota: 40}).Error)
+					for _, committed := range []bool{false, true} {
+						require.NoError(t, db.Create(&previousKeyOperation{OperationKey: fmt.Sprintf("legacy-%t", committed), Fingerprint: "legacy", TokenId: 1, OldTokenId: 1, Committed: committed}).Error)
+					}
 				}
 				for range 2 {
-					require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.AppCheckout{}, &model.TopUp{}, &model.AppProductOrder{}, &model.SubscriptionOrder{}, &model.Log{}))
+					require.NoError(t, db.AutoMigrate(&model.User{}, &model.Token{}, &model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}, &model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.AppCheckout{}, &model.TopUp{}, &model.AppProductOrder{}, &model.SubscriptionOrder{}, &model.Log{}))
 				}
 				if upgrade {
 					legacy, err := model.GetUserById(1, true)
@@ -400,6 +438,20 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 					assert.Zero(t, legacyKey.AppId)
 					assert.Equal(t, 500, legacyKey.RemainQuota)
 					assert.Equal(t, 40, legacyKey.UsedQuota)
+					var oldRule model.TokenQuotaRule
+					require.NoError(t, db.First(&oldRule, 1).Error)
+					assert.Nil(t, oldRule.ValidFrom)
+					assert.Nil(t, oldRule.ValidUntil)
+					assert.Equal(t, "effective", oldRule.ValidityAt(time.Now().Unix()))
+					var oldUsage model.TokenQuotaRuleUsage
+					require.NoError(t, db.Where("token_id = ? AND rule_id = ?", 1, 1).First(&oldUsage).Error)
+					assert.EqualValues(t, 40, oldUsage.UsedQuota)
+					for _, committed := range []bool{false, true} {
+						var operation model.AppKeyOperation
+						require.NoError(t, db.First(&operation, "operation_key = ?", fmt.Sprintf("legacy-%t", committed)).Error)
+						assert.Equal(t, committed, operation.Committed)
+						assert.False(t, operation.Cancelled)
+					}
 				}
 				app := model.OAuthApp{Name: "Proxy", ClientID: "matrix-proxy", APIKeyEnabled: true, ProxyIssuer: "https://native.example/auth/v1", Status: 1, QuotaPerCredit: new(int64(100))}
 				require.NoError(t, db.Create(&app).Error)
@@ -478,6 +530,37 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 				require.NoError(t, err)
 				_, err = model.CreateAppProxyKey(user.Id, app.Id, "limited-rotate", &model.Token{}, limited.Id)
 				assert.ErrorIs(t, err, model.ErrLimitedKeyRotation)
+				rule := &model.TokenQuotaRule{UserId: user.Id, Name: "Daily budget", Enabled: true, QuotaLimitEnabled: true, QuotaPeriod: "daily", QuotaLimit: 100, TimeWindowTimezone: "UTC", AllowedWeekdays: "[1,2,3,4,5,6,7]"}
+				require.NoError(t, model.SaveTokenQuotaRule(rule))
+				require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, replacement.Id, rule.Id))
+				_, err = model.ReserveTokenQuotaRule(replacement.Id, 90, true)
+				require.NoError(t, err)
+				_, err = model.CreateAppProxyKey(user.Id, app.Id, "rule-bound-rotate", &model.Token{}, replacement.Id)
+				assert.ErrorIs(t, err, model.ErrLimitedKeyRotation)
+				var usage model.TokenQuotaRuleUsage
+				require.NoError(t, db.Where("token_id = ? AND rule_id = ?", replacement.Id, rule.Id).First(&usage).Error)
+				assert.EqualValues(t, 90, usage.UsedQuota)
+				active, err = model.GetTokenById(replacement.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.TokenStatusEnabled, active.Status)
+
+				stagedSource, err := model.CreateAppProxyKey(user.Id, app.Id, "staged-source", &model.Token{UnlimitedQuota: true, ExpiredTime: -1}, 0)
+				require.NoError(t, err)
+				staged, err := model.CreateAppProxyKey(user.Id, app.Id, "staged-rule-rotate", &model.Token{}, stagedSource.Id)
+				require.NoError(t, err)
+				assert.ErrorIs(t, model.SetTokenQuotaRuleBinding(user.Id, stagedSource.Id, rule.Id), model.ErrAppOperationConflict)
+				require.NoError(t, model.CancelAppProxyKeyRotation(user.Id, app.Id, staged.Id))
+				require.NoError(t, model.CancelAppProxyKeyRotation(user.Id, app.Id, staged.Id))
+				assert.ErrorIs(t, model.CommitAppProxyKeyRotation(user.Id, app.Id, staged.Id, staged.Key), model.ErrRotationCancelled)
+				_, err = model.CreateAppProxyKey(user.Id, app.Id, "staged-rule-rotate", &model.Token{}, stagedSource.Id)
+				assert.ErrorIs(t, err, model.ErrRotationCancelled)
+				assert.ErrorIs(t, model.UpdateAppProxyKeyPolicy(staged, map[string]any{"status": common.TokenStatusEnabled}), model.ErrRotationCancelled)
+				assert.ErrorIs(t, model.CancelAppProxyKeyRotation(user.Id, app.Id, replacement.Id), model.ErrAppOperationConflict)
+				require.NoError(t, model.SetTokenQuotaRuleBinding(user.Id, stagedSource.Id, rule.Id))
+				runAppQuotaValidityCases(t, db, user.Id, app.Id)
+				active, err = model.GetTokenById(stagedSource.Id)
+				require.NoError(t, err)
+				assert.Equal(t, common.TokenStatusEnabled, active.Status)
 
 				// A persisted request and its exact order survive lost responses and
 				// conversion/configuration changes without duplicate wallet credit.
@@ -573,9 +656,274 @@ func TestAppProxyDatabaseMatrix(t *testing.T) {
 	}
 }
 
+func runAppQuotaValidityCases(t *testing.T, db *gorm.DB, userID, appID int) {
+	t.Helper()
+	require.NoError(t, i18n.Init())
+	rule := model.TokenQuotaRule{UserId: userID, Name: "Timed", Enabled: true, QuotaLimitEnabled: true, QuotaLimit: 100, QuotaPeriod: "monthly", TimeWindowTimezone: "Asia/Shanghai", AllowedWeekdays: "[]", ValidFrom: new(time.Now().Unix() - 60), ValidUntil: new(time.Now().Unix() + 3600)}
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	key, err := model.CreateAppProxyKey(userID, appID, "timed-atomic-key", &model.Token{UnlimitedQuota: true, ExpiredTime: -1, QuotaRuleId: rule.Id}, 0)
+	require.NoError(t, err)
+	reservation, err := model.ReserveTokenQuotaRule(key.Id, 40, true)
+	require.NoError(t, err)
+	require.NotNil(t, reservation)
+	require.NoError(t, db.AutoMigrate(&model.Task{}))
+	info := &relaycommon.RelayInfo{UserId: userID, AppId: appID, TokenId: key.Id, ChannelMeta: &relaycommon.ChannelMeta{}, TokenQuotaReservation: reservation, TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: model.GenerateTaskID()}, BillingSource: "wallet"}
+	require.NoError(t, model.StageTaskQuotaReservation(context.Background(), info, constant.TaskPlatform("test")))
+	require.NoError(t, model.StageTaskQuotaReservation(context.Background(), info, constant.TaskPlatform("test")), "retrying the same snapshot must accept MySQL no-op updates")
+	var staged model.Task
+	require.NoError(t, db.First(&staged, info.TaskReservationID).Error)
+	assert.Equal(t, reservation, staged.PrivateData.TokenQuotaReservation)
+	assert.Equal(t, userID, staged.UserId)
+	assert.Equal(t, appID, staged.AppId)
+	assert.Empty(t, model.GetAllUnFinishSyncTasks(10), "uncertain submissions must not be polled or resubmitted")
+	data := model.TaskPrivateData{TokenId: key.Id, TokenQuotaReservation: reservation}
+	encoded, err := data.Value()
+	require.NoError(t, err)
+	var restored model.TaskPrivateData
+	require.NoError(t, restored.Scan(encoded))
+	assert.Equal(t, reservation, restored.TokenQuotaReservation)
+	rule.QuotaLimit = 50
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	require.NoError(t, model.AdjustTokenQuotaRuleUsage(restored.TokenQuotaReservation, 30, true))
+	_, err = model.ReserveTokenQuotaRule(key.Id, 1, true)
+	assert.ErrorIs(t, err, model.ErrTokenQuotaExhausted)
+	rule.QuotaLimit = 200
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	assert.ErrorIs(t, model.AdjustTokenQuotaRuleUsage(reservation, 31, true), model.ErrTokenQuotaExhausted)
+	rule.ValidUntil = new(time.Now().Unix() - 1)
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	_, err = model.ReserveTokenQuotaRule(key.Id, 0, false)
+	assert.ErrorIs(t, err, model.ErrTokenQuotaExpired, "free requests also obey expiry")
+	require.NoError(t, model.SetTokenQuotaRuleBinding(userID, key.Id, 0))
+	require.NoError(t, model.DeleteTokenQuotaRule(userID, rule.Id))
+	require.NoError(t, model.AdjustTokenQuotaRuleUsage(reservation, 20, true), "deletion preserves the frozen cap")
+	assert.ErrorIs(t, model.AdjustTokenQuotaRuleUsage(&relaycommon.TokenQuotaReservation{UsageID: reservation.UsageID}, 1, true), model.ErrReservationSnapshotUnavailable)
+	require.NoError(t, model.AdjustTokenQuotaRuleUsage(&relaycommon.TokenQuotaReservation{UsageID: reservation.UsageID}, 30, false))
+	var usage model.TokenQuotaRuleUsage
+	require.NoError(t, db.First(&usage, reservation.UsageID).Error)
+	assert.EqualValues(t, 120, usage.UsedQuota, "real settlement is never clipped to the cap")
+	require.NoError(t, model.AdjustTokenQuotaRuleUsage(reservation, -120, false))
+	require.NoError(t, db.First(&usage, reservation.UsageID).Error)
+	assert.Zero(t, usage.UsedQuota)
+	staged.Status = model.TaskStatusSuccess
+	staged.PrivateData.UpstreamTaskID = "accepted-upstream"
+	require.NoError(t, staged.CompleteReservedTask(context.Background(), 0))
+	require.NoError(t, db.First(&staged, info.TaskReservationID).Error)
+	assert.EqualValues(t, model.TaskStatusSuccess, staged.Status)
+
+	rule.Id, rule.QuotaLimitEnabled, rule.ValidUntil = 0, false, nil
+	rule.ValidFrom = new(time.Now().Unix() + 3600)
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	require.NoError(t, model.SetTokenQuotaRuleBinding(userID, key.Id, rule.Id))
+	_, err = model.ReserveTokenQuotaRule(key.Id, 0, false)
+	assert.ErrorIs(t, err, model.ErrTokenQuotaNotStarted)
+	rule.ValidFrom = nil
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	uncapped, err := model.ReserveTokenQuotaRule(key.Id, 40, true)
+	require.NoError(t, err)
+	assert.EqualValues(t, 40, uncapped.Amount, "time-only task snapshots retain the reserved funding amount")
+	rule.QuotaLimitEnabled = true
+	require.NoError(t, model.SaveTokenQuotaRule(&rule))
+	require.NoError(t, model.AdjustTokenQuotaRuleUsage(uncapped, 40, true))
+	assert.Zero(t, uncapped.UsageID, "no new budget row for previously uncapped work")
+	rollbackSource, err := model.CreateAppProxyKey(userID, appID, "cancel-rollback-source", &model.Token{UnlimitedQuota: true, ExpiredTime: -1}, 0)
+	require.NoError(t, err)
+	rollbackReplacement, err := model.CreateAppProxyKey(userID, appID, "cancel-rollback-replacement", &model.Token{}, rollbackSource.Id)
+	require.NoError(t, err)
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:cancel-failure", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Model.(*model.AppKeyOperation); ok {
+			tx.AddError(fmt.Errorf("injected cancellation failure"))
+		}
+	}))
+	cancelFailure := model.CancelAppProxyKeyRotation(userID, appID, rollbackReplacement.Id)
+	require.NoError(t, db.Callback().Update().Remove("test:cancel-failure"))
+	require.Error(t, cancelFailure)
+	var unchangedReplacement model.Token
+	require.NoError(t, db.First(&unchangedReplacement, rollbackReplacement.Id).Error)
+	assert.Equal(t, common.TokenStatusEnabled, unchangedReplacement.Status, "failed cancellation must not half-disable the replacement")
+	assert.ErrorIs(t, model.SetTokenQuotaRuleBinding(userID, rollbackSource.Id, rule.Id), model.ErrAppOperationConflict)
+	require.NoError(t, model.CancelAppProxyKeyRotation(userID, appID, rollbackReplacement.Id))
+	staleWriter := httptest.NewRecorder()
+	staleContext, _ := gin.CreateTestContext(staleWriter)
+	staleContext.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks", nil)
+	assert.Error(t, middleware.SetupContextForToken(staleContext, rollbackReplacement), "a cached enabled replacement cannot bypass cancellation")
+	assert.Equal(t, http.StatusForbidden, staleWriter.Code)
+	require.NoError(t, model.SetTokenQuotaRuleBinding(userID, rollbackSource.Id, rule.Id))
+	conn, err := db.DB()
+	require.NoError(t, err)
+	if common.MainDatabaseType() != common.DatabaseTypeSQLite {
+		conn.SetMaxOpenConns(4)
+	}
+	defer conn.SetMaxOpenConns(1)
+	reservation, err = model.ReserveTokenQuotaRule(key.Id, 0, true)
+	require.NoError(t, err)
+	var adjustments [2]error
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range 2 {
+		wg.Go(func() { <-start; adjustments[i] = model.AdjustTokenQuotaRuleUsage(reservation, 120, true) })
+	}
+	close(start)
+	wg.Wait()
+	successes := 0
+	for _, err := range adjustments {
+		if err == nil {
+			successes++
+		} else {
+			assert.ErrorIs(t, err, model.ErrTokenQuotaExhausted)
+		}
+	}
+	assert.Equal(t, 1, successes, "competing supplements must share the frozen aggregate cap")
+
+	source, err := model.CreateAppProxyKey(userID, appID, "concurrent-source", &model.Token{UnlimitedQuota: true, ExpiredTime: -1}, 0)
+	require.NoError(t, err)
+	replacement, err := model.CreateAppProxyKey(userID, appID, "concurrent-replacement", &model.Token{}, source.Id)
+	require.NoError(t, err)
+	var cancelErr, commitErr error
+	start = make(chan struct{})
+	wg.Go(func() { <-start; cancelErr = model.CancelAppProxyKeyRotation(userID, appID, replacement.Id) })
+	wg.Go(func() {
+		<-start
+		commitErr = model.CommitAppProxyKeyRotation(userID, appID, replacement.Id, replacement.Key)
+	})
+	close(start)
+	wg.Wait()
+	if cancelErr == nil {
+		assert.ErrorIs(t, commitErr, model.ErrRotationCancelled)
+	} else {
+		require.NoError(t, commitErr)
+		assert.ErrorIs(t, cancelErr, model.ErrAppOperationConflict)
+	}
+	var finalSource, finalReplacement model.Token
+	require.NoError(t, db.First(&finalSource, source.Id).Error)
+	require.NoError(t, db.First(&finalReplacement, replacement.Id).Error)
+	if cancelErr == nil {
+		assert.Equal(t, common.TokenStatusEnabled, finalSource.Status)
+		assert.Equal(t, common.TokenStatusDisabled, finalReplacement.Status)
+	} else {
+		assert.Equal(t, common.TokenStatusDisabled, finalSource.Status)
+		assert.Equal(t, common.TokenStatusEnabled, finalReplacement.Status)
+	}
+
+	source, err = model.CreateAppProxyKey(userID, appID, "concurrent-bind-source", &model.Token{UnlimitedQuota: true, ExpiredTime: -1}, 0)
+	require.NoError(t, err)
+	var createErr, bindErr error
+	start = make(chan struct{})
+	wg.Go(func() {
+		<-start
+		_, createErr = model.CreateAppProxyKey(userID, appID, "concurrent-bind-replacement", &model.Token{}, source.Id)
+	})
+	wg.Go(func() { <-start; bindErr = model.SetTokenQuotaRuleBinding(userID, source.Id, rule.Id) })
+	close(start)
+	wg.Wait()
+	if bindErr == nil {
+		assert.ErrorIs(t, createErr, model.ErrLimitedKeyRotation)
+	} else {
+		require.NoError(t, createErr)
+		assert.ErrorIs(t, bindErr, model.ErrAppOperationConflict)
+	}
+
+	app, err := model.GetOAuthAppByID(appID)
+	require.NoError(t, err)
+	billedUser, err := model.ProvisionAppProxyUser(appID, app.ProxyIssuer, "billing-snapshot")
+	require.NoError(t, err)
+	require.NoError(t, model.IncreaseUserAppQuota(billedUser.Id, appID, 500))
+	billedRule := model.TokenQuotaRule{UserId: billedUser.Id, Name: "Frozen task budget", Enabled: true, QuotaLimitEnabled: true, QuotaLimit: 100, QuotaPeriod: "monthly", TimeWindowTimezone: "UTC", AllowedWeekdays: "[]"}
+	require.NoError(t, model.SaveTokenQuotaRule(&billedRule))
+	billedKey, err := model.CreateAppProxyKey(billedUser.Id, appID, "billing-snapshot-key", &model.Token{UnlimitedQuota: true, ExpiredTime: -1, QuotaRuleId: billedRule.Id}, 0)
+	require.NoError(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks", nil)
+	c.Set("app_proxy", true)
+	billedInfo := &relaycommon.RelayInfo{UserId: billedUser.Id, AppId: appID, TokenId: billedKey.Id, TokenKey: billedKey.Key, TokenUnlimited: true, ForcePreConsume: true, ChannelMeta: &relaycommon.ChannelMeta{}, TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: model.GenerateTaskID()}}
+	session, apiErr := service.NewBillingSession(c, billedInfo, 40)
+	require.Nil(t, apiErr)
+	require.NoError(t, model.StageTaskQuotaReservation(context.Background(), billedInfo, constant.TaskPlatform("test")))
+	billedRule.QuotaLimit, billedRule.ValidUntil = 50, new(time.Now().Unix()-1)
+	require.NoError(t, model.SaveTokenQuotaRule(&billedRule))
+	require.NoError(t, session.ReserveBeforeSubmit(70), "in-flight work uses its original budget after expiry and a cap reduction")
+	assert.Error(t, session.ReserveBeforeSubmit(101), "failed supplements must roll back wallet funding")
+	// Persist the final admission snapshot before sending, then publish the task once.
+	require.NoError(t, model.StageTaskQuotaReservation(context.Background(), billedInfo, constant.TaskPlatform("test")))
+	billedTask := model.InitTask(constant.TaskPlatform("test"), billedInfo)
+	billedTask.Quota = 70
+	billedTask.PrivateData = model.TaskPrivateData{TokenId: billedKey.Id, BillingSource: "wallet", TokenQuotaReservation: billedInfo.TokenQuotaReservation}
+	require.NoError(t, session.PersistTask(context.Background(), billedTask))
+	require.NoError(t, session.Settle(70))
+	require.NoError(t, session.Settle(70))
+	billedWallet, err := model.ReadAppWallet(billedUser.Id, appID)
+	require.NoError(t, err)
+	assert.Equal(t, 430, billedWallet.Quota)
+	assert.Equal(t, 70, billedWallet.UsedQuota, "task publication and session settlement must not double-count usage")
+	var billedUsage model.TokenQuotaRuleUsage
+	require.NoError(t, db.First(&billedUsage, billedInfo.TokenQuotaReservation.UsageID).Error)
+	assert.EqualValues(t, 70, billedUsage.UsedQuota)
+	var persistedBilledTask model.Task
+	require.NoError(t, db.First(&persistedBilledTask, billedTask.ID).Error)
+	assert.EqualValues(t, 70, persistedBilledTask.PrivateData.TokenQuotaReservation.Amount)
+	assert.EqualValues(t, 100, persistedBilledTask.PrivateData.TokenQuotaReservation.QuotaLimit)
+	var taskCount int64
+	require.NoError(t, db.Model(&model.Task{}).Where("user_id = ?", billedUser.Id).Count(&taskCount).Error)
+	assert.EqualValues(t, 1, taskCount)
+}
+
+func TestAppProxyQuotaManagementAuthorization(t *testing.T) {
+	admin, _ := setupAccessTokenAudit(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.Token{}, &model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}, &model.UserAppWallet{}))
+	write, _ := createScopedAccessToken(t, admin.Id, 0, "api_key:read", "api_key:write")
+	read, _ := createScopedAccessToken(t, admin.Id, 0, "api_key:read")
+	app := model.OAuthApp{Name: "Rules", ClientID: "rules-http", ProxyIssuer: "https://native.example/auth/v1", APIKeyEnabled: true, Status: 1}
+	require.NoError(t, model.DB.Create(&app).Error)
+	user, err := model.ProvisionAppProxyUser(app.Id, app.ProxyIssuer, "rules-user")
+	require.NoError(t, err)
+	other, err := model.ProvisionAppProxyUser(app.Id, app.ProxyIssuer, "rules-other")
+	require.NoError(t, err)
+	router := gin.New()
+	router.Use(middleware.RequestId(), middleware.AccessTokenAudit())
+	group := router.Group("/api/app-proxy", middleware.AdminAuth())
+	group.GET("/users/:user_id/quota-rules", ListTokenQuotaRules)
+	group.POST("/users/:user_id/quota-rules", SaveTokenQuotaRule)
+	group.PUT("/users/:user_id/quota-rules/:id", SaveTokenQuotaRule)
+	group.DELETE("/users/:user_id/quota-rules/:id", DeleteTokenQuotaRule)
+	group.PUT("/users/:user_id/keys/:token_id/quota-rule", BindTokenQuotaRule)
+	group.POST("/users/:user_id/keys/:token_id/cancel-rotation", CancelAppProxyKeyRotation)
+	base := fmt.Sprintf("/api/app-proxy/users/%d", user.Id)
+	query := fmt.Sprintf("?app_id=%d", app.Id)
+	body := `{"name":"Membership","enabled":true,"quota_limit_enabled":false,"quota_period":"daily","quota_limit":0,"time_window_enabled":false,"time_window_timezone":"UTC","allowed_weekdays":"[]","valid_from":100,"valid_until":200}`
+	ordinary := model.User{Username: "ordinary-rule-actor", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AffCode: "ordinary-rule-actor"}
+	require.NoError(t, model.DB.Create(&ordinary).Error)
+	ordinaryPAT, _ := createScopedAccessToken(t, ordinary.Id, 0, "api_key:read", "api_key:write")
+	assert.Equal(t, 403, accessTokenRequest(router, "GET", base+"/quota-rules"+query, ordinaryPAT, "", "").Code)
+	assert.Equal(t, 403, accessTokenRequest(router, "POST", base+"/quota-rules"+query, ordinaryPAT, "", body).Code)
+
+	assert.Equal(t, 401, accessTokenRequest(router, "GET", base+"/quota-rules"+query, "", "", "").Code)
+	assert.Equal(t, 403, accessTokenRequest(router, "POST", base+"/quota-rules"+query, read, "", body).Code)
+	response := decodeAPIResponse(t, accessTokenRequest(router, "POST", base+"/quota-rules"+query, write, "", body))
+	require.True(t, response.Success, response.Message)
+	var rule model.TokenQuotaRule
+	require.NoError(t, common.Unmarshal(response.Data, &rule))
+	assert.Equal(t, user.Id, rule.UserId)
+	assert.Equal(t, "expired", rule.ValidityStatus)
+	for _, extra := range []string{`,"user_id":1`, `,"app_id":1`, `,"unknown":true`} {
+		assert.False(t, decodeAPIResponse(t, accessTokenRequest(router, "POST", base+"/quota-rules"+query, write, "", strings.TrimSuffix(body, "}")+extra+"}")).Success)
+	}
+	assert.False(t, decodeAPIResponse(t, accessTokenRequest(router, "GET", base+"/quota-rules?app_id=999999", read, "", "")).Success)
+	foreignPath := fmt.Sprintf("/api/app-proxy/users/%d/quota-rules/%d%s", other.Id, rule.Id, query)
+	assert.False(t, decodeAPIResponse(t, accessTokenRequest(router, "PUT", foreignPath, write, "", body)).Success)
+	key, err := model.CreateAppProxyKey(user.Id, app.Id, "api-rule-key", &model.Token{UnlimitedQuota: true, ExpiredTime: -1}, 0)
+	require.NoError(t, err)
+	bindPath := fmt.Sprintf("%s/keys/%d/quota-rule%s", base, key.Id, query)
+	bindBody := fmt.Sprintf(`{"rule_id":%d}`, rule.Id)
+	require.True(t, decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindPath, write, "", bindBody)).Success)
+	require.NoError(t, model.DB.Model(&app).Update("api_key_enabled", false).Error)
+	assert.False(t, decodeAPIResponse(t, accessTokenRequest(router, "PUT", base+fmt.Sprintf("/quota-rules/%d", rule.Id)+query, write, "", body)).Success)
+	assert.True(t, decodeAPIResponse(t, accessTokenRequest(router, "GET", base+"/quota-rules"+query, read, "", "")).Success)
+	assert.True(t, decodeAPIResponse(t, accessTokenRequest(router, "PUT", bindPath, write, "", `{"rule_id":0}`)).Success)
+}
+
 func TestAppProxyHTTPAndFunding(t *testing.T) {
 	admin, _ := setupAccessTokenAudit(t)
-	require.NoError(t, model.DB.AutoMigrate(&model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.Token{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.SubscriptionPlan{}))
+	require.NoError(t, model.DB.AutoMigrate(&model.OAuthApp{}, &model.AppProxyIdentity{}, &model.AppKeyOperation{}, &model.Token{}, &model.TokenQuotaRule{}, &model.TokenQuotaRuleUsage{}, &model.UserAppWallet{}, &model.UserSubscription{}, &model.SubscriptionPlan{}))
 	write, _ := createScopedAccessToken(t, admin.Id, 0, "user:write", "api_key:write", "api_key:read", "user:read")
 	read, _ := createScopedAccessToken(t, admin.Id, 0, "user:read")
 	router := gin.New()
@@ -789,4 +1137,110 @@ func TestAppCheckoutRecoveryAndOrderOwnership(t *testing.T) {
 	require.NoError(t, err)
 	leak := accessTokenRequest(router, "GET", "/oauth/orders/"+result.OrderId, otherToken, "", "")
 	assert.NotContains(t, leak.Body.String(), `"status":"success"`)
+}
+
+func TestAppCreditCachePreservesRatio(t *testing.T) {
+	for _, useRedis := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redis=%t", useRedis), func(t *testing.T) {
+			env := setupOAuthPurchaseTestEnv(t, "api:read")
+			if useRedis {
+				previous := common.RDB
+				server := miniredis.RunT(t)
+				client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+				common.RDB, common.RedisEnabled = client, true
+				t.Cleanup(func() { common.RedisEnabled = false; common.RDB = previous; require.NoError(t, client.Close()) })
+			}
+			service.InvalidateOAuthAppCache(env.app.ClientID)
+			t.Cleanup(func() { service.InvalidateOAuthAppCache(env.app.ClientID) })
+			createOAuthTestProduct(t, env, env.app.Id)
+			createOAuthTestPlan(t, env, env.app.Id, 1)
+			require.NoError(t, env.db.AutoMigrate(&model.Ability{}, &model.Channel{}, &model.Model{}, &model.Vendor{}))
+			for _, ratio := range []any{int64(100), nil} {
+				require.NoError(t, env.db.Model(env.app).Update("quota_per_credit", ratio).Error)
+				service.InvalidateOAuthAppCache(env.app.ClientID)
+				for range 2 {
+					c, recorder := newOAuthPurchaseContext(t, http.MethodGet, "/oauth/products", env.token, "")
+					OAuthProductList(c)
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					if ratio == nil {
+						assert.Contains(t, recorder.Body.String(), `"credits":null`)
+					} else {
+						assert.Contains(t, recorder.Body.String(), `"credits":"10"`)
+					}
+					c, recorder = newOAuthPurchaseContext(t, http.MethodGet, "/oauth/subscription/plans", env.token, "")
+					OAuthSubscriptionPlans(c)
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					if ratio == nil {
+						assert.Contains(t, recorder.Body.String(), `"credits":null`)
+					} else {
+						assert.Contains(t, recorder.Body.String(), `"credits":"10"`)
+					}
+					c, recorder = newOAuthPurchaseContext(t, http.MethodGet, "/oauth/pricing", env.token, "")
+					OAuthPricing(c)
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					var response map[string]any
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+					require.Contains(t, response, "quota_per_credit")
+					if ratio == nil {
+						assert.Nil(t, response["quota_per_credit"])
+					} else {
+						assert.Equal(t, float64(100), response["quota_per_credit"])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestAppSubscriptionSelectedEpayMethod(t *testing.T) {
+	env := setupOAuthPurchaseTestEnv(t, "api:read api:write")
+	address, id, key, methods := operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey, operation_setting.PayMethods
+	t.Cleanup(func() {
+		operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey, operation_setting.PayMethods = address, id, key, methods
+	})
+	operation_setting.PayAddress, operation_setting.EpayId, operation_setting.EpayKey = "https://pay.example.com", "epay_id", "test-key"
+	operation_setting.PayMethods = []map[string]string{{"type": "alipay"}, {"type": "wxpay"}}
+	plan := createOAuthTestPlan(t, env, env.app.Id, 1)
+	require.NoError(t, env.db.Model(plan).Update("currency", "CNY").Error)
+	for _, method := range []string{"wxpay", "alipay", "epay", "unconfigured"} {
+		t.Run(method, func(t *testing.T) {
+			body := fmt.Sprintf(`{"plan_id":%d,"payment_method":%q}`, plan.Id, method)
+			var first string
+			for attempt := range 2 {
+				c, recorder := newOAuthPurchaseContext(t, http.MethodPost, "/oauth/subscription/checkout", env.token, body)
+				c.Request.Header.Set("Idempotency-Key", "selected-"+method)
+				OAuthSubscriptionCheckout(c)
+				if method == "unconfigured" {
+					assert.Equal(t, http.StatusBadRequest, recorder.Code, recorder.Body.String())
+					assert.Contains(t, recorder.Body.String(), "unsupported_payment_method")
+				} else {
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					var response struct {
+						PaymentMethod string            `json:"payment_method"`
+						Params        map[string]string `json:"params"`
+						OrderID       string            `json:"order_id"`
+					}
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+					expected := method
+					if method == "epay" {
+						expected = "alipay"
+					}
+					assert.Equal(t, method, response.PaymentMethod)
+					assert.Equal(t, expected, response.Params["type"])
+					var orders []model.SubscriptionOrder
+					require.NoError(t, env.db.Where("trade_no = ?", response.OrderID).Find(&orders).Error)
+					require.Len(t, orders, 1)
+					assert.Equal(t, expected, orders[0].PaymentMethod)
+				}
+				if attempt == 0 {
+					first = recorder.Body.String()
+				} else {
+					assert.JSONEq(t, first, recorder.Body.String())
+				}
+			}
+		})
+	}
+	var count int64
+	require.NoError(t, env.db.Model(&model.SubscriptionOrder{}).Count(&count).Error)
+	assert.Equal(t, int64(3), count)
 }

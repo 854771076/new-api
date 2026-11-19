@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -29,6 +31,16 @@ type TokenDetails struct {
 }
 
 func TokenQuotaRuleError(err error, lang string) error {
+	if errors.Is(err, model.ErrTokenQuotaNotStarted) || errors.Is(err, model.ErrTokenQuotaExpired) || errors.Is(err, model.ErrReservationSnapshotUnavailable) {
+		key, code := i18n.MsgTokenQuotaNotStarted, "rule_not_started"
+		if errors.Is(err, model.ErrTokenQuotaExpired) {
+			key, code = i18n.MsgTokenQuotaExpired, "rule_expired"
+		}
+		if errors.Is(err, model.ErrReservationSnapshotUnavailable) {
+			key, code = i18n.MsgReservationSnapshotUnavailable, "reservation_snapshot_unavailable"
+		}
+		return kittypes.NewErrorWithStatusCode(errors.New(i18n.Translate(lang, key)), kittypes.ErrorCode(code), http.StatusForbidden, kittypes.ErrOptionWithSkipRetry(), kittypes.ErrOptionWithNoRecordErrorLog())
+	}
 	if errors.Is(err, model.ErrTokenQuotaWindowDenied) {
 		return errors.New(i18n.Translate(lang, i18n.MsgTokenQuotaWindowDenied))
 	}
@@ -36,6 +48,20 @@ func TokenQuotaRuleError(err error, lang string) error {
 		return errors.New(i18n.Translate(lang, i18n.MsgTokenQuotaExhausted))
 	}
 	return err
+}
+
+// Preserve stable rule reasons when a transport adds its own billing envelope.
+func TokenQuotaRuleErrorCode(err error) kittypes.ErrorCode {
+	if errors.Is(err, model.ErrTokenQuotaNotStarted) {
+		return "rule_not_started"
+	}
+	if errors.Is(err, model.ErrTokenQuotaExpired) {
+		return "rule_expired"
+	}
+	if errors.Is(err, model.ErrReservationSnapshotUnavailable) {
+		return "reservation_snapshot_unavailable"
+	}
+	return kittypes.ErrorCodePreConsumeTokenQuotaFailed
 }
 
 type QuotaInfo struct {

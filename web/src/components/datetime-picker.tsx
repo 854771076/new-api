@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import timezone from 'dayjs/plugin/timezone'
+import utc from 'dayjs/plugin/utc'
 import { ChevronDownIcon } from 'lucide-react'
 import * as React from 'react'
 import { enUS, fr, ja, ru, vi, zhCN, zhTW } from 'react-day-picker/locale'
@@ -32,6 +34,9 @@ import {
 import dayjs from '@/lib/dayjs'
 import { cn } from '@/lib/utils'
 
+dayjs.extend(utc)
+dayjs.extend(timezone)
+
 const calendarLocales = {
   en: enUS,
   zhCN,
@@ -42,7 +47,10 @@ const calendarLocales = {
   vi,
 } as const
 
-interface DateTimePickerProps {
+interface DateTimePickerProps extends React.AriaAttributes {
+  /** Explicit zones use a seconds-precision native editor instead of browser-local dates. */
+  timeZone?: 'UTC' | 'Asia/Shanghai'
+  id?: string
   value?: Date
   onChange?: (date: Date | undefined) => void
   placeholder?: string
@@ -54,6 +62,9 @@ export function DateTimePicker({
   onChange,
   placeholder,
   className,
+  timeZone,
+  id,
+  ...controlProps
 }: DateTimePickerProps) {
   const { t, i18n } = useTranslation()
   const placeholderText = placeholder ?? t('Select date')
@@ -111,6 +122,54 @@ export function DateTimePicker({
     setMonth(undefined)
     setTime('00:00:00')
     onChange?.(undefined)
+  }
+
+  if (timeZone) {
+    const offset = timeZone === 'Asia/Shanghai' ? 8 * 3600_000 : 0
+    let text = value
+      ? new Date(value.getTime() + offset)
+          .toISOString()
+          .split('.')[0]
+          .replace(/^\+0/, '')
+      : ''
+    if (value && value.getUTCFullYear() < 9999) {
+      text = dayjs(value).tz(timeZone).format('YYYY-MM-DDTHH:mm:ss')
+    }
+    return (
+      <Input
+        {...controlProps}
+        id={id}
+        type='datetime-local'
+        step={1}
+        className={className}
+        min={new Date(1000 + offset).toISOString().split('.')[0]}
+        max={new Date(253402300799000 + offset)
+          .toISOString()
+          .split('.')[0]
+          .replace(/^\+0/, '')}
+        value={text}
+        onChange={(event) => {
+          if (!event.target.value) {
+            onChange?.(undefined)
+            return
+          }
+          // shortcut: Day.js cannot parse extended years, use fixed future offsets until it supports them.
+          if (
+            /^\d{4}-/.test(event.target.value) &&
+            !event.target.value.startsWith('9999-')
+          ) {
+            const date = dayjs.tz(event.target.value, timeZone)
+            if (date.isValid()) onChange?.(date.toDate())
+            return
+          }
+          const milliseconds =
+            Date.parse(
+              `${event.target.value.replace(/^(\d{5,})-/, (_, year: string) => `+${year.padStart(6, '0')}-`)}Z`
+            ) - offset
+          if (Number.isFinite(milliseconds)) onChange?.(new Date(milliseconds))
+        }}
+      />
+    )
   }
 
   return (

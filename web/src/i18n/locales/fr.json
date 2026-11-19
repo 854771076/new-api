@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "Identité proxy ou appartenance à l’App non valide",
     "subscriptions are not supported for proxy users": "Les utilisateurs proxy ne peuvent pas souscrire d’abonnement",
     "operation id was already used with different parameters": "Cet identifiant d’opération a déjà été utilisé avec des paramètres différents",
-    "limited key rotation is unavailable without a shared spending budget": "La rotation d’une clé limitée nécessite un budget partagé"
+    "limited key rotation is unavailable without a shared spending budget": "La rotation d’une clé limitée nécessite un budget partagé",
+    "Valid from (inclusive)": "Valide à partir de (inclus)",
+    "Valid until (exclusive)": "Valide jusqu’à (exclu)",
+    "Quota rule start must be before its end": "Le début de la règle doit précéder sa fin",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "La validité doit être exprimée en secondes Unix entre 1 et 253402300799",
+    "Editing this rule affects {{count}} bound API keys.": "La modification affectera {{count}} clés API liées.",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "Désactiver ou délier la règle supprime ses restrictions. Pour annuler une adhésion, fixez sa fin ou révoquez la clé.",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "Une date vide ne fixe aucune borne. Les périodes suivent le fuseau choisi ; modifier la période ou le fuseau peut sélectionner un autre budget.",
+    "Scheduled": "Planifié",
+    "Effective": "Actif dans le temps",
+    "Unbounded": "Sans borne",
+    "Rotation cancelled": "Rotation annulée",
+    "Cancel rotation": "Annuler la rotation",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "La clé de remplacement sera révoquée. La clé originale et sa consommation restent inchangées.",
+    "API key quota rule has not started": "La règle de quota de cette clé API n’a pas encore commencé",
+    "API key quota rule has expired": "La règle de quota de cette clé API a expiré",
+    "rotation_cancelled": "Rotation annulée : la clé de remplacement ne peut pas être restaurée",
+    "reservation_snapshot_unavailable": "La réservation originale n’a pas de budget figé ; aucune réservation supplémentaire n’est possible"
   }
 }

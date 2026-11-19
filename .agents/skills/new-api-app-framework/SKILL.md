@@ -19,6 +19,16 @@ A natural person using multiple Apps has a separate proxy gateway user ID per Ap
 
 **Current capability gate:** this branch implements proxy provisioning, immutable App-bound personal keys, admin-PAT checkout, normalized wallets, exact credit display and a proxy-first Supabase reference. This does not mean an older deployed gateway has these contracts. Probe the configured App and use the routes in `references/standards/api-contract.md`; fail explicitly if unavailable. Never silently fall back to OAuth or a platform AI key. Proxy payments currently support Waffo Pancake top-ups and one-time products. Limited-key rotation is rejected until shared budget continuity is available. Real hosted-payment acceptance still requires sandbox credentials; local tests are not a release guarantee.
 
+## Timed membership gates in proxy mode
+
+Prefer proxy mode for existing Supabase users. After verifying an App-owned membership payment, the trusted backend may create/update a target-owned quota rule and atomically issue a key with `quota_rule_id`. Use the specified-user contracts in `references/standards/api-contract.md`; never use the PAT actor's self rules. Dates only restrict new calls: **fund the same user/App wallet separately**. Proxy users still have `subscription_supported=false`; do not call new-api subscription purchase/grant APIs.
+
+`valid_from` and `valid_until` are nullable UTC Unix seconds, with interval `[start,end)`. Keep the rule enabled to enforce expiry. Disabling/unbinding removes its restrictions. Calendar budgets are per key and reset at natural day/week/month boundaries in UTC or Asia/Shanghai, not one month after purchase. Extending dates does not reset usage. Preserve null versus omitted PUT fields, and use server `validity_status` for display.
+
+Rule-bound keys (even disabled rules) cannot rotate without shared budget continuity. Cancel every pending replacement with `cancel-rotation` before binding the original key; cancellation never changes the original key or its budget. Cancelled operation IDs cannot be replayed for credentials or committed/re-enabled. A legacy task reservation without a snapshot may settle/refund but cannot reserve extra work (`reservation_snapshot_unavailable`). A pre-submit task stranded in `SUBMITTING` requires reconciliation of its upstream outcome; do not automatically retry or refund it.
+
+The reference App exposes only guarded admin rule/cancel operations at `/api/admin/gateway-proxy/<native-user-uuid>/...`: it resolves the protected mapping and pins the configured App. Ordinary consumers cannot edit paid membership gates. Admin PATs are globally authorized today; `app_id` is an ownership parameter, not a PAT resource restriction.
+
 ## Default Stack
 
 | Layer | Default | Notes |

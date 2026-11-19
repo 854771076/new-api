@@ -19,9 +19,17 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { createInstance } from 'i18next'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { apiKeySchema } from '@/features/keys/types'
+import en from '@/i18n/locales/en.json'
+import fr from '@/i18n/locales/fr.json'
+import ja from '@/i18n/locales/ja.json'
+import ru from '@/i18n/locales/ru.json'
+import viLocale from '@/i18n/locales/vi.json'
+import zhTW from '@/i18n/locales/zh-TW.json'
+import zh from '@/i18n/locales/zh.json'
 import { api } from '@/lib/api'
 import { createAppQueryClient } from '@/lib/query-client'
 import {
@@ -93,7 +101,8 @@ it('creates a rule in quota units with explicit booleans and weekday JSON', asyn
         quota_limit_enabled: true,
         time_window_enabled: false,
         allowed_weekdays: '[1,2,3,4,5,6,7]',
-      })
+      }),
+      undefined
     )
   )
   await waitFor(() => expect(close).toHaveBeenCalledOnce())
@@ -110,7 +119,8 @@ it('rejects unsafe limits and keeps a failed edit open without rounding small qu
   await waitFor(() =>
     expect(api.put).toHaveBeenCalledWith(
       '/api/token/quota_rules/7',
-      expect.objectContaining({ quota_limit: 1 })
+      expect.objectContaining({ quota_limit: 1 }),
+      undefined
     )
   )
   expect(close).not.toHaveBeenCalled()
@@ -169,10 +179,120 @@ it('loads more than one page of rules and binds a rule from the later page', asy
   await user.selectOptions(screen.getByLabelText('Quota rule'), '51')
   await user.click(screen.getByRole('button', { name: 'Save' }))
   await waitFor(() =>
-    expect(api.put).toHaveBeenCalledWith('/api/token/1/quota_rule', {
-      rule_id: 51,
-    })
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/token/1/quota_rule',
+      {
+        rule_id: 51,
+      },
+      undefined
+    )
   )
   await waitFor(() => expect(refresh).toHaveBeenCalledOnce())
   expect(close).toHaveBeenCalledOnce()
 })
+
+it('keeps absolute seconds when changing timezone and explicitly clears an endpoint', async () => {
+  vi.mocked(api.put).mockResolvedValue({ data: { success: true } })
+  const start = 1796083200 // 2026-12-01T00:00:00Z
+  mount(
+    <QuotaRuleDialog
+      rule={{ ...rule, valid_from: start, valid_until: start + 3600 }}
+      onClose={vi.fn()}
+    />
+  )
+  const user = userEvent.setup()
+  const from = screen.getByLabelText('Valid from (inclusive)')
+  expect(from).toHaveValue('2026-12-01T00:00')
+  await user.selectOptions(screen.getByLabelText('Timezone'), 'Asia/Shanghai')
+  expect(from).toHaveValue('2026-12-01T08:00')
+  fireEvent.change(screen.getByLabelText('Valid until (exclusive)'), {
+    target: { value: '' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/token/quota_rules/7',
+      expect.objectContaining({
+        valid_from: start,
+        valid_until: null,
+        time_window_timezone: 'Asia/Shanghai',
+      }),
+      undefined
+    )
+  )
+})
+
+it('rejects a reversed range locally and warns about every affected key', async () => {
+  mount(
+    <QuotaRuleDialog
+      rule={{
+        ...rule,
+        valid_from: 200,
+        valid_until: 100,
+        bound_token_count: 3,
+      }}
+      onClose={vi.fn()}
+    />
+  )
+  expect(
+    screen.getByText('Editing this rule affects 3 bound API keys.')
+  ).toBeVisible()
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Save' }))
+  expect(
+    await screen.findByText('Quota rule start must be before its end')
+  ).toBeVisible()
+  expect(api.put).not.toHaveBeenCalled()
+})
+
+it('saves a proxy rule to its target App and user without DTO ownership metadata', async () => {
+  vi.mocked(api.put).mockResolvedValue({ data: { success: true } })
+  mount(
+    <QuotaRuleDialog
+      target={{ userId: 42, appId: 7 }}
+      rule={rule}
+      onClose={vi.fn()}
+    />
+  )
+  await userEvent.setup().click(screen.getByRole('button', { name: 'Save' }))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith(
+      '/api/app-proxy/users/42/quota-rules/7',
+      expect.objectContaining({
+        name: rule.name,
+        valid_from: null,
+        valid_until: null,
+      }),
+      { params: { app_id: 7 } }
+    )
+  )
+  expect(vi.mocked(api.put).mock.calls[0][1]).not.toHaveProperty('id')
+  expect(vi.mocked(api.put).mock.calls[0][1]).not.toHaveProperty('user_id')
+})
+
+it.each([
+  ['en', en, 'Valid from (inclusive)'],
+  ['zh', zh, '生效时间（含）'],
+  ['zhTW', zhTW, '生效時間（含）'],
+  ['fr', fr, 'Valide à partir de (inclus)'],
+  ['ru', ru, 'Действует с (включительно)'],
+  ['ja', ja, '開始日時（含む）'],
+  ['vi', viLocale, 'Có hiệu lực từ (bao gồm)'],
+])(
+  'registers quota validity translations in the %s namespace',
+  async (language, resource, expected) => {
+    const instance = createInstance()
+    await instance.init({
+      lng: String(language),
+      resources: { [String(language)]: resource as typeof en },
+      keySeparator: false,
+      interpolation: { escapeValue: false },
+    })
+    expect(instance.t('Valid from (inclusive)')).toBe(expected)
+    expect(instance.exists('Cancel rotation')).toBe(true)
+    expect(
+      instance.t('Editing this rule affects {{count}} bound API keys.', {
+        count: 3,
+      })
+    ).toContain('3')
+  }
+)

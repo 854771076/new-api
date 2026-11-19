@@ -248,7 +248,7 @@ Next.js 信封约定，直接对接时按本节处理。
 | `POST /oauth/products/checkout` | `api:write` | `{"product_id":1,"payment_method":"balance"}`；余额支付返回 `order_id` / `quota_amount` |
 | `POST /oauth/topup/checkout` | `api:write` | `{"amount":10,"payment_method":"balance"}`；`balance` 是**从平台余额划转到 App 额度池**，不是免费发放，余额不足返回 `400 checkout_failed` |
 
-支付方式（OAuth）：套餐 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`；商品 `balance` / `epay` / `stripe` / `waffo_pancake`；App 充值 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`。具体方法仍需实例配置且目录返回可用。省略 `payment_method` 时默认 `waffo_pancake`。代理 checkout/preview 仅支持 `waffo_pancake`，不支持订阅。`amount` 是配置的展示单位整数，不是 quota。
+支付方式（OAuth）：套餐 `balance` / 已配置的易支付类型（如 `alipay` / `wxpay`）/ `stripe` / `creem` / `waffo_pancake`（兼容 `epay`，使用第一个已配置的易支付类型）；商品 `balance` / `epay` / `stripe` / `waffo_pancake`；App 充值 `balance` / `epay` / `stripe` / `creem` / `waffo_pancake`。具体方法仍需实例配置且目录返回可用。省略 `payment_method` 时默认 `waffo_pancake`。代理 checkout/preview 仅支持 `waffo_pancake`，不支持订阅。`amount` 是配置的展示单位整数，不是 quota。
 
 App 额度语义：App token 的 relay 预扣、结算、退款只作用于 token 所属 App 的额度池
 （以及该 App 的订阅额度），不扣平台 `quota`。`/oauth/userinfo` 的活跃订阅摘要与
@@ -317,3 +317,24 @@ The reference `/api/generate/quote` adds estimated_quota, estimated_credits (str
 Payment callbacks verify signature, paid status, frozen amount/currency and expiry before credit. Amount/currency mismatches or late unpaid orders enter reconciliation_required with the durable order ID. Valid duplicate paid notifications remain idempotent after expiry. Operators investigate provider records and the frozen intent before any existing authorized manual correction; never blindly replay provider creation or treat a return URL as success. Epay scoped products/subscriptions require CNY before checkout; Creem scoped requests use plan currency. Stripe/Pancake product currencies must match configured plan/product currency.
 
 Scoped Stripe top-up validates the configured active USD one-time per-unit Price and whole purchased quantities before creating a provider session; its frozen money is price × quantity, with promotions disabled. Scoped product Stripe checkouts also disable promotions. Legacy orders without snapshots never acquire today's credit ratio; unknown original currencies remain empty and the UI displays No Data rather than inventing USD or labeling unit counts as paid money.
+
+## Specified-user quota validity and rotation cancellation
+
+All paths below start with `/api/app-proxy/users/:user_id`, require admin role, existing Casbin authorization and `?app_id=<fixed App>`. Read scope is `api_key:read`; mutations require `api_key:write`. The owner is the target proxy user, not the PAT actor. Reject cross-App/cross-user rules and keys. Unknown input fields/ownership metadata are rejected. These parameters do not make a globally authorized admin PAT App-restricted.
+
+| Method/path | Contract |
+| --- | --- |
+| GET `/quota-rules` | `p`, `page_size`; success envelope `data.items,total,server_time` |
+| POST `/quota-rules` | Rule input below; absent dates create unbounded endpoints |
+| PUT `/quota-rules/:id` | Save full rule; omitted dates preserve, explicit null clears |
+| DELETE `/quota-rules/:id` | Requires no bound keys; original usage rows survive |
+| PUT `/keys/:token_id/quota-rule` | Exactly `{rule_id}`; 0 unbinds; pending source rotations block binding |
+| POST `/keys/:token_id/cancel-rotation` | Token is replacement; idempotent cancelled status; committed returns409 `operation_conflict` |
+
+Rule input: `name`, optional `description`, `enabled`, `quota_limit_enabled`, `quota_period` (daily/weekly/monthly), `quota_limit`, `time_window_enabled`, `time_window_timezone` (UTC/Asia/Shanghai), `allowed_weekdays` (JSON string of ISO weekdays), optional `valid_from`/`valid_until` (null or integer 1..253402300799, start < end). Enabled rules enforce `[valid_from,valid_until)` independently of the quota/weekday switches, including unlimited keys, trusted/free requests and tasks. `validity_status` is disabled/scheduled/effective/expired and describes absolute time only, not spendability. Rejected new relay calls return403 `rule_not_started`/`rule_expired` without retry; already admitted work keeps its original budget snapshot and usage row.
+
+POST `/keys` additionally accepts `quota_rule_id` for atomic creation and binding. The operation fingerprint includes a nonzero rule ID. Changing the binding uses the dedicated route. Keys list includes rule/usage summaries and optional `rotation_status` pending/committed/cancelled. Rule-bound rotation is rejected even when the rule is disabled. Cancelled replacement commit, enable and idempotent creation replay all fail409 `rotation_cancelled`, with no secret returned. Cleanup reads/unbind/revoke/cancel remain authorized after disabling the App; creation/update/binding do not.
+
+Pre-submit task private data persists `snapshot_version=1`, `quota_limit_enabled`, `quota_limit` and original RuleID/UsageID/Amount. Supplemental reservation uses the frozen limit against aggregate original usage, even after edits/deletion; actual settlement is never clipped. Legacy snapshots fail positive supplemental reservation with `reservation_snapshot_unavailable` while retaining settlement/refund compatibility. A crash with uncertain upstream outcome leaves `SUBMITTING` for reconciliation, never automatic resubmission/refund.
+
+Reference BFF admin allowlist: `/api/admin/gateway-proxy/:native_user_uuid/quota-rules[/:id]`, `keys/:id/quota-rule`, `keys/:id/cancel-rotation`. Every route checks the existing server admin guard, mutation origin, protected proxy mapping and configured App. Consumer management allowlists deliberately do not expose membership writes. Keep payment verification, entitlement orders, refund/replay ordering and wallet funding in the App's verified business process; these rules do not implement new-api subscriptions.

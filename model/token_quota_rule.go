@@ -16,8 +16,11 @@ import (
 )
 
 var (
-	ErrTokenQuotaWindowDenied = common.NewMessage("This API key cannot be used on the current weekday")
-	ErrTokenQuotaExhausted    = common.NewMessage("API key quota for the current period is exhausted")
+	ErrTokenQuotaWindowDenied         = common.NewMessage("This API key cannot be used on the current weekday")
+	ErrTokenQuotaExhausted            = common.NewMessage("API key quota for the current period is exhausted")
+	ErrTokenQuotaNotStarted           = common.NewMessage("API key quota rule has not started")
+	ErrTokenQuotaExpired              = common.NewMessage("API key quota rule has expired")
+	ErrReservationSnapshotUnavailable = errors.New("reservation_snapshot_unavailable")
 )
 
 // A template is reusable; each bound token has its own calendar-period budget.
@@ -36,6 +39,23 @@ type TokenQuotaRule struct {
 	CreatedAt          int64  `json:"created_at" gorm:"autoCreateTime"`
 	UpdatedAt          int64  `json:"updated_at" gorm:"autoUpdateTime"`
 	BoundTokenCount    int64  `json:"bound_token_count" gorm:"-"`
+	ValidFrom          *int64 `json:"valid_from"`
+	ValidUntil         *int64 `json:"valid_until"`
+	ValidityStatus     string `json:"validity_status" gorm:"-"`
+}
+
+// ValidityAt describes absolute time only, independently of weekday and budget checks.
+func (rule *TokenQuotaRule) ValidityAt(now int64) string {
+	if !rule.Enabled {
+		return "disabled"
+	}
+	if rule.ValidFrom != nil && now < *rule.ValidFrom {
+		return "scheduled"
+	}
+	if rule.ValidUntil != nil && now >= *rule.ValidUntil {
+		return "expired"
+	}
+	return "effective"
 }
 
 type TokenQuotaRuleUsage struct {
@@ -47,6 +67,14 @@ type TokenQuotaRuleUsage struct {
 }
 
 func (rule *TokenQuotaRule) Validate() error {
+	for _, endpoint := range []*int64{rule.ValidFrom, rule.ValidUntil} {
+		if endpoint != nil && (*endpoint < 1 || *endpoint > 253402300799) {
+			return common.NewMessage("Quota rule validity must use Unix seconds between 1 and 253402300799")
+		}
+	}
+	if rule.ValidFrom != nil && rule.ValidUntil != nil && *rule.ValidFrom >= *rule.ValidUntil {
+		return common.NewMessage("Quota rule start must be before its end")
+	}
 	rule.Name = strings.TrimSpace(rule.Name)
 	if rule.Name == "" || utf8.RuneCountInString(rule.Name) > 128 || utf8.RuneCountInString(rule.Description) > 255 {
 		return common.NewMessage("Quota rule name is required (up to 128 characters); description allows up to 255 characters")
@@ -117,18 +145,19 @@ func ListTokenQuotaRules(userID, offset, limit int, keyword, status, bound strin
 	}
 	for i := range rules {
 		rules[i].BoundTokenCount = countsByID[rules[i].Id]
+		rules[i].ValidityStatus = rules[i].ValidityAt(time.Now().Unix())
 	}
 	return rules, total, nil
 }
 
-func SaveTokenQuotaRule(rule *TokenQuotaRule) error {
+func SaveTokenQuotaRule(rule *TokenQuotaRule, omittedValidity ...string) error {
 	if rule.UserId <= 0 {
 		return common.NewMessage("Invalid quota rule")
 	}
-	if err := rule.Validate(); err != nil {
-		return err
-	}
 	if rule.Id == 0 {
+		if err := rule.Validate(); err != nil {
+			return err
+		}
 		return DB.Create(rule).Error
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
@@ -136,7 +165,18 @@ func SaveTokenQuotaRule(rule *TokenQuotaRule) error {
 		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", rule.Id, rule.UserId).First(&existing).Error; err != nil {
 			return err
 		}
-		return tx.Model(&existing).Select("name", "description", "enabled", "quota_limit_enabled", "quota_period", "quota_limit", "time_window_enabled", "time_window_timezone", "allowed_weekdays", "updated_at").Updates(rule).Error
+		for _, field := range omittedValidity {
+			if field == "valid_from" {
+				rule.ValidFrom = existing.ValidFrom
+			}
+			if field == "valid_until" {
+				rule.ValidUntil = existing.ValidUntil
+			}
+		}
+		if err := rule.Validate(); err != nil {
+			return err
+		}
+		return tx.Model(&existing).Select("name", "description", "enabled", "quota_limit_enabled", "quota_period", "quota_limit", "time_window_enabled", "time_window_timezone", "allowed_weekdays", "valid_from", "valid_until", "updated_at").Updates(rule).Error
 	})
 }
 
@@ -163,15 +203,37 @@ func SetTokenQuotaRuleBinding(userID, tokenID, ruleID int) error {
 		return common.NewMessage("Invalid quota rule")
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
+		var token Token
+		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", tokenID, userID).First(&token).Error; err != nil {
+			return err
+		}
+		if token.AppId > 0 && ruleID > 0 {
+			var user User
+			if err := tx.First(&user, userID).Error; err != nil {
+				return err
+			}
+			if user.IsProxy() {
+				var app OAuthApp
+				if err := tx.First(&app, token.AppId).Error; err != nil {
+					return err
+				}
+				if user.OwnerAppId != token.AppId || !app.IsEnabled() || !app.APIKeyEnabled || user.Status != common.UserStatusEnabled {
+					return ErrProxyIdentity
+				}
+				var pending int64
+				if err := tx.Model(&AppKeyOperation{}).Where("old_token_id = ? AND committed = ? AND cancelled = ?", tokenID, false, false).Count(&pending).Error; err != nil {
+					return err
+				}
+				if pending > 0 {
+					return ErrAppOperationConflict
+				}
+			}
+		}
 		if ruleID > 0 {
 			var rule TokenQuotaRule
 			if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", ruleID, userID).First(&rule).Error; err != nil {
 				return err
 			}
-		}
-		var token Token
-		if err := lockForUpdate(tx).Where("id = ? AND user_id = ?", tokenID, userID).First(&token).Error; err != nil {
-			return err
 		}
 		if err := invalidateTokenCacheForMutation(token.Key); err != nil {
 			return err
@@ -223,6 +285,16 @@ func ReserveTokenQuotaRule(tokenID int, amount int64, requireRemainingQuota bool
 		}
 		reservation.RuleID = rule.Id
 		now := time.Now()
+		switch rule.ValidityAt(now.Unix()) {
+		case "scheduled":
+			return ErrTokenQuotaNotStarted
+		case "expired":
+			return ErrTokenQuotaExpired
+		}
+		reservation.SnapshotVersion = 1
+		reservation.Amount = amount
+		reservation.QuotaLimitEnabled = rule.QuotaLimitEnabled
+		reservation.QuotaLimit = rule.QuotaLimit
 		if rule.TimeWindowEnabled {
 			loc, err := time.LoadLocation(rule.TimeWindowTimezone)
 			if err != nil {
@@ -262,7 +334,7 @@ func ReserveTokenQuotaRule(tokenID int, amount int64, requireRemainingQuota bool
 				return ErrTokenQuotaExhausted
 			}
 		}
-		reservation.UsageID, reservation.Amount = usage.Id, amount
+		reservation.UsageID = usage.Id
 		return nil
 	})
 	if err != nil {
@@ -277,7 +349,13 @@ func ReserveTokenQuotaRule(tokenID int, amount int64, requireRemainingQuota bool
 // enforceLimit is only for admission/reservation. Settlement records the actual
 // cost even when upstream exceeds the estimate; the next request is then denied.
 func AdjustTokenQuotaRuleUsage(reservation *relaycommon.TokenQuotaReservation, delta int64, enforceLimit bool) error {
-	if reservation == nil || reservation.UsageID == 0 || delta == 0 {
+	if reservation == nil || delta == 0 {
+		return nil
+	}
+	if enforceLimit && delta > 0 && reservation.SnapshotVersion != 1 {
+		return ErrReservationSnapshotUnavailable
+	}
+	if reservation.UsageID == 0 {
 		return nil
 	}
 	if delta > int64(common.MaxWalletQuota) || delta < -int64(common.MaxWalletQuota) {
@@ -286,11 +364,10 @@ func AdjustTokenQuotaRuleUsage(reservation *relaycommon.TokenQuotaReservation, d
 	return DB.Transaction(func(tx *gorm.DB) error {
 		query := tx.Model(&TokenQuotaRuleUsage{}).Where("id = ?", reservation.UsageID)
 		if enforceLimit && delta > 0 {
-			var rule TokenQuotaRule
-			if err := lockForUpdate(tx).First(&rule, reservation.RuleID).Error; err != nil {
-				return err
+			if !reservation.QuotaLimitEnabled || reservation.QuotaLimit <= 0 || reservation.QuotaLimit > int64(common.MaxWalletQuota) {
+				return ErrReservationSnapshotUnavailable
 			}
-			query = query.Where("used_quota <= ?", rule.QuotaLimit-delta)
+			query = query.Where("used_quota <= ?", reservation.QuotaLimit-delta)
 		} else if delta > 0 {
 			query = query.Where("used_quota <= ?", int64(^uint64(0)>>1)-delta)
 		}
@@ -324,6 +401,7 @@ func AttachTokenQuotaRuleUsage(tokens []*Token) error {
 	byID := make(map[int]TokenQuotaRule, len(rules))
 	keys := make([]string, 0, len(rules))
 	for _, rule := range rules {
+		rule.ValidityStatus = rule.ValidityAt(now.Unix())
 		byID[rule.Id] = rule
 		keys = append(keys, tokenQuotaRulePeriod(now, rule.TimeWindowTimezone, rule.QuotaPeriod))
 	}

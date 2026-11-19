@@ -65,7 +65,7 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 		if !info.IsPlayground {
 			reservation, err := model.ReserveTokenQuotaRule(info.TokenId, 0, false)
 			if err != nil {
-				return types.NewErrorWithStatusCode(service.TokenQuotaRuleError(err, info.UserSetting.Language), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+				return types.NewErrorWithStatusCode(service.TokenQuotaRuleError(err, info.UserSetting.Language), service.TokenQuotaRuleErrorCode(err), http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 			}
 			info.TokenQuotaReservation = reservation
 		}

@@ -40,10 +40,12 @@ import {
   getQuotaRules,
   quotaRuleQueryKey,
   type QuotaRule,
+  type QuotaRuleTarget,
 } from './api'
 import { QuotaRuleDialog } from './rule-dialog'
+import { QuotaRuleValidity } from './validity'
 
-export function QuotaRules() {
+export function QuotaRules(props: { target?: QuotaRuleTarget }) {
   const { t } = useTranslation()
   const client = useQueryClient()
   const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 10 })
@@ -53,18 +55,29 @@ export function QuotaRules() {
   const [editing, setEditing] = useState<QuotaRule | null | undefined>()
   const [deleting, setDeleting] = useState<QuotaRule | null>(null)
   const query = useQuery({
-    queryKey: [...quotaRuleQueryKey, pagination, keyword, status, bound],
+    queryKey: [
+      ...quotaRuleQueryKey,
+      props.target,
+      pagination,
+      keyword,
+      status,
+      bound,
+    ],
+    refetchInterval: 30_000,
     queryFn: () =>
-      getQuotaRules({
-        p: pagination.pageIndex + 1,
-        size: pagination.pageSize,
-        keyword,
-        status,
-        bind_status: bound,
-      }),
+      getQuotaRules(
+        {
+          p: pagination.pageIndex + 1,
+          size: pagination.pageSize,
+          keyword,
+          status,
+          bind_status: bound,
+        },
+        props.target
+      ),
   })
   const remove = useMutation({
-    mutationFn: deleteQuotaRule,
+    mutationFn: (id: number) => deleteQuotaRule(id, props.target),
     onSuccess: () => {
       setDeleting(null)
       setPagination((previous) => ({ ...previous, pageIndex: 0 }))
@@ -88,7 +101,7 @@ export function QuotaRules() {
     {
       accessorKey: 'enabled',
       header: t('Status'),
-      cell: ({ row }) => (row.original.enabled ? t('Enabled') : t('Disabled')),
+      cell: ({ row }) => <QuotaRuleValidity rule={row.original} />,
     },
     {
       id: 'budget',
@@ -167,7 +180,7 @@ export function QuotaRules() {
   })
   return (
     <>
-      <SectionPageLayout fixedContent>
+      <SectionPageLayout fixedContent={!props.target}>
         <SectionPageLayout.Title>
           {t('Quota management')}
         </SectionPageLayout.Title>
@@ -258,6 +271,7 @@ export function QuotaRules() {
         <QuotaRuleDialog
           key={editing?.id ?? 'create'}
           rule={editing}
+          target={props.target}
           onClose={() => setEditing(undefined)}
         />
       )}

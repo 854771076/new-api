@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "proxy identity or app ownership is invalid",
     "subscriptions are not supported for proxy users": "subscriptions are not supported for proxy users",
     "operation id was already used with different parameters": "operation id was already used with different parameters",
-    "limited key rotation is unavailable without a shared spending budget": "limited key rotation is unavailable without a shared spending budget"
+    "limited key rotation is unavailable without a shared spending budget": "limited key rotation is unavailable without a shared spending budget",
+    "Valid from (inclusive)": "Valid from (inclusive)",
+    "Valid until (exclusive)": "Valid until (exclusive)",
+    "Quota rule start must be before its end": "Quota rule start must be before its end",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "Quota rule validity must use Unix seconds between 1 and 253402300799",
+    "Editing this rule affects {{count}} bound API keys.": "Editing this rule affects {{count}} bound API keys.",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.",
+    "Scheduled": "Scheduled",
+    "Effective": "Effective",
+    "Unbounded": "Unbounded",
+    "Rotation cancelled": "Rotation cancelled",
+    "Cancel rotation": "Cancel rotation",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "The replacement key will be revoked. The original key and its usage remain unchanged.",
+    "API key quota rule has not started": "API key quota rule has not started",
+    "API key quota rule has expired": "API key quota rule has expired",
+    "rotation_cancelled": "rotation_cancelled",
+    "reservation_snapshot_unavailable": "reservation_snapshot_unavailable"
   }
 }

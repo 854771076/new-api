@@ -1293,3 +1293,39 @@ func TestTaskAppUsageLifecycle(t *testing.T) {
 		})
 	}
 }
+
+func TestExecuteTaskSubmissionPersistsQuotaContractBeforeSending(t *testing.T) {
+	for _, rejectPersistence := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistence_failure=%t", rejectPersistence), func(t *testing.T) {
+			events := []string{}
+			database := setupTaskSubmissionDatabase(t, true, &events)
+			if rejectPersistence {
+				require.NoError(t, database.Callback().Create().Before("gorm:create").Register("test:reject-reservation", func(tx *gorm.DB) { tx.AddError(errors.New("reservation storage unavailable")) }))
+			}
+			billing := &taskSubmissionTestBilling{events: &events}
+			info := taskSubmissionRelayInfo(billing)
+			info.TokenQuotaReservation = &relaycommon.TokenQuotaReservation{SnapshotVersion: 1, RuleID: 7, UsageID: 9, Amount: 40, QuotaLimitEnabled: true, QuotaLimit: 100}
+			sent := false
+			_, taskErr := executeTaskSubmissionWith(taskSubmissionTestContext(), info, func(c *gin.Context, info *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				if err := model.StageTaskQuotaReservation(c.Request.Context(), info, constant.TaskPlatform("plugin")); err != nil {
+					return nil, service.TaskErrorWrapperLocal(err, "task_reservation_persist_failed", http.StatusInternalServerError)
+				}
+				var persisted model.Task
+				require.NoError(t, database.First(&persisted, info.TaskReservationID).Error)
+				assert.Equal(t, info.TokenQuotaReservation, persisted.PrivateData.TokenQuotaReservation)
+				sent = true
+				return nil, service.TaskErrorWrapperLocal(errors.New("upstream rejected"), "upstream_rejected", http.StatusBadRequest)
+			})
+			require.NotNil(t, taskErr)
+			assert.Equal(t, !rejectPersistence, sent)
+			assert.Equal(t, 1, billing.refunds)
+			if !rejectPersistence {
+				var persisted model.Task
+				require.NoError(t, database.First(&persisted, info.TaskReservationID).Error)
+				assert.EqualValues(t, model.TaskStatusFailure, persisted.Status)
+				assert.Equal(t, "100%", persisted.Progress)
+				assert.Zero(t, persisted.Quota)
+			}
+		})
+	}
+}

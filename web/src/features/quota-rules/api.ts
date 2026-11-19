@@ -31,39 +31,79 @@ export interface QuotaRule {
   time_window_timezone: 'UTC' | 'Asia/Shanghai'
   allowed_weekdays: string
   bound_token_count: number
+  valid_from?: number | null
+  valid_until?: number | null
+  validity_status?: 'disabled' | 'scheduled' | 'effective' | 'expired'
+}
+
+export type QuotaRuleTarget = { userId: number; appId: number }
+
+function rulePath(target?: QuotaRuleTarget) {
+  return target
+    ? `/api/app-proxy/users/${target.userId}/quota-rules`
+    : '/api/token/quota_rules'
 }
 
 export const quotaRuleQueryKey = ['token-quota-rules']
 
-export async function getQuotaRules(params: {
-  p: number
-  size: number
-  keyword?: string
-  status?: string
-  bind_status?: string
-}): Promise<{ items: QuotaRule[]; total: number }> {
-  const response = await api.get('/api/token/quota_rules', { params })
+export async function getQuotaRules(
+  params: {
+    p: number
+    size: number
+    keyword?: string
+    status?: string
+    bind_status?: string
+  },
+  target?: QuotaRuleTarget
+): Promise<{ items: QuotaRule[]; total: number; server_time: number }> {
+  const response = await api.get(rulePath(target), {
+    params: {
+      ...params,
+      page_size: params.size,
+      ...(target && { app_id: target.appId }),
+    },
+  })
   return requireServerSuccess(response.data).data
 }
 
 export async function saveQuotaRule(
-  rule: Omit<QuotaRule, 'bound_token_count'>
+  rule: Omit<QuotaRule, 'bound_token_count'>,
+  target?: QuotaRuleTarget
 ) {
+  const { id, validity_status: _status, ...input } = rule
+  const payload = target ? input : rule
+  const config = target ? { params: { app_id: target.appId } } : undefined
   const response = rule.id
-    ? await api.put(`/api/token/quota_rules/${rule.id}`, rule)
-    : await api.post('/api/token/quota_rules', rule)
+    ? await api.put(`${rulePath(target)}/${id}`, payload, config)
+    : await api.post(rulePath(target), payload, config)
   return requireServerSuccess(response.data)
 }
 
-export async function deleteQuotaRule(id: number) {
+export async function deleteQuotaRule(id: number, target?: QuotaRuleTarget) {
   return requireServerSuccess(
-    (await api.delete(`/api/token/quota_rules/${id}`)).data
+    (
+      await api.delete(
+        `${rulePath(target)}/${id}`,
+        target ? { params: { app_id: target.appId } } : undefined
+      )
+    ).data
   )
 }
 
-export async function bindQuotaRule(tokenId: number, ruleId: number) {
+export async function bindQuotaRule(
+  tokenId: number,
+  ruleId: number,
+  target?: QuotaRuleTarget
+) {
   return requireServerSuccess(
-    (await api.put(`/api/token/${tokenId}/quota_rule`, { rule_id: ruleId }))
-      .data
+    (
+      await api.put(
+        target
+          ? `/api/app-proxy/users/${target.userId}/keys/${tokenId}/quota-rule`
+          : `/api/token/${tokenId}/quota_rule`,
+        { rule_id: ruleId },
+        target ? { params: { app_id: target.appId } } : undefined
+      )
+    ).data
   )
 }

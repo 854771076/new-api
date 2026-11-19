@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -27,6 +27,15 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
+import { QuotaRules } from '@/features/quota-rules'
+import {
+  getQuotaRules,
+  quotaRuleQueryKey,
+  type QuotaRule,
+} from '@/features/quota-rules/api'
+import { QuotaRuleBindingDialog } from '@/features/quota-rules/binding-dialog'
+import { QuotaRuleValidity } from '@/features/quota-rules/validity'
 import { api } from '@/lib/api'
 import { formatNumber } from '@/lib/format'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -43,6 +52,9 @@ type AppKey = {
   status: number
   remain_quota: number
   unlimited_quota: boolean
+  quota_rule_id?: number
+  quota_rule?: QuotaRule
+  rotation_status?: 'pending' | 'committed' | 'cancelled'
 }
 
 export function AppProxyKeysDialog(props: {
@@ -60,9 +72,23 @@ export function AppProxyKeysDialog(props: {
   const [issued, setIssued] = useState<AppKey | null>(null)
   const [rotation, setRotation] = useState(false)
   const [disable, setDisable] = useState<AppKey | null>(null)
+  const [binding, setBinding] = useState<AppKey | null>(null)
+  const [rulesOpen, setRulesOpen] = useState(false)
+  const [cancelling, setCancelling] = useState<AppKey | null>(null)
+  const [ruleId, setRuleId] = useState(0)
   const operation = useRef({ input: '', key: '' })
   const path = `/api/app-proxy/users/${props.user.id}/keys`
   const params = { app_id: props.user.owner_app_id }
+  const target = { userId: props.user.id, appId: props.user.owner_app_id ?? 0 }
+  const rules = useInfiniteQuery({
+    queryKey: [...quotaRuleQueryKey, target, 'creation'],
+    enabled: props.open,
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) =>
+      getQuotaRules({ p: pageParam, size: 100 }, target),
+    getNextPageParam: (last, pages) =>
+      pages.length * 100 < last.total ? pages.length + 1 : undefined,
+  })
   const keys = useQuery({
     queryKey: [
       'admin-app-keys',
@@ -72,6 +98,7 @@ export function AppProxyKeysDialog(props: {
       status,
     ],
     enabled: props.open,
+    refetchInterval: 30_000,
     queryFn: async () =>
       requireServerSuccess(
         (
@@ -131,6 +158,7 @@ export function AppProxyKeysDialog(props: {
           expired_time: -1,
           remain_quota: remaining,
           unlimited_quota: false,
+          quota_rule_id: ruleId,
         }
     const input = JSON.stringify(body)
     const storageKey = `app-key-operation:${props.user.id}:${props.user.owner_app_id}:${input}`
@@ -154,6 +182,12 @@ export function AppProxyKeysDialog(props: {
         result.user_id !== props.user.id
       ) {
         throw new Error('Invalid key ownership')
+      }
+      if (old) {
+        sessionStorage.setItem(
+          `app-key-rotation:${props.user.id}:${props.user.owner_app_id}:${result.id}`,
+          input
+        )
       }
       setIssued(result)
       setRotation(!!old)
@@ -199,6 +233,44 @@ export function AppProxyKeysDialog(props: {
       setBusy(false)
     }
   }
+  async function cancelRotation() {
+    if (!cancelling || busy) return
+    setBusy(true)
+    try {
+      requireServerSuccess(
+        (
+          await api.post(
+            `${path}/${cancelling.id}/cancel-rotation`,
+            {},
+            { params }
+          )
+        ).data
+      )
+      const rotationKey = `app-key-rotation:${props.user.id}:${props.user.owner_app_id}:${cancelling.id}`
+      const input =
+        sessionStorage.getItem(rotationKey) ??
+        (issued?.id === cancelling.id ? operation.current.input : '')
+      if (input) {
+        sessionStorage.removeItem(
+          `app-key-operation:${props.user.id}:${props.user.owner_app_id}:${input}`
+        )
+        if (operation.current.input === input) {
+          operation.current = { input: '', key: '' }
+        }
+      }
+      sessionStorage.removeItem(rotationKey)
+      if (issued?.id === cancelling.id) {
+        setIssued(null)
+        setRotation(false)
+      }
+      setCancelling(null)
+      await keys.refetch()
+    } catch (error) {
+      handleServerError(error)
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <Dialog
       open={props.open}
@@ -212,6 +284,9 @@ export function AppProxyKeysDialog(props: {
       description={`${t('User')} #${props.user.id} · ${t('App')} #${props.user.owner_app_id}`}
     >
       <div className='space-y-4'>
+        <Button variant='outline' onClick={() => setRulesOpen(true)}>
+          {t('Quota management')}
+        </Button>
         <p>
           {t('Limited keys cannot rotate without a shared spending budget.')}
         </p>
@@ -246,12 +321,32 @@ export function AppProxyKeysDialog(props: {
                   {key.status === 1 ? t('Enabled') : t('Disabled')}
                 </p>
                 <code>{key.key}</code>
+                {key.quota_rule && <QuotaRuleValidity rule={key.quota_rule} />}
+                {key.rotation_status === 'cancelled' && (
+                  <p>{t('Rotation cancelled')}</p>
+                )}
                 <p>
                   {key.unlimited_quota
                     ? t('Unlimited')
                     : formatNumber(key.remain_quota)}
                 </p>
                 <div className='flex flex-wrap gap-2'>
+                  <Button
+                    variant='outline'
+                    disabled={busy}
+                    onClick={() => setBinding(key)}
+                  >
+                    {t('Bind quota rule')}
+                  </Button>
+                  {key.rotation_status === 'pending' && (
+                    <Button
+                      variant='outline'
+                      disabled={busy}
+                      onClick={() => setCancelling(key)}
+                    >
+                      {t('Cancel rotation')}
+                    </Button>
+                  )}
                   <Button
                     disabled={busy || !!issued}
                     variant='outline'
@@ -264,7 +359,7 @@ export function AppProxyKeysDialog(props: {
                     {t('Edit')}
                   </Button>
                   <Button
-                    disabled={busy}
+                    disabled={busy || key.rotation_status === 'cancelled'}
                     variant='outline'
                     onClick={() => {
                       if (key.status === 1) setDisable(key)
@@ -278,7 +373,8 @@ export function AppProxyKeysDialog(props: {
                       busy ||
                       !!issued ||
                       key.status !== 1 ||
-                      !key.unlimited_quota
+                      !key.unlimited_quota ||
+                      !!key.quota_rule_id
                     }
                     variant='outline'
                     onClick={() => void issue(key)}
@@ -346,6 +442,40 @@ export function AppProxyKeysDialog(props: {
               else void issue()
             }}
           >
+            {!editing && (
+              <label className='block'>
+                {t('Quota rule')}
+                <NativeSelect
+                  value={ruleId}
+                  onChange={(event) => setRuleId(Number(event.target.value))}
+                  disabled={rules.isPending || rules.isError}
+                >
+                  <NativeSelectOption value={0}>
+                    {t('No quota rule')}
+                  </NativeSelectOption>
+                  {rules.data?.pages
+                    .flatMap((page) => page.items)
+                    .map((rule) => (
+                      <NativeSelectOption key={rule.id} value={rule.id}>
+                        {rule.name}
+                      </NativeSelectOption>
+                    ))}
+                </NativeSelect>
+                {rules.hasNextPage && (
+                  <Button
+                    type='button'
+                    variant='outline'
+                    disabled={rules.isFetchingNextPage}
+                    onClick={() => void rules.fetchNextPage()}
+                  >
+                    {t('Load more')}
+                  </Button>
+                )}
+                {rules.isError && (
+                  <ErrorState onRetry={() => void rules.refetch()} />
+                )}
+              </label>
+            )}
             <label className='block'>
               {t('Name')}
               <Input
@@ -367,7 +497,12 @@ export function AppProxyKeysDialog(props: {
                 onChange={(event) => setQuota(event.target.value)}
               />
             </label>
-            <Button disabled={busy} type='submit'>
+            <Button
+              disabled={
+                busy || (!editing && (rules.isPending || rules.isError))
+              }
+              type='submit'
+            >
               {t(editing ? 'Save' : 'Create')}
             </Button>
             {editing && (
@@ -382,6 +517,37 @@ export function AppProxyKeysDialog(props: {
           </form>
         )}
       </div>
+      <ConfirmDialog
+        open={!!cancelling}
+        onOpenChange={(open) => !open && !busy && setCancelling(null)}
+        title={t('Cancel rotation')}
+        desc={t(
+          'The replacement key will be revoked. The original key and its usage remain unchanged.'
+        )}
+        isLoading={busy}
+        handleConfirm={() => void cancelRotation()}
+      />
+      <Dialog
+        open={rulesOpen}
+        onOpenChange={setRulesOpen}
+        title={t('Quota management')}
+      >
+        {rulesOpen && (
+          <QuotaRules
+            key={`${target.userId}:${target.appId}`}
+            target={target}
+          />
+        )}
+      </Dialog>
+      {binding && (
+        <QuotaRuleBindingDialog
+          key={`${target.userId}:${binding.id}`}
+          apiKey={binding}
+          target={target}
+          onClose={() => setBinding(null)}
+          onSuccess={() => void keys.refetch()}
+        />
+      )}
       <ConfirmDialog
         open={!!disable}
         onOpenChange={(open) => {

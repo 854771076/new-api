@@ -70,7 +70,7 @@ function decrypt(account: Account) {
   } catch { throw unavailable(); }
 }
 
-async function adminRequest(path: string, method = 'GET', body?: unknown, requestId?: string) {
+export async function adminRequest(path: string, method = 'GET', body?: unknown, requestId?: string) {
   const token = process.env.GATEWAY_ADMIN_ACCESS_TOKEN ?? '';
   if (!token) throw unavailable();
   try {

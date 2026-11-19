@@ -31,12 +31,23 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
-import type { ApiKey } from '@/features/keys/types'
 
-import { bindQuotaRule, getQuotaRules, quotaRuleQueryKey } from './api'
+import {
+  bindQuotaRule,
+  getQuotaRules,
+  quotaRuleQueryKey,
+  type QuotaRule,
+  type QuotaRuleTarget,
+} from './api'
 
 export function QuotaRuleBindingDialog(props: {
-  apiKey: ApiKey
+  apiKey: {
+    id: number
+    name: string
+    quota_rule_id?: number
+    quota_rule?: QuotaRule
+  }
+  target?: QuotaRuleTarget
   onClose: () => void
   onSuccess: () => void
 }) {
@@ -45,16 +56,16 @@ export function QuotaRuleBindingDialog(props: {
   const [selected, setSelected] = useState(props.apiKey.quota_rule_id ?? 0)
   const [keyword, setKeyword] = useState('')
   const query = useInfiniteQuery({
-    queryKey: [...quotaRuleQueryKey, 'binding', keyword],
+    queryKey: [...quotaRuleQueryKey, props.target, 'binding', keyword],
     initialPageParam: 1,
     queryFn: ({ pageParam }) =>
-      getQuotaRules({ p: pageParam, size: 50, keyword }),
+      getQuotaRules({ p: pageParam, size: 50, keyword }, props.target),
     getNextPageParam: (last, pages) =>
       pages.length * 50 < last.total ? pages.length + 1 : undefined,
   })
   const rules = query.data?.pages.flatMap((page) => page.items) ?? []
   const mutation = useMutation({
-    mutationFn: () => bindQuotaRule(props.apiKey.id, selected),
+    mutationFn: () => bindQuotaRule(props.apiKey.id, selected, props.target),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: quotaRuleQueryKey })
       props.onSuccess()
@@ -132,6 +143,11 @@ export function QuotaRuleBindingDialog(props: {
             )}
           </>
         )}
+        <p className='text-muted-foreground text-sm'>
+          {t(
+            'Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.'
+          )}
+        </p>
         <p className='text-muted-foreground text-sm'>
           {t(
             'Changing or unbinding a rule does not clear its existing period usage.'

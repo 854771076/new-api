@@ -89,6 +89,25 @@ func TestTokenQuotaRuleAuthorizationAndAudit(t *testing.T) {
 	assert.Equal(t, user.Id, rule.UserId)
 	assert.Greater(t, rule.CreatedAt, int64(1))
 	path := fmt.Sprintf("/api/token/quota_rules/%d", rule.Id)
+	timedBody := strings.TrimSuffix(body, "}") + `,"valid_from":100,"valid_until":200}`
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, write, "", timedBody))
+	require.True(t, response.Success, response.Message)
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, write, "", body))
+	require.True(t, response.Success, response.Message)
+	require.NoError(t, common.Unmarshal(response.Data, &rule))
+	assert.EqualValues(t, 100, *rule.ValidFrom)
+	assert.EqualValues(t, 200, *rule.ValidUntil)
+	for _, value := range []string{`0`, `-1`, `1.5`, `"100"`, `253402300800`} {
+		invalid := strings.TrimSuffix(body, "}") + `,"valid_until":` + value + `}`
+		assert.False(t, decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, write, "", invalid)).Success)
+	}
+	cleared := strings.TrimSuffix(body, "}") + `,"valid_from":null,"valid_until":null}`
+	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, write, "", cleared))
+	require.True(t, response.Success)
+	rule = model.TokenQuotaRule{}
+	require.NoError(t, common.Unmarshal(response.Data, &rule))
+	assert.Nil(t, rule.ValidFrom)
+	assert.Nil(t, rule.ValidUntil)
 	response = decodeAPIResponse(t, accessTokenRequest(router, "PUT", path, foreign, "", body))
 	assert.False(t, response.Success)
 	response = decodeAPIResponse(t, accessTokenRequest(router, "DELETE", path, foreign, "", ""))

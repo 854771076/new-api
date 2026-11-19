@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "Недопустимая прокси-идентичность или принадлежность приложению",
     "subscriptions are not supported for proxy users": "Подписки недоступны прокси-пользователям",
     "operation id was already used with different parameters": "Этот идентификатор операции уже использован с другими параметрами",
-    "limited key rotation is unavailable without a shared spending budget": "Для ротации ограниченного ключа нужен общий бюджет"
+    "limited key rotation is unavailable without a shared spending budget": "Для ротации ограниченного ключа нужен общий бюджет",
+    "Valid from (inclusive)": "Действует с (включительно)",
+    "Valid until (exclusive)": "Действует до (исключительно)",
+    "Quota rule start must be before its end": "Начало действия правила должно предшествовать окончанию",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "Срок действия задаётся секундами Unix от 1 до 253402300799",
+    "Editing this rule affects {{count}} bound API keys.": "Изменение затронет {{count}} привязанных API-ключей.",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "Отключение или отвязка правила снимает ограничения. Для отмены членства задайте дату окончания или отзовите ключ.",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "Пустая дата не ограничивает срок. Периоды сбрасываются в выбранном часовом поясе; смена периода или пояса может выбрать другой бюджет.",
+    "Scheduled": "Запланировано",
+    "Effective": "Действует по времени",
+    "Unbounded": "Без границы",
+    "Rotation cancelled": "Ротация отменена",
+    "Cancel rotation": "Отменить ротацию",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "Новый ключ будет отозван. Исходный ключ и его расход сохранятся.",
+    "API key quota rule has not started": "Правило квоты API-ключа ещё не вступило в силу",
+    "API key quota rule has expired": "Срок действия правила квоты API-ключа истёк",
+    "rotation_cancelled": "Ротация отменена, новый ключ нельзя восстановить",
+    "reservation_snapshot_unavailable": "У исходного резерва нет снимка бюджета; дополнительное резервирование недоступно"
   }
 }

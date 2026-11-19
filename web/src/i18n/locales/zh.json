@@ -7629,6 +7629,23 @@
     "proxy identity or app ownership is invalid": "代理身份或 App 归属无效",
     "subscriptions are not supported for proxy users": "代理用户不支持订阅",
     "operation id was already used with different parameters": "操作标识已用于不同参数",
-    "limited key rotation is unavailable without a shared spending budget": "缺少共享消费预算，无法轮换受限密钥"
+    "limited key rotation is unavailable without a shared spending budget": "缺少共享消费预算，无法轮换受限密钥",
+    "Valid from (inclusive)": "生效时间（含）",
+    "Valid until (exclusive)": "失效时间（不含）",
+    "Quota rule start must be before its end": "配额规则开始时间必须早于结束时间",
+    "Quota rule validity must use Unix seconds between 1 and 253402300799": "配额规则有效期必须为 1 至 253402300799 之间的 Unix 秒数",
+    "Editing this rule affects {{count}} bound API keys.": "编辑此规则将影响 {{count}} 把已绑定的 API Key。",
+    "Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.": "停用或解绑规则会移除限制。取消会员应设置结束时间或撤销 Key。",
+    "Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.": "留空表示不限该边界。自然周期按所选时区重置；修改周期或时区可能切换到另一份预算。",
+    "Scheduled": "尚未生效",
+    "Effective": "时间内生效",
+    "Unbounded": "无限制",
+    "Rotation cancelled": "轮换已取消",
+    "Cancel rotation": "取消轮换",
+    "The replacement key will be revoked. The original key and its usage remain unchanged.": "替换 Key 将被撤销，原 Key 和用量保持不变。",
+    "API key quota rule has not started": "此 API Key 的配额规则尚未生效",
+    "API key quota rule has expired": "此 API Key 的配额规则已到期",
+    "rotation_cancelled": "此轮换已取消，替换 Key 不可恢复",
+    "reservation_snapshot_unavailable": "原预留缺少预算快照，无法补充预扣"
   }
 }

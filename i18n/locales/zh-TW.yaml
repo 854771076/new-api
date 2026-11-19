@@ -94,3 +94,9 @@ channel.upstream_update_failed_channels: "失敗管道 ID（顯示 {{.Shown}}/{{
 channel.upstream_update_more_omitted: "（其餘 {{.Count}} 個已省略）"
 quota.token_window_denied: "此權杖在今天不允許使用"
 quota.token_period_exhausted: "此權杖本週期配額已用盡"
+
+quota.token_rule_not_started: "此權杖的配額規則尚未生效"
+
+quota.token_rule_expired: "此權杖的配額規則已到期"
+
+quota.reservation_snapshot_unavailable: "原預留缺少預算快照，無法補充預扣"

@@ -41,6 +41,11 @@ func TestTokenQuotaRuleValidation(t *testing.T) {
 		{"null weekdays", func(r *TokenQuotaRule) { r.AllowedWeekdays = "null" }},
 		{"empty weekdays", func(r *TokenQuotaRule) { r.AllowedWeekdays = "[]" }},
 		{"invalid weekday", func(r *TokenQuotaRule) { r.AllowedWeekdays = "[0,8]" }},
+		{"zero date", func(r *TokenQuotaRule) { r.ValidFrom = new(int64(0)) }},
+		{"negative date", func(r *TokenQuotaRule) { r.ValidUntil = new(int64(-1)) }},
+		{"date overflow", func(r *TokenQuotaRule) { r.ValidUntil = new(int64(253402300800)) }},
+		{"empty interval", func(r *TokenQuotaRule) { r.ValidFrom, r.ValidUntil = new(int64(100)), new(int64(100)) }},
+		{"reversed interval", func(r *TokenQuotaRule) { r.ValidFrom, r.ValidUntil = new(int64(101)), new(int64(100)) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rule := TokenQuotaRule{Name: "Rule", QuotaLimitEnabled: true, QuotaLimit: 1, QuotaPeriod: "daily", TimeWindowEnabled: true, TimeWindowTimezone: "UTC", AllowedWeekdays: "[1,7]"}
@@ -48,6 +53,25 @@ func TestTokenQuotaRuleValidation(t *testing.T) {
 			tc.change(&rule)
 			assert.Error(t, rule.Validate())
 		})
+	}
+}
+
+func TestTokenQuotaRuleValidityBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		start, end *int64
+		now        int64
+		enabled    bool
+		status     string
+	}{
+		{nil, nil, 100, true, "effective"},
+		{new(int64(100)), nil, 99, true, "scheduled"},
+		{new(int64(100)), nil, 100, true, "effective"},
+		{nil, new(int64(100)), 99, true, "effective"},
+		{nil, new(int64(100)), 100, true, "expired"},
+		{new(int64(90)), new(int64(100)), 100, false, "disabled"},
+	} {
+		rule := TokenQuotaRule{Enabled: tc.enabled, ValidFrom: tc.start, ValidUntil: tc.end}
+		assert.Equal(t, tc.status, rule.ValidityAt(tc.now))
 	}
 }
 

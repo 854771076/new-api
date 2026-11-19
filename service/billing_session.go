@@ -102,6 +102,20 @@ func (s *BillingSession) PersistTask(ctx context.Context, task *model.Task, omit
 		return errors.New("billing session already finalized")
 	}
 	funding, ok := s.funding.(*WalletFunding)
+	if s.relayInfo.TaskReservationID > 0 {
+		task.ID = s.relayInfo.TaskReservationID
+		delta := 0
+		if ok && funding.appId > 0 {
+			delta = task.Quota - s.appUsedQuota
+		}
+		if err := task.CompleteReservedTask(ctx, delta, omitColumns...); err != nil {
+			return err
+		}
+		if ok && funding.appId > 0 {
+			s.appUsedQuota = task.Quota
+		}
+		return nil
+	}
 	if !ok || funding.appId <= 0 {
 		return task.InsertWithContext(ctx, omitColumns...)
 	}
@@ -266,7 +280,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) (apiErr *types.Ne
 	if !s.relayInfo.IsPlayground {
 		reservation, err := model.ReserveTokenQuotaRule(s.relayInfo.TokenId, int64(quota), true)
 		if err != nil {
-			return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+			return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), TokenQuotaRuleErrorCode(err), http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 		}
 		s.relayInfo.TokenQuotaReservation = reservation
 		defer func() {
@@ -410,7 +424,7 @@ func (s *BillingSession) reserveToken(delta int) error {
 	}
 	reservation := s.relayInfo.TokenQuotaReservation
 	if err := model.AdjustTokenQuotaRuleUsage(reservation, int64(delta), true); err != nil {
-		return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		return types.NewErrorWithStatusCode(TokenQuotaRuleError(err, s.lang), TokenQuotaRuleErrorCode(err), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
 	if err := PreConsumeTokenQuota(s.relayInfo, delta); err != nil {
 		if rollbackErr := model.AdjustTokenQuotaRuleUsage(reservation, -int64(delta), false); rollbackErr != nil {

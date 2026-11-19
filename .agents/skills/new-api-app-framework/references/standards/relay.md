@@ -77,3 +77,7 @@ const res = await fetch('https://your-gateway.com/v1/chat/completions', {
 
 Model access per OAuth app is bounded by the app's whitelist; see **Model
 Whitelist per App** in `../../SKILL.md`.
+
+## Timed proxy membership rules
+
+Use the specified-user quota/cancel contract in `api-contract.md`. Rule dates enforce an enabled key's new-request admission and do not fund wallets or enable proxy subscriptions. Disabling/unbinding removes restrictions. Each key has independent calendar usage; rule-bound rotation remains unsupported. Cancel pending replacements before binding, and never revive a cancelled operation. Admission snapshots preserve the original budget through rule edits, expiry, deletion and task recovery; legacy snapshots cannot supplement reservations. A task stranded before a confirmed upstream result remains `SUBMITTING` for explicit reconciliation, without automatic repeat work or refunds. The reference admin BFF pins native mapping and App; ordinary consumers cannot write paid entitlement gates.

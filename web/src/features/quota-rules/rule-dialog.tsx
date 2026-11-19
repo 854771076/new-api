@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { z } from 'zod'
 
+import { DateTimePicker } from '@/components/datetime-picker'
 import { Dialog } from '@/components/dialog'
 import { MultiSelect } from '@/components/multi-select'
 import { Button } from '@/components/ui/button'
@@ -41,7 +42,12 @@ import { Textarea } from '@/components/ui/textarea'
 import { getCurrencyLabel } from '@/lib/currency'
 import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 
-import { quotaRuleQueryKey, saveQuotaRule, type QuotaRule } from './api'
+import {
+  quotaRuleQueryKey,
+  saveQuotaRule,
+  type QuotaRule,
+  type QuotaRuleTarget,
+} from './api'
 
 const weekdays = [
   'Monday',
@@ -56,6 +62,7 @@ const weekdays = [
 export function QuotaRuleDialog(props: {
   rule: QuotaRule | null
   onClose: () => void
+  target?: QuotaRuleTarget
 }) {
   const { t } = useTranslation()
   const client = useQueryClient()
@@ -70,8 +77,21 @@ export function QuotaRuleDialog(props: {
       time_window_enabled: z.boolean(),
       time_window_timezone: z.enum(['UTC', 'Asia/Shanghai']),
       days: z.array(z.string()),
+      valid_from: z.number().int().min(1).max(253402300799).nullable(),
+      valid_until: z.number().int().min(1).max(253402300799).nullable(),
     })
     .superRefine((value, context) => {
+      if (
+        value.valid_from !== null &&
+        value.valid_until !== null &&
+        value.valid_from >= value.valid_until
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['valid_until'],
+          message: t('Quota rule start must be before its end'),
+        })
+      }
       const quota = parseQuotaFromDollars(value.amount)
       if (
         value.quota_limit_enabled &&
@@ -96,6 +116,8 @@ export function QuotaRuleDialog(props: {
     resolver: zodResolver(schema),
     defaultValues: {
       name: rule?.name ?? '',
+      valid_from: rule?.valid_from ?? null,
+      valid_until: rule?.valid_until ?? null,
       description: rule?.description ?? '',
       enabled: rule?.enabled ?? true,
       quota_limit_enabled: rule?.quota_limit_enabled ?? true,
@@ -110,23 +132,29 @@ export function QuotaRuleDialog(props: {
   })
   const mutation = useMutation({
     mutationFn: (values: z.infer<typeof schema>) =>
-      saveQuotaRule({
-        id: rule?.id ?? 0,
-        name: values.name,
-        description: values.description,
-        enabled: values.enabled,
-        quota_limit_enabled: values.quota_limit_enabled,
-        quota_period: values.quota_period,
-        quota_limit: values.quota_limit_enabled
-          ? parseQuotaFromDollars(values.amount)
-          : 0,
-        time_window_enabled: values.time_window_enabled,
-        time_window_timezone: values.time_window_timezone,
-        allowed_weekdays: JSON.stringify(values.days.map(Number)),
-      }),
+      saveQuotaRule(
+        {
+          id: rule?.id ?? 0,
+          name: values.name,
+          description: values.description,
+          enabled: values.enabled,
+          valid_from: values.valid_from,
+          valid_until: values.valid_until,
+          quota_limit_enabled: values.quota_limit_enabled,
+          quota_period: values.quota_period,
+          quota_limit: values.quota_limit_enabled
+            ? parseQuotaFromDollars(values.amount)
+            : 0,
+          time_window_enabled: values.time_window_enabled,
+          time_window_timezone: values.time_window_timezone,
+          allowed_weekdays: JSON.stringify(values.days.map(Number)),
+        },
+        props.target
+      ),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: quotaRuleQueryKey })
       void client.invalidateQueries({ queryKey: ['keys'] })
+      void client.invalidateQueries({ queryKey: ['admin-app-keys'] })
       toast.success(t('Quota rule saved'))
       props.onClose()
     },
@@ -166,6 +194,18 @@ export function QuotaRuleDialog(props: {
           className='space-y-4'
           onSubmit={form.handleSubmit((values) => mutation.mutate(values))}
         >
+          {!!rule?.bound_token_count && (
+            <p role='status'>
+              {t('Editing this rule affects {{count}} bound API keys.', {
+                count: rule.bound_token_count,
+              })}
+            </p>
+          )}
+          <p className='text-muted-foreground text-sm'>
+            {t(
+              'Disabling or unbinding a rule removes its restrictions. To cancel membership, set its end time or revoke the key.'
+            )}
+          </p>
           <FormField
             control={form.control}
             name='name'
@@ -307,6 +347,43 @@ export function QuotaRuleDialog(props: {
               </FormItem>
             )}
           />
+          {(['valid_from', 'valid_until'] as const).map((name) => (
+            <FormField
+              key={name}
+              control={form.control}
+              name={name}
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {name === 'valid_from'
+                      ? t('Valid from (inclusive)')
+                      : t('Valid until (exclusive)')}
+                  </FormLabel>
+                  <FormControl>
+                    <DateTimePicker
+                      timeZone={form.watch('time_window_timezone')}
+                      value={
+                        field.value === null
+                          ? undefined
+                          : new Date(field.value * 1000)
+                      }
+                      onChange={(date) =>
+                        field.onChange(
+                          date ? Math.floor(date.getTime() / 1000) : null
+                        )
+                      }
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          ))}
+          <p className='text-muted-foreground text-sm'>
+            {t(
+              'Empty dates are unbounded. Calendar periods reset in the selected timezone; changing period or timezone may select a different budget.'
+            )}
+          </p>
           {windowed && (
             <FormField
               control={form.control}

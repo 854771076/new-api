@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	oauthAppCacheKeyPrefix = "oauth_app:v2:"
+	oauthAppCacheKeyPrefix = "oauth_app:v3:"
 	oauthAppCacheTTL       = 5 * time.Minute
 )
 
@@ -29,6 +29,7 @@ type cachedOAuthApp struct {
 	status             int
 	aiModelWhitelist   string // JSON array string; "" means no restriction
 	supabaseProjectRef string
+	quotaPerCredit     *int64
 	cachedAt           time.Time
 }
 
@@ -79,6 +80,7 @@ func LoadOAuthAppByClientID(clientID string) (*model.OAuthApp, error) {
 		status:             app.Status,
 		aiModelWhitelist:   app.AIModelWhitelist,
 		supabaseProjectRef: app.SupabaseProjectRef,
+		quotaPerCredit:     app.QuotaPerCredit,
 		cachedAt:           time.Now(),
 	}
 	storeOAuthAppInMemory(cache)
@@ -145,6 +147,7 @@ func cachedOAuthAppToModel(c cachedOAuthApp) *model.OAuthApp {
 		Status:             c.status,
 		AIModelWhitelist:   c.aiModelWhitelist,
 		SupabaseProjectRef: c.supabaseProjectRef,
+		QuotaPerCredit:     c.quotaPerCredit,
 	}
 }
 
@@ -161,6 +164,7 @@ func serializeCachedOAuthApp(c cachedOAuthApp) string {
 		"st":  c.status,
 		"wl":  c.aiModelWhitelist,
 		"pr":  c.supabaseProjectRef,
+		"qc":  c.quotaPerCredit,
 		"ts":  c.cachedAt.Unix(),
 	})
 	if err != nil {
@@ -178,6 +182,7 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 		WL  string `json:"wl"`
 		PR  string `json:"pr"`
 		TS  int64  `json:"ts"`
+		QC  *int64 `json:"qc"`
 	}
 	if err := common.UnmarshalJsonStr(raw, &payload); err != nil {
 		return nil
@@ -199,5 +204,6 @@ func parseCachedOAuthApp(raw string) *model.OAuthApp {
 		Status:             payload.St,
 		AIModelWhitelist:   payload.WL,
 		SupabaseProjectRef: payload.PR,
+		QuotaPerCredit:     payload.QC,
 	}
 }

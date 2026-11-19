@@ -20,6 +20,7 @@ import { useTranslation } from 'react-i18next'
 
 import { QuotaDetailsPopover } from '@/components/quota-details-popover'
 import { Progress } from '@/components/ui/progress'
+import { QuotaRuleValidity } from '@/features/quota-rules/validity'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatQuotaWithCurrency, getCurrencyDisplay } from '@/lib/currency'
 import { cn } from '@/lib/utils'
@@ -78,7 +79,7 @@ export function ApiKeyQuotaCell(props: ApiKeyQuotaCellProps) {
     details.push({ label: t('Quota rule'), value: rule.name })
     details.push({
       label: t('Status'),
-      value: rule.enabled ? t('Enabled') : t('Disabled'),
+      value: <QuotaRuleValidity rule={rule} />,
     })
     if (rule.quota_limit_enabled) {
       details.push({

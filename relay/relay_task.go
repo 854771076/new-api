@@ -340,6 +340,12 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		if apiErr := service.PreConsumeBilling(c, info.PriceData.Quota, info); apiErr != nil {
 			return nil, service.TaskErrorFromAPIError(apiErr)
 		}
+	} else if !info.IsPlayground && info.TokenQuotaReservation == nil {
+		reservation, err := model.ReserveTokenQuotaRule(info.TokenId, 0, false)
+		if err != nil {
+			return nil, service.TaskErrorWrapperLocal(service.TokenQuotaRuleError(err, info.UserSetting.Language), string(service.TokenQuotaRuleErrorCode(err)), http.StatusForbidden)
+		}
+		info.TokenQuotaReservation = reservation
 	}
 
 	// 8. 构建请求体
@@ -349,6 +355,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	}
 
 	// 9. 发送请求
+	if err := model.StageTaskQuotaReservation(c.Request.Context(), info, platform); err != nil {
+		return nil, service.TaskErrorWrapperLocal(err, "task_reservation_persist_failed", http.StatusInternalServerError)
+	}
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError, common.UpstreamAddresses(c)...)

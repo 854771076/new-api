@@ -72,3 +72,39 @@ test('keeps the current time when the time field is emptied', () => {
   expect(onChange).not.toHaveBeenCalled()
   expect(field).toHaveValue('20:30:45')
 })
+
+test('explicit timezone preserves the maximum accepted instant beyond local year 9999', () => {
+  const onChange = vi.fn()
+  render(
+    <DateTimePicker
+      aria-label='Validity'
+      timeZone='Asia/Shanghai'
+      value={new Date(253402300799000)}
+      onChange={onChange}
+    />
+  )
+  expect(screen.getByLabelText('Validity')).toHaveValue(
+    '10000-01-01T07:59:59.000'
+  )
+  fireEvent.change(screen.getByLabelText('Validity'), {
+    target: { value: '10000-01-01T07:59:58' },
+  })
+  expect(onChange).toHaveBeenLastCalledWith(new Date(253402300798000))
+})
+
+test('Shanghai historical daylight saving dates use their real UTC offset', () => {
+  const onChange = vi.fn()
+  render(
+    <DateTimePicker
+      aria-label='Validity'
+      timeZone='Asia/Shanghai'
+      value={new Date('1988-07-01T00:00:00Z')}
+      onChange={onChange}
+    />
+  )
+  expect(screen.getByLabelText('Validity')).toHaveValue('1988-07-01T09:00')
+  fireEvent.change(screen.getByLabelText('Validity'), {
+    target: { value: '1988-07-01T10:00' },
+  })
+  expect(onChange).toHaveBeenLastCalledWith(new Date('1988-07-01T01:00:00Z'))
+})

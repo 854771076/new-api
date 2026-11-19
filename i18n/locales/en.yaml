@@ -93,3 +93,9 @@ channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
 quota.token_window_denied: "This API key cannot be used on the current weekday"
 quota.token_period_exhausted: "API key quota for the current period is exhausted"
+
+quota.token_rule_not_started: "API key quota rule has not started"
+
+quota.token_rule_expired: "API key quota rule has expired"
+
+quota.reservation_snapshot_unavailable: "The original reservation has no budget snapshot; additional reservation is unavailable"

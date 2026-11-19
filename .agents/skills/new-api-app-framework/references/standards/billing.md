@@ -278,7 +278,7 @@ Payment matrix:
 
 | Purchase | Supported `payment_method` |
 |----------|----------------------------|
-| App subscription plan | `balance`, `epay`, `stripe`, `creem`, `waffo_pancake` |
+| App subscription plan | `balance`, configured Epay types (e.g. `alipay`, `wxpay`), `stripe`, `creem`, `waffo_pancake`; legacy `epay` selects the first configured type |
 | App product | `balance`, `epay`, `stripe`, `creem`, `waffo_pancake`, subject to configured product IDs/currency |
 | App top-up | `balance`, configured Epay method, `stripe`, `creem`, `waffo_pancake` (default when omitted); proxy supports Pancake only |
 
@@ -303,7 +303,8 @@ Rules specific to the App pool:
 - `waffo_pancake` requires the gateway's Waffo Pancake configuration; a product
   paid this way must be priced in USD with at least `0.01`. Online plan payment
   also requires the channel configuration and, for `stripe`, the plan's
-  `stripe_price_id`; `epay` uses the first configured epay method. Missing
+  `stripe_price_id`; send the selected configured Epay type in `payment_method`
+  for subscription checkout. Legacy `epay` uses the first configured Epay method. Missing
   configuration returns `400 checkout_failed`.
 - An App access token can submit async tasks and Midjourney calls. Pre-consume,
   completion-delta settlement, and refunds all use `app_quota`, and the App
@@ -472,3 +473,7 @@ Rules:
   租户隔离由服务端查询实现，不能依赖客户端筛选。
 
 Scoped payment limits: proxy checkout and top-up preview currently use Waffo Pancake only. OAuth retains supported payment cores. Epay scoped purchases require CNY; Stripe scoped top-up requires an active USD one-time per-unit Price with an integer minor-unit price and whole quantities. Its payable snapshot uses the provider Price, not the purchased unit count. Promotion codes are disabled for scoped Stripe checkout so the paid amount matches the frozen snapshot. A provider price/currency mismatch or late payment remains reconciliation_required; sandbox merchant acceptance is still required. Unsupported periodic key-rule fields are rejected explicitly; this branch does not add a separate rules engine.
+
+## Timed proxy membership rules
+
+Use the specified-user quota/cancel contract in `api-contract.md`. Rule dates enforce an enabled key's new-request admission and do not fund wallets or enable proxy subscriptions. Disabling/unbinding removes restrictions. Each key has independent calendar usage; rule-bound rotation remains unsupported. Cancel pending replacements before binding, and never revive a cancelled operation. Admission snapshots preserve the original budget through rule edits, expiry, deletion and task recovery; legacy snapshots cannot supplement reservations. A task stranded before a confirmed upstream result remains `SUBMITTING` for explicit reconciliation, without automatic repeat work or refunds. The reference admin BFF pins native mapping and App; ordinary consumers cannot write paid entitlement gates.

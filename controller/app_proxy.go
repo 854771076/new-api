@@ -43,6 +43,8 @@ func appProxyError(c *gin.Context, err error) {
 		status, code = http.StatusForbidden, "invalid_app_ownership"
 	case errors.Is(err, model.ErrLimitedKeyRotation):
 		status, code = http.StatusConflict, "shared_key_budget_unavailable"
+	case errors.Is(err, model.ErrRotationCancelled):
+		status, code = http.StatusConflict, "rotation_cancelled"
 	case errors.Is(err, model.ErrProxySubscriptionUnsupported):
 		status, code = http.StatusBadRequest, "subscription_unsupported"
 	default:
@@ -132,6 +134,7 @@ func CreateAppProxyKey(c *gin.Context) {
 		AllowIps           *string `json:"allow_ips"`
 		Group              string  `json:"group"`
 		OldTokenId         int     `json:"old_token_id"`
+		QuotaRuleId        int     `json:"quota_rule_id"`
 	}
 	input.ExpiredTime = -1
 	var fields map[string]common.RawMessage
@@ -141,7 +144,7 @@ func CreateAppProxyKey(c *gin.Context) {
 	}
 	for name := range fields {
 		switch name {
-		case "name", "expired_time", "remain_quota", "unlimited_quota", "model_limits_enabled", "model_limits", "allow_ips", "group", "old_token_id":
+		case "name", "expired_time", "remain_quota", "unlimited_quota", "model_limits_enabled", "model_limits", "allow_ips", "group", "old_token_id", "quota_rule_id":
 		default:
 			common.ApiErrorT(c, "Invalid parameters")
 			return
@@ -174,6 +177,7 @@ func CreateAppProxyKey(c *gin.Context) {
 		}
 	}
 	token := &model.Token{Name: input.Name, ExpiredTime: input.ExpiredTime, RemainQuota: input.RemainQuota, UnlimitedQuota: input.UnlimitedQuota, ModelLimitsEnabled: input.ModelLimitsEnabled, ModelLimits: input.ModelLimits, AllowIps: input.AllowIps, Group: input.Group}
+	token.QuotaRuleId = input.QuotaRuleId
 	token, err = model.CreateAppProxyKey(user.Id, appID, strings.TrimSpace(c.GetHeader("Idempotency-Key")), token, input.OldTokenId)
 	if err != nil {
 		appProxyError(c, err)
@@ -212,7 +216,35 @@ func ListAppProxyKeys(c *gin.Context) {
 	for _, token := range tokens {
 		token.Key = token.GetMaskedKey()
 	}
-	common.ApiSuccess(c, gin.H{"items": tokens, "total": count})
+	if err := model.AttachTokenQuotaRuleUsage(tokens); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	ids := make([]int, 0, len(tokens))
+	for _, token := range tokens {
+		ids = append(ids, token.Id)
+	}
+	var operations []model.AppKeyOperation
+	if len(ids) > 0 {
+		if err := model.DB.Where("token_id IN ? AND old_token_id > 0", ids).Find(&operations).Error; err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	for _, op := range operations {
+		for _, token := range tokens {
+			if token.Id == op.TokenId {
+				token.RotationStatus = "pending"
+				if op.Committed {
+					token.RotationStatus = "committed"
+				}
+				if op.Cancelled {
+					token.RotationStatus = "cancelled"
+				}
+			}
+		}
+	}
+	common.ApiSuccess(c, gin.H{"items": tokens, "total": count, "server_time": common.GetTimestamp()})
 }
 
 func UpdateAppProxyKey(c *gin.Context) {
@@ -269,11 +301,29 @@ func UpdateAppProxyKey(c *gin.Context) {
 		updates["remain_quota"] = token.RemainQuota
 	}
 	if err := model.UpdateAppProxyKeyPolicy(token, updates); err != nil {
-		common.ApiError(c, err)
+		appProxyError(c, err)
 		return
 	}
 	recordManageAuditFor(c, user.Id, "app_proxy.key.update", map[string]any{"app_id": appID, "token_id": tokenID, "status": input.Status})
 	common.ApiSuccess(c, nil)
+}
+
+func CancelAppProxyKeyRotation(c *gin.Context) {
+	user, appID, ok := appProxyTarget(c)
+	if !ok {
+		return
+	}
+	tokenID, err := strconv.Atoi(c.Param("token_id"))
+	if err != nil || tokenID <= 0 {
+		common.ApiErrorT(c, "Invalid parameters")
+		return
+	}
+	if err := model.CancelAppProxyKeyRotation(user.Id, appID, tokenID); err != nil {
+		appProxyError(c, err)
+		return
+	}
+	recordManageAuditFor(c, user.Id, "app_proxy.key.rotation_cancel", map[string]any{"app_id": appID, "token_id": tokenID})
+	common.ApiSuccess(c, gin.H{"rotation_status": "cancelled"})
 }
 
 func CommitAppProxyKeyRotation(c *gin.Context) {

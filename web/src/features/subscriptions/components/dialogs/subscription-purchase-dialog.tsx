@@ -180,11 +180,11 @@ export function SubscriptionPurchaseDialog(props: Props) {
     /^((?!chrome|android).)*safari/i.test(navigator.userAgent)
 
   const handlePayEpay = async () => {
-    if (props.onPay) return payScoped('epay')
     if (!selectedEpayMethod) {
       toast.error(t('Please select a payment method'))
       return
     }
+    if (props.onPay) return payScoped(selectedEpayMethod)
     setPaying(true)
     try {
       const res = await paySubscriptionEpay({

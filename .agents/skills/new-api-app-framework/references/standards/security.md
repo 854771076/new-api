@@ -64,3 +64,7 @@ returns the rotated pair; store it in place of the old tokens.
 When the user logs out of new-api or changes their password, all their tokens
 are immediately invalidated. Handle `401` by re-authenticating; do not keep
 retrying with the same token.
+
+## Timed proxy membership rules
+
+Use the specified-user quota/cancel contract in `api-contract.md`. Rule dates enforce an enabled key's new-request admission and do not fund wallets or enable proxy subscriptions. Disabling/unbinding removes restrictions. Each key has independent calendar usage; rule-bound rotation remains unsupported. Cancel pending replacements before binding, and never revive a cancelled operation. Admission snapshots preserve the original budget through rule edits, expiry, deletion and task recovery; legacy snapshots cannot supplement reservations. A task stranded before a confirmed upstream result remains `SUBMITTING` for explicit reconciliation, without automatic repeat work or refunds. The reference admin BFF pins native mapping and App; ordinary consumers cannot write paid entitlement gates.

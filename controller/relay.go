@@ -549,6 +549,11 @@ func executeTaskSubmissionWith(
 	defer func() {
 		// The client of a relayed event stream already holds the vendor's
 		// work, so the submission is billed instead of refunded.
+		if !durable && relayInfo.TaskReservationID > 0 && !c.Writer.Written() {
+			if err := model.DB.Model(&model.Task{}).Where("id = ? AND status = ?", relayInfo.TaskReservationID, model.TaskStatusSubmitting).Updates(map[string]any{"status": model.TaskStatusFailure, "progress": "100%", "fail_reason": "Task submission failed", "finish_time": time.Now().Unix()}).Error; err != nil {
+				common.SysError(common.LogText("failed to close task reservation: %s", err))
+			}
+		}
 		if !durable && relayInfo.Billing != nil && !c.Writer.Written() {
 			diagnostics.refund(stage)
 			relayInfo.Billing.Refund(c)
@@ -758,6 +763,9 @@ func executeTaskSubmissionWith(
 	var insertErr error
 	if session, ok := relayInfo.Billing.(*service.BillingSession); ok {
 		insertErr = session.PersistTask(c.Request.Context(), task, insertOmits...)
+	} else if relayInfo.TaskReservationID > 0 {
+		task.ID = relayInfo.TaskReservationID
+		insertErr = task.CompleteReservedTask(c.Request.Context(), 0, insertOmits...)
 	} else {
 		insertErr = task.InsertWithContext(c.Request.Context(), insertOmits...)
 	}

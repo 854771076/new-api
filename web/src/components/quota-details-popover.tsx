@@ -30,7 +30,7 @@ import { cn } from '@/lib/utils'
 type QuotaDetailsPopoverProps = {
   title: string
   triggerLabel: string
-  details: ReadonlyArray<{ label: string; value: string }>
+  details: ReadonlyArray<{ label: string; value: ReactNode }>
   description?: string
   children: ReactNode
   afterTrigger?: ReactNode

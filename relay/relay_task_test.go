@@ -912,3 +912,44 @@ export function extractUsage() { return {seconds:2}; }
 		})
 	}
 }
+
+func TestQuotaValidityDeniesNewRelayWithoutChangingBalances(t *testing.T) {
+	for _, free := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			for _, future := range []bool{false, true} {
+				t.Run(fmt.Sprintf("free=%t/stream=%t/future=%t", free, stream, future), func(t *testing.T) {
+					c, info := setupRelayQuotaRule(t)
+					ratios := ratio_setting.ModelRatio2JSONString()
+					ratio := 1
+					if free {
+						ratio = 0
+					}
+					require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(fmt.Sprintf(`{"quota-free":%d}`, ratio)))
+					t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(ratios)) })
+					count := constant.CountToken
+					constant.CountToken = false
+					t.Cleanup(func() { constant.CountToken = count })
+					info.RelayFormat = kittypes.RelayFormatOpenAI
+					info.Request = &kitdto.GeneralOpenAIRequest{Model: "quota-free", Stream: new(stream), Messages: []kitdto.Message{{Role: "user", Content: "hello"}}}
+					field, code, endpoint := "valid_until", "rule_expired", time.Now().Unix()-60
+					if future {
+						field, code, endpoint = "valid_from", "rule_not_started", time.Now().Unix()+3600
+					}
+					require.NoError(t, model.DB.Model(&model.TokenQuotaRule{}).Where("user_id = ?", info.UserId).Updates(map[string]any{field: endpoint, "quota_limit_enabled": false}).Error)
+					apiErr := PrepareRequestBilling(c, info)
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+					assert.EqualValues(t, code, apiErr.GetErrorCode())
+					assert.True(t, kittypes.IsSkipRetryError(apiErr))
+					assert.Nil(t, info.Billing)
+					var user model.User
+					require.NoError(t, model.DB.First(&user, info.UserId).Error)
+					assert.Equal(t, 1000, user.Quota)
+					var uses int64
+					require.NoError(t, model.DB.Model(&model.TokenQuotaRuleUsage{}).Count(&uses).Error)
+					assert.Zero(t, uses)
+				})
+			}
+		}
+	}
+}

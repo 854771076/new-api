@@ -246,18 +246,6 @@ func dispatchAppSubscription(c *gin.Context, user *model.User, app *model.OAuthA
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"status": "success", "payment_method": model.PaymentMethodBalance})
-	case model.PaymentProviderEpay:
-		paymentType, err := firstConfiguredEpayMethod()
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		uri, params, err := createEpaySubscriptionOrder(user.Id, plan, paymentType, model.AppCheckoutFromContext(c.Request.Context()))
-		if err != nil {
-			oauthCheckoutError(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": model.PaymentProviderEpay, "url": uri, "params": params})
 	case model.PaymentMethodStripe:
 		payLink, err := createStripeSubscriptionOrder(c.Request.Context(), user, plan)
 		if err != nil {
@@ -287,7 +275,23 @@ func dispatchAppSubscription(c *gin.Context, user *model.User, app *model.OAuthA
 			"order_id":       result.OrderID,
 		})
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app subscription plans"})
+		paymentType := paymentMethod
+		if paymentMethod == model.PaymentProviderEpay {
+			paymentType, err = firstConfiguredEpayMethod()
+			if err != nil {
+				oauthCheckoutError(c, err)
+				return
+			}
+		} else if !operation_setting.ContainsPayMethod(paymentType) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_payment_method", "error_description": "this payment method is not supported for app subscription plans"})
+			return
+		}
+		uri, params, err := createEpaySubscriptionOrder(user.Id, plan, paymentType, model.AppCheckoutFromContext(c.Request.Context()))
+		if err != nil {
+			oauthCheckoutError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "pending", "payment_method": paymentMethod, "url": uri, "params": params})
 	}
 }
 
