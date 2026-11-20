@@ -4,9 +4,8 @@
 //   - minimax-h3-reference-to-video  (video)  MiniMax H3 reference-to-video
 //   - krea2-normal-v1                (image)  Krea2 text-to-image
 //
-// A channel maps each declared model to a RunningHub workflow id in its model
-// mapping (ctx.upstreamModel); one RunningHub account is one type-61 channel,
-// so an account pool is expressed as multiple channels.
+// Each request renders and submits its complete workflow; no saved workflow id
+// or channel model mapping is needed. One RunningHub account is one channel.
 //
 // Reference assets (image/video/audio) are uploaded before submit through the
 // host's utils.uploadFile primitive and the returned file name is injected into
@@ -21,7 +20,7 @@ export const meta = {
     en: "RunningHub ComfyUI workflow execution (MiniMax H3 reference-to-video and Krea2 text-to-image)",
     zh: "RunningHub ComfyUI 工作流执行（MiniMax H3 参考生视频、Krea2 文生图）",
   },
-  version: "1.0.0",
+  version: "1.0.6",
   author: { name: "QuantumNous" },
   models: ["minimax-h3-reference-to-video", "krea2-normal-v1"],
   fetchMode: "per_task",
@@ -29,6 +28,16 @@ export const meta = {
   requiredCapabilities: ["upload-file@1"],
   baseUrl: "https://www.runninghub.ai",
   usageSchema: {
+    money: {
+      type: "number",
+      unit: "credit",
+      description: { en: "RunningHub wallet unit price", zh: "RunningHub 钱包金额单价" },
+    },
+    points: {
+      type: "number",
+      unit: "credit",
+      description: { en: "RunningHub point unit price", zh: "RunningHub 积分单价" },
+    },
     coins: {
       type: "number",
       unit: "credit",
@@ -42,7 +51,6 @@ export const meta = {
   ],
 };
 
-const BASE_URL = "https://www.runninghub.ai";
 const PATHS = {
   CREATE_TASK: "/task/openapi/create",
   V2_QUERY: "/openapi/v2/query",
@@ -352,15 +360,10 @@ function videoDuration(req) {
   return normalizeMinimaxH3Duration(n);
 }
 
-function submitHeaders(apiKey) {
-  return { "Content-Type": "application/json", Host: "www.runninghub.ai", Authorization: "Bearer " + apiKey };
-}
-
 export function buildSubmitRequest(ctx) {
+  const baseUrl = ctx.baseUrl.replace(/\/+$/, "");
   const apiKey = trimmed(ctx.apiKey);
   if (!apiKey) throw new Error("api_key is empty");
-  const workflowId = trimmed(ctx.upstreamModel);
-  if (!workflowId) throw new Error("the channel model mapping must resolve to a RunningHub workflow id");
   const isVideo = ctx.model === "minimax-h3-reference-to-video";
   const req = asRecord(ctx.requestBody) || {};
 
@@ -376,7 +379,7 @@ export function buildSubmitRequest(ctx) {
   const total = images.length + videos.length + audios.length;
   if (total > MAX_REFERENCE_FILES) throw new Error("too many reference files (max " + MAX_REFERENCE_FILES + ")");
 
-  const uploadUrl = BASE_URL + PATHS.UPLOAD_FILE_V2;
+  const uploadUrl = baseUrl + PATHS.UPLOAD_FILE_V2;
   const authHeaders = { Authorization: "Bearer " + apiKey };
   const uploaded = function (files) {
     return files.map(function (file) {
@@ -413,10 +416,11 @@ export function buildSubmitRequest(ctx) {
   }
   nodeInfoList = buildNodeInfoList(workflow);
 
-  const body = { apiKey: apiKey, workflowId: workflowId, workflow: JSON.stringify(workflow), addMetadata: true };
+  // The API requires a positive ID placeholder even when workflow overrides it.
+  const body = { apiKey: apiKey, workflowId: "1", workflow: JSON.stringify(workflow), addMetadata: true };
   if (nodeInfoList.length) body.nodeInfoList = nodeInfoList;
 
-  return { url: BASE_URL + PATHS.CREATE_TASK, method: "POST", headers: submitHeaders(apiKey), body: body };
+  return { url: baseUrl + PATHS.CREATE_TASK, method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey }, body: body };
 }
 
 export function parseSubmitResponse(ctx, response) {
@@ -439,7 +443,7 @@ export function extractUsage(ctx) {
 export function buildQueryRequest(ctx) {
   const apiKey = trimmed(ctx.apiKey);
   return {
-    url: BASE_URL + PATHS.V2_QUERY,
+    url: ctx.baseUrl.replace(/\/+$/, "") + PATHS.V2_QUERY,
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey },
     body: { taskId: ctx.taskId },
@@ -489,15 +493,38 @@ export function parseTaskResult(ctx, body) {
   return { taskId: ctx.taskId, status: status, progress: readText(data, ["progress", "percent"]) || undefined };
 }
 
+function billingQuantity(raw) {
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
+  if (typeof raw === "string" && !raw.trim()) return null;
+  const quantity = Number(raw);
+  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
+}
+
 export function extractUsageOnComplete(task, result, data) {
   const record = asRecord(data);
-  const usage = asRecord(record && record.usage);
+  const body = asRecord(record && record.data) || record;
+  const usage = asRecord(body && body.usage);
   if (!usage) return null;
-  const raw = usage.consumeCoins !== undefined ? usage.consumeCoins : usage.consume_coins;
-  if (raw === undefined || raw === null || raw === "") return null;
-  const coins = typeof raw === "string" ? Number(raw) : raw;
-  if (!Number.isFinite(coins) || coins <= 0) return null;
-  return { coins: coins };
+  // POINT is a separate balance, not an alias or conversion of legacy RH coins.
+  if (usage.settleMode === "POINT") {
+    const points = billingQuantity(usage.chargedPoint);
+    return points === null ? null : { points: points };
+  }
+  const facts = {};
+  // Runtime and third-party charges are separate; keep the upstream wallet
+  // currency (CNY on .cn, USD on .ai) for the administrator's unit price.
+  for (const [key, raw] of [
+    ["coins", usage.consumeCoins ?? usage.consume_coins],
+    ["money", usage.consumeMoney],
+    ["money", usage.thirdPartyConsumeMoney],
+  ]) {
+    if (raw === undefined || raw === null || raw === "") continue;
+    const quantity = billingQuantity(raw);
+    if (quantity === null) return null;
+    facts[key] = (facts[key] ?? 0) + quantity;
+    if (!Number.isFinite(facts[key])) return null;
+  }
+  return Object.keys(facts).length ? facts : null;
 }
 
 export function listArtifacts(task) {
