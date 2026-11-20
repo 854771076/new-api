@@ -2,7 +2,7 @@
 //
 // Two models are supported, one per modality:
 //   - minimax-h3-reference-to-video  (video)  MiniMax H3 reference-to-video
-//   - krea2-normal-v1                (image)  Krea2 text-to-image
+//   - krea2-normal-v1                (image)  Krea2 text and reference-image generation
 //
 // Each request renders and submits its complete workflow; no saved workflow id
 // or channel model mapping is needed. One RunningHub account is one channel.
@@ -17,10 +17,10 @@ export const meta = {
   key: "runninghub",
   name: "RunningHub",
   description: {
-    en: "RunningHub ComfyUI workflow execution (MiniMax H3 reference-to-video and Krea2 text-to-image)",
-    zh: "RunningHub ComfyUI 工作流执行（MiniMax H3 参考生视频、Krea2 文生图）",
+    en: "RunningHub ComfyUI workflow execution (MiniMax H3 reference-to-video and Krea2 image generation)",
+    zh: "RunningHub ComfyUI 工作流执行（MiniMax H3 参考生视频、Krea2 图像生成）",
   },
-  version: "1.0.6",
+  version: "1.0.7",
   author: { name: "QuantumNous" },
   models: ["minimax-h3-reference-to-video", "krea2-normal-v1"],
   fetchMode: "per_task",
@@ -60,6 +60,7 @@ const PATHS = {
 const SUCCESS_CODES = [0, "0", 200, "200"];
 // Each uploaded asset spends one network budget slot; a submit hook has four.
 const MAX_REFERENCE_FILES = 4;
+const MAX_KREA2_IMAGES = 3;
 
 // —————————————————————————————————————————— 通用工具 ——————————————————————————————————————————
 
@@ -272,7 +273,27 @@ function buildKrea2Workflow(input) {
   workflow["5"].inputs.text = input.prompt;
   workflow["8"].inputs.width = dimensions.width;
   workflow["8"].inputs.height = dimensions.height;
+  if (input.images.length) {
+    // Qwen's vision tower cannot use the FP8 encoder; Krea2 consumes vision
+    // conditioning, not Qwen-Image's reference latents, so no VAE is connected.
+    workflow["4"].inputs.clip_name = "qwen3vl_4b_bf16.safetensors";
+    workflow["5"] = { inputs: { clip: ["4", 0], prompt: input.prompt }, class_type: "TextEncodeQwenImageEditPlus", _meta: { title: "Reference Image Conditioning" } };
+    input.images.forEach(function (image, index) {
+      const nodeId = String(100 + index);
+      workflow[nodeId] = { inputs: { image: image }, class_type: "LoadImage", _meta: { title: "Reference Image" } };
+      workflow["5"].inputs["image" + (index + 1)] = [nodeId, 0];
+    });
+  }
   return workflow;
+}
+
+function krea2ImageUrls(req) {
+  const images = [].concat(req.image === undefined ? [] : req.image, req.images === undefined ? [] : req.images);
+  return images.map(function (image) {
+    if (typeof image !== "string" || !/^https?:\/\/[^\s/]+(?:\/[^\s]*)?$/i.test(image.trim()))
+      throw new Error("image must be an HTTP URL; upload local images as multipart image files");
+    return image.trim();
+  });
 }
 
 // —————————————————————————————————————————— nodeInfoList 差量覆盖 ——————————————————————————————————————————
@@ -281,6 +302,7 @@ function buildKrea2Workflow(input) {
 // (prefix true); Primitive matches PrimitiveStringMultiline and PrimitiveFloat.
 const NODE_FIELD_RULES = [
   { match: "CLIPTextEncode", prefix: false, required: ["text"], fields: ["text"] },
+  { match: "LoadImage", prefix: false, required: [], fields: ["image"] },
   { match: "EmptyLatentImage", prefix: false, required: [], fields: ["width", "height"] },
   { match: "EmptySD3LatentImage", prefix: false, required: [], fields: ["width", "height"] },
   { match: "KSampler", prefix: false, required: [], fields: ["steps", "cfg"] },
@@ -412,7 +434,10 @@ export function buildSubmitRequest(ctx) {
     const aspectRatio = trimmed(req.aspect_ratio) || "1:1";
     if (!KREA2_DIMENSIONS[resolution] || !KREA2_DIMENSIONS[resolution][aspectRatio])
       throw new Error("invalid aspect_ratio or resolution");
-    workflow = buildKrea2Workflow({ prompt: prompt, aspectRatio: aspectRatio, resolution: resolution });
+    const imageUrls = krea2ImageUrls(req);
+    if (videos.length || audios.length) throw new Error("Krea2 only accepts image references");
+    if (images.length + imageUrls.length > MAX_KREA2_IMAGES) throw new Error("Krea2 accepts at most " + MAX_KREA2_IMAGES + " reference images");
+    workflow = buildKrea2Workflow({ prompt: prompt, aspectRatio: aspectRatio, resolution: resolution, images: imageUrls.concat(uploaded(images)) });
   }
   nodeInfoList = buildNodeInfoList(workflow);
 
@@ -690,12 +715,30 @@ export const protocols = {
   },
   openai_image: {
     decodeRequest: function (ctx) {
-      if (!ctx.body || ctx.body.kind !== "json") throw new Error("JSON body required");
-      const req = ctx.body.value;
-      if (!req || typeof req !== "object" || Array.isArray(req)) throw new Error("request body must be an object");
+      let req = {};
+      let fileCount = 0;
+      if (ctx.body && ctx.body.kind === "json") {
+        req = ctx.body.value;
+        if (!req || typeof req !== "object" || Array.isArray(req)) throw new Error("request body must be an object");
+      } else if (ctx.body && ctx.body.kind === "multipart") {
+        const fields = ctx.body.fields || {};
+        for (const name of Object.keys(fields)) {
+          if (fields[name].length > 1) throw new Error(name + " must be provided once");
+          req[name] = fields[name][0];
+        }
+        for (const file of ctx.body.files || []) {
+          if (!/^image(\[\d*\])?$/.test(file.field)) throw new Error("unsupported image file field: " + file.field);
+          if (mediaClass(file.mimeType, file.filename) !== "image") throw new Error("Krea2 only accepts image references");
+          fileCount++;
+        }
+      } else throw new Error("JSON or multipart body required");
       const prompt = trimmed(req.prompt);
       if (!prompt) throw new Error("prompt is required");
       const requestBody = { prompt: prompt };
+      const images = krea2ImageUrls(req);
+      if (images.length + fileCount > MAX_KREA2_IMAGES) throw new Error("Krea2 accepts at most " + MAX_KREA2_IMAGES + " reference images");
+      if (ctx.operation === "edit" && !images.length && !fileCount) throw new Error("image is required");
+      if (images.length) requestBody.images = images;
       if (trimmed(req.aspect_ratio)) requestBody.aspect_ratio = trimmed(req.aspect_ratio);
       if (trimmed(req.resolution)) requestBody.resolution = trimmed(req.resolution);
       if (trimmed(req.size)) {
@@ -705,7 +748,7 @@ export const protocols = {
           requestBody.resolution = derived.resolution;
         }
       }
-      return { kind: "submit", model: ctx.model, action: "text_to_image", requestBody: requestBody };
+      return { kind: "submit", model: ctx.model, action: images.length || fileCount ? "image_to_image" : "text_to_image", requestBody: requestBody };
     },
     render: function (ctx, task) {
       const artifact = artifactFor(task.data);

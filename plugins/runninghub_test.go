@@ -146,3 +146,80 @@ func TestRunningHubCompletionBilling(t *testing.T) {
 		}
 	}
 }
+
+func TestRunningHubKreaReferenceImages(t *testing.T) {
+	source, err := Source("runninghub")
+	require.NoError(t, err)
+	plugin, err := jsplugin.NewRegistry().RegisterFactory(source, jsplugin.Options{Key: "runninghub"})
+	require.NoError(t, err)
+	for _, multipart := range []bool{false, true} {
+		t.Run(map[bool]string{false: "image URL", true: "uploaded image"}[multipart], func(t *testing.T) {
+			body := map[string]any{"kind": "json", "value": map[string]any{"prompt": "a blue ceramic teapot", "image": "https://example.com/reference.png"}}
+			files := []any{}
+			if multipart {
+				files = []any{map[string]any{"ref": "request_file:image[]", "field": "image[]", "filename": "reference.png", "mimeType": "image/png"}}
+				body = map[string]any{"kind": "multipart", "fields": map[string]any{"prompt": []string{"a blue ceramic teapot"}}, "files": files}
+			}
+			intent, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_image", "decodeRequest"}, map[string]any{"model": "krea2-normal-v1", "operation": "edit", "body": body})
+			require.NoError(t, err)
+			encoded, err := common.Marshal(intent)
+			require.NoError(t, err)
+			var decoded struct {
+				Action string         `json:"action"`
+				Body   map[string]any `json:"requestBody"`
+			}
+			require.NoError(t, common.Unmarshal(encoded, &decoded))
+			assert.Equal(t, "image_to_image", decoded.Action)
+			uploads := 0
+			ctx := jsplugin.WithUploader(t.Context(), func(_ context.Context, request jsplugin.UploadRequest) (jsplugin.UploadResponse, error) {
+				uploads++
+				assert.Equal(t, "request_file:image[]", request.FileRef)
+				return jsplugin.UploadResponse{Status: 200, Body: []byte(`{"code":200,"data":{"fileName":"api/reference.png"}}`)}, nil
+			})
+			value, err := plugin.Engine.Call(ctx, "buildSubmitRequest", map[string]any{"baseUrl": "https://www.runninghub.cn", "apiKey": "vendor-key", "model": "krea2-normal-v1", "requestBody": decoded.Body, "files": files})
+			require.NoError(t, err)
+			encoded, err = common.Marshal(value)
+			require.NoError(t, err)
+			var request struct {
+				Body struct {
+					Workflow string `json:"workflow"`
+				} `json:"body"`
+			}
+			require.NoError(t, common.Unmarshal(encoded, &request))
+			var workflow map[string]struct {
+				Inputs map[string]any `json:"inputs"`
+				Class  string         `json:"class_type"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(request.Body.Workflow, &workflow))
+			assert.Equal(t, []any{"100", float64(0)}, workflow["5"].Inputs["image1"])
+			assert.NotEqual(t, "CLIPTextEncode", workflow["5"].Class)
+			assert.Equal(t, "a blue ceramic teapot", workflow["5"].Inputs["prompt"])
+			assert.Equal(t, "qwen3vl_4b_bf16.safetensors", workflow["4"].Inputs["clip_name"])
+			if multipart {
+				assert.Equal(t, 1, uploads)
+				assert.Equal(t, "LoadImage", workflow["100"].Class)
+				assert.Equal(t, "api/reference.png", workflow["100"].Inputs["image"])
+			} else {
+				assert.Zero(t, uploads)
+				assert.Equal(t, "LoadImage", workflow["100"].Class)
+				assert.Equal(t, "https://example.com/reference.png", workflow["100"].Inputs["image"])
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name      string
+		body      map[string]any
+		operation string
+	}{
+		{"edit without image", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a teapot"}}, "edit"},
+		{"too many URLs", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a teapot", "images": []string{"https://a.example/1.png", "https://a.example/2.png", "https://a.example/3.png", "https://a.example/4.png"}}}, "edit"},
+		{"invalid URL", map[string]any{"kind": "json", "value": map[string]any{"prompt": "a teapot", "image": "file:///secret.png"}}, "edit"},
+		{"unsupported mask", map[string]any{"kind": "multipart", "fields": map[string]any{"prompt": []string{"a teapot"}}, "files": []any{map[string]any{"field": "mask", "filename": "mask.png", "mimeType": "image/png"}}}, "edit"},
+		{"video reference", map[string]any{"kind": "multipart", "fields": map[string]any{"prompt": []string{"a teapot"}}, "files": []any{map[string]any{"field": "image", "filename": "clip.mp4", "mimeType": "video/mp4"}}}, "edit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := plugin.Engine.CallPath(t.Context(), "protocols", []string{"openai_image", "decodeRequest"}, map[string]any{"model": "krea2-normal-v1", "operation": tc.operation, "body": tc.body})
+			require.Error(t, err)
+		})
+	}
+}
